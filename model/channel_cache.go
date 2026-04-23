@@ -93,6 +93,34 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
+func ListSatisfiedChannels(group string, model string) ([]*Channel, error) {
+	if !common.MemoryCacheEnabled {
+		return listSatisfiedChannelsDB(group, model)
+	}
+
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+
+	channels := group2model2channels[group][model]
+	if len(channels) == 0 {
+		normalizedModel := ratio_setting.FormatMatchingModelName(model)
+		channels = group2model2channels[group][normalizedModel]
+	}
+	if len(channels) == 0 {
+		return nil, nil
+	}
+
+	result := make([]*Channel, 0, len(channels))
+	for _, channelID := range channels {
+		channel, ok := channelsIDM[channelID]
+		if !ok {
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelID)
+		}
+		result = append(result, channel)
+	}
+	return result, nil
+}
+
 func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
@@ -188,6 +216,60 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 	}
 	// return null if no channel is not found
 	return nil, errors.New("channel not found")
+}
+
+func listSatisfiedChannelsDB(group string, model string) ([]*Channel, error) {
+	channelIDs, err := listSatisfiedChannelIDsDB(group, model)
+	if err != nil {
+		return nil, err
+	}
+	if len(channelIDs) > 0 {
+		return loadChannelsByOrderedIDs(channelIDs)
+	}
+
+	normalizedModel := ratio_setting.FormatMatchingModelName(model)
+	if normalizedModel == "" || normalizedModel == model {
+		return nil, nil
+	}
+	channelIDs, err = listSatisfiedChannelIDsDB(group, normalizedModel)
+	if err != nil {
+		return nil, err
+	}
+	return loadChannelsByOrderedIDs(channelIDs)
+}
+
+func listSatisfiedChannelIDsDB(group string, model string) ([]int, error) {
+	var channelIDs []int
+	err := DB.Model(&Ability{}).
+		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
+		Order("priority DESC, weight DESC, channel_id ASC").
+		Pluck("channel_id", &channelIDs).Error
+	return channelIDs, err
+}
+
+func loadChannelsByOrderedIDs(channelIDs []int) ([]*Channel, error) {
+	if len(channelIDs) == 0 {
+		return nil, nil
+	}
+
+	var channels []*Channel
+	if err := DB.Where("id IN ?", channelIDs).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	channelByID := make(map[int]*Channel, len(channels))
+	for _, channel := range channels {
+		channelByID[channel.Id] = channel
+	}
+
+	ordered := make([]*Channel, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		channel, ok := channelByID[channelID]
+		if !ok {
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelID)
+		}
+		ordered = append(ordered, channel)
+	}
+	return ordered, nil
 }
 
 func CacheGetChannel(id int) (*Channel, error) {

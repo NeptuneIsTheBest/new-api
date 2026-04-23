@@ -178,20 +178,31 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:        c,
-		TokenGroup: relayInfo.TokenGroup,
-		ModelName:  relayInfo.OriginModelName,
-		Retry:      common.GetPointer(0),
+		Ctx:            c,
+		TokenGroup:     relayInfo.TokenGroup,
+		ModelName:      relayInfo.OriginModelName,
+		PreferredGroup: relayInfo.UsingGroup,
+		Retry:          common.GetPointer(0),
 	}
+	codexChannelType := constant.ChannelTypeCodex
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for shouldContinueRelayAttempts(retryParam) {
 		relayInfo.RetryIndex = retryParam.GetRetry()
+		common.SetContextKey(c, constant.ContextKeyCodexUpstream429, false)
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
+			break
+		}
+		if channel == nil {
+			if retryParam.ShouldExhaustChannels() && relayInfo.LastError != nil {
+				newAPIError = relayInfo.LastError
+			} else {
+				newAPIError = types.NewError(fmt.Errorf("未获取到可用渠道"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
 			break
 		}
 
@@ -229,9 +240,20 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		allowIgnoreRetryLimit := retryParam.ShouldExhaustChannels() || isCodex429FailoverTrigger(c, channel.Type)
+		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry(), allowIgnoreRetryLimit) {
 			break
 		}
+
+		if isCodex429FailoverTrigger(c, channel.Type) {
+			retryParam.ExhaustChannels = true
+			retryParam.OnlyChannelType = &codexChannelType
+		}
+		if retryParam.ShouldExhaustChannels() {
+			retryParam.PreferredGroup = relayInfo.UsingGroup
+			retryParam.AddExcludeChannelID(channel.Id)
+		}
+		retryParam.IncreaseRetry()
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -252,6 +274,23 @@ func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
 	useChannel = append(useChannel, fmt.Sprintf("%d", channelId))
 	c.Set("use_channel", useChannel)
+}
+
+func shouldContinueRelayAttempts(retryParam *service.RetryParam) bool {
+	if retryParam == nil {
+		return false
+	}
+	if retryParam.ShouldExhaustChannels() {
+		return true
+	}
+	return retryParam.GetRetry() <= common.RetryTimes
+}
+
+func isCodex429FailoverTrigger(c *gin.Context, channelType int) bool {
+	if c == nil || channelType != constant.ChannelTypeCodex {
+		return false
+	}
+	return common.GetContextKeyBool(c, constant.ContextKeyCodexUpstream429)
 }
 
 func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
@@ -305,6 +344,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
+		if retryParam.ShouldExhaustChannels() {
+			return nil, nil
+		}
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
@@ -315,7 +357,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	return channel, nil
 }
 
-func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
+func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int, allowIgnoreRetryLimit bool) bool {
 	if openaiErr == nil {
 		return false
 	}
@@ -328,7 +370,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if types.IsSkipRetryError(openaiErr) {
 		return false
 	}
-	if retryTimes <= 0 {
+	if retryTimes <= 0 && !allowIgnoreRetryLimit {
 		return false
 	}
 	if _, ok := c.Get("specific_channel_id"); ok {
