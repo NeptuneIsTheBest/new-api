@@ -12,11 +12,15 @@ import (
 )
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	Retry        *int
-	resetNextTry bool
+	Ctx               *gin.Context
+	TokenGroup        string
+	ModelName         string
+	Retry             *int
+	PreferredGroup    string
+	OnlyChannelType   *int
+	ExcludeChannelIDs map[int]struct{}
+	ExhaustChannels   bool
+	resetNextTry      bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -43,6 +47,20 @@ func (p *RetryParam) IncreaseRetry() {
 
 func (p *RetryParam) ResetRetryNextTry() {
 	p.resetNextTry = true
+}
+
+func (p *RetryParam) AddExcludeChannelID(channelID int) {
+	if p == nil || channelID <= 0 {
+		return
+	}
+	if p.ExcludeChannelIDs == nil {
+		p.ExcludeChannelIDs = make(map[int]struct{})
+	}
+	p.ExcludeChannelIDs[channelID] = struct{}{}
+}
+
+func (p *RetryParam) ShouldExhaustChannels() bool {
+	return p != nil && p.ExhaustChannels
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
@@ -81,6 +99,10 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+	if param.ShouldExhaustChannels() {
+		return cacheGetExhaustiveSatisfiedChannel(param)
+	}
+
 	var channel *model.Channel
 	var err error
 	selectGroup := param.TokenGroup
@@ -159,4 +181,142 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		}
 	}
 	return channel, selectGroup, nil
+}
+
+func cacheGetExhaustiveSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+	selectGroup := param.TokenGroup
+	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
+
+	if param.TokenGroup != "auto" {
+		channel, err := nextFilteredChannelForGroup(param.TokenGroup, param)
+		return channel, param.TokenGroup, err
+	}
+
+	if len(setting.GetAutoGroups()) == 0 {
+		return nil, selectGroup, errors.New("auto groups is not enabled")
+	}
+	autoGroups := GetUserAutoGroup(userGroup)
+	if len(autoGroups) == 0 {
+		return nil, selectGroup, nil
+	}
+
+	startGroupIndex := findAutoGroupStartIndex(autoGroups, param)
+	crossGroupRetry := common.GetContextKeyBool(param.Ctx, constant.ContextKeyTokenCrossGroupRetry)
+	endGroupIndex := startGroupIndex + 1
+	if crossGroupRetry {
+		endGroupIndex = len(autoGroups)
+	}
+
+	for i := startGroupIndex; i < endGroupIndex; i++ {
+		autoGroup := autoGroups[i]
+		channel, err := nextFilteredChannelForGroup(autoGroup, param)
+		if err != nil {
+			return nil, autoGroup, err
+		}
+		if channel == nil {
+			continue
+		}
+		common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
+		common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
+		return channel, autoGroup, nil
+	}
+
+	return nil, selectGroup, nil
+}
+
+func findAutoGroupStartIndex(autoGroups []string, param *RetryParam) int {
+	if len(autoGroups) == 0 {
+		return 0
+	}
+
+	if param != nil && param.PreferredGroup != "" {
+		for i, group := range autoGroups {
+			if group == param.PreferredGroup {
+				return i
+			}
+		}
+	}
+
+	currentGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyAutoGroup)
+	for i, group := range autoGroups {
+		if group == currentGroup {
+			return i
+		}
+	}
+
+	if lastGroupIndex, exists := common.GetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex); exists {
+		if idx, ok := lastGroupIndex.(int); ok && idx >= 0 && idx < len(autoGroups) {
+			return idx
+		}
+	}
+	return 0
+}
+
+func nextFilteredChannelForGroup(group string, param *RetryParam) (*model.Channel, error) {
+	candidates, err := model.ListSatisfiedChannels(group, param.ModelName)
+	if err != nil {
+		return nil, err
+	}
+	filtered := filterChannelsForRetry(candidates, param)
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	return pickWeightedChannelFromHighestPriority(filtered), nil
+}
+
+func filterChannelsForRetry(channels []*model.Channel, param *RetryParam) []*model.Channel {
+	if len(channels) == 0 {
+		return nil
+	}
+	filtered := make([]*model.Channel, 0, len(channels))
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		if param.OnlyChannelType != nil && channel.Type != *param.OnlyChannelType {
+			continue
+		}
+		if _, excluded := param.ExcludeChannelIDs[channel.Id]; excluded {
+			continue
+		}
+		filtered = append(filtered, channel)
+	}
+	return filtered
+}
+
+func pickWeightedChannelFromHighestPriority(channels []*model.Channel) *model.Channel {
+	if len(channels) == 0 {
+		return nil
+	}
+	highestPriority := channels[0].GetPriority()
+	samePriority := make([]*model.Channel, 0, len(channels))
+	sumWeight := 0
+	for _, channel := range channels {
+		if channel.GetPriority() != highestPriority {
+			break
+		}
+		samePriority = append(samePriority, channel)
+		sumWeight += channel.GetWeight()
+	}
+	if len(samePriority) == 1 {
+		return samePriority[0]
+	}
+
+	smoothingFactor := 1
+	smoothingAdjustment := 0
+	if sumWeight == 0 {
+		sumWeight = len(samePriority) * 100
+		smoothingAdjustment = 100
+	} else if sumWeight/len(samePriority) < 10 {
+		smoothingFactor = 100
+	}
+
+	randomWeight := common.GetRandomInt(sumWeight * smoothingFactor)
+	for _, channel := range samePriority {
+		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
+		if randomWeight < 0 {
+			return channel
+		}
+	}
+	return samePriority[len(samePriority)-1]
 }

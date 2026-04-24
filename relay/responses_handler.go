@@ -120,6 +120,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		httpResp = resp.(*http.Response)
 
 		if httpResp.StatusCode != http.StatusOK {
+			if info.ApiType == appconstant.APITypeCodex && httpResp.StatusCode == http.StatusTooManyRequests {
+				common.SetContextKey(c, appconstant.ContextKeyCodexUpstream429, true)
+			}
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)

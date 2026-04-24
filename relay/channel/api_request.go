@@ -495,8 +495,17 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		client = service.GetHttpClient()
 	}
 
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.LogError(c, "do request failed: "+err.Error())
+		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+	}
+	if resp == nil {
+		return nil, errors.New("resp is nil")
+	}
+
 	var stopPinger context.CancelFunc
-	if info.IsStream {
+	if info.IsStream && resp.StatusCode == http.StatusOK {
 		helper.SetEventStreamHeaders(c)
 		// 处理流式请求的 ping 保活
 		generalSettings := operation_setting.GetGeneralSetting()
@@ -513,15 +522,6 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 				}
 			}()
 		}
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		logger.LogError(c, "do request failed: "+err.Error())
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
-	}
-	if resp == nil {
-		return nil, errors.New("resp is nil")
 	}
 
 	_ = req.Body.Close()
