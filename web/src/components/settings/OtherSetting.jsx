@@ -37,6 +37,34 @@ import Text from '@douyinfe/semi-ui/lib/es/typography/text';
 const LEGAL_USER_AGREEMENT_KEY = 'legal.user_agreement';
 const LEGAL_PRIVACY_POLICY_KEY = 'legal.privacy_policy';
 
+const normalizeVersionForUpstreamCompare = (version) => {
+  return String(version || '')
+    .trim()
+    .replace(/^v/i, '')
+    .replace(/-fork(?:\..*)?$/i, '');
+};
+
+const compareReleaseVersions = (currentVersion, latestVersion) => {
+  const currentParts = normalizeVersionForUpstreamCompare(currentVersion)
+    .split('.')
+    .map((part) => Number.parseInt(part, 10));
+  const latestParts = normalizeVersionForUpstreamCompare(latestVersion)
+    .split('.')
+    .map((part) => Number.parseInt(part, 10));
+
+  for (let i = 0; i < Math.max(currentParts.length, latestParts.length); i++) {
+    const currentPart = Number.isNaN(currentParts[i]) ? 0 : currentParts[i] || 0;
+    const latestPart = Number.isNaN(latestParts[i]) ? 0 : latestParts[i] || 0;
+    if (currentPart > latestPart) return 1;
+    if (currentPart < latestPart) return -1;
+  }
+  return 0;
+};
+
+const isUpToDateWithUpstream = (currentVersion, latestVersion) => {
+  return compareReleaseVersions(currentVersion, latestVersion) >= 0;
+};
+
 const OtherSetting = () => {
   const { t } = useTranslation();
   let [inputs, setInputs] = useState({
@@ -259,8 +287,9 @@ const OtherSetting = () => {
       // const res = await API.get('/api/status/github-latest-release');
 
       const { tag_name, body } = res;
-      if (tag_name === statusState?.status?.version) {
-        showSuccess(`已是最新版本：${tag_name}`);
+      const currentVersion = statusState?.status?.version;
+      if (isUpToDateWithUpstream(currentVersion, tag_name)) {
+        showSuccess(`已是最新版本：${currentVersion || tag_name}`);
       } else {
         setUpdateData({
           tag_name: tag_name,
