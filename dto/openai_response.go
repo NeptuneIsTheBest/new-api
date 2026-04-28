@@ -1,7 +1,6 @@
 package dto
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -351,21 +350,17 @@ type ResponsesOutput struct {
 	Arguments json.RawMessage          `json:"arguments,omitempty"`
 }
 
-func (o *ResponsesOutput) ArgumentsString() string {
-	if o == nil || len(o.Arguments) == 0 {
+// ArgumentsString returns function call arguments in the string form expected by Chat Completions.
+func (r *ResponsesOutput) ArgumentsString() string {
+	if r == nil {
 		return ""
 	}
-	trimmed := bytes.TrimSpace(o.Arguments)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return ""
-	}
-	if trimmed[0] == '"' {
-		var args string
-		if err := common.Unmarshal(trimmed, &args); err == nil {
-			return args
-		}
-	}
-	return string(trimmed)
+	return ResponsesArgumentsString(r.Arguments)
+}
+
+// ResponsesArgumentsString returns function call arguments in the string form expected by Chat Completions.
+func ResponsesArgumentsString(arguments json.RawMessage) string {
+	return common.JsonRawMessageToString(arguments)
 }
 
 type ResponsesOutputContent struct {
