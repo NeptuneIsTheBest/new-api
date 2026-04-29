@@ -180,8 +180,10 @@ const formatAccountTypeLabel = (value, t) => {
       return 'Free';
     case 'plus':
       return 'Plus';
+    case 'prolite':
+      return 'Pro 5x';
     case 'pro':
-      return 'Pro';
+      return 'Pro 20x';
     case 'team':
       return 'Team';
     case 'enterprise':
@@ -198,6 +200,7 @@ const getAccountTypeTagColor = (value) => {
       return 'green';
     case 'team':
       return 'cyan';
+    case 'prolite':
     case 'pro':
       return 'blue';
     case 'plus':
