@@ -10,9 +10,34 @@ on:
         description: "reason"
         required: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  prepare:
+    name: Prepare nightly version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out (shallow)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Determine nightly version
+        id: version
+        run: |
+          VERSION="nightly-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
   build_single_arch:
     name: Build & push (${{ matrix.arch }}) [native]
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -30,70 +55,58 @@ jobs:
 
     steps:
       - name: Check out (shallow)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Determine nightly version
-        id: version
+      - name: Write VERSION
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          VERSION="nightly-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
           echo "$VERSION" > VERSION
-          echo "value=$VERSION" >> $GITHUB_OUTPUT
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Publishing version: $VERSION for ${{ matrix.arch }}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata (labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             calciumion/new-api
 
       - name: Build & push single-arch
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
             calciumion/new-api:nightly-${{ matrix.arch }}
-            calciumion/new-api:${{ steps.version.outputs.value }}-${{ matrix.arch }}
+            calciumion/new-api:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=new-api-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=new-api-${{ matrix.arch }}
           provenance: false
           sbom: false
 
   create_manifests:
     name: Create multi-arch manifests (Docker Hub)
-    needs: [build_single_arch]
+    needs: [prepare, build_single_arch]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
 
     steps:
-      - name: Check out (shallow)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Determine nightly version
-        id: version
-        run: |
-          VERSION="nightly-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
-          echo "value=$VERSION" >> $GITHUB_OUTPUT
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
