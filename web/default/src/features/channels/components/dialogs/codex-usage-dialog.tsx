@@ -174,7 +174,8 @@ const PLAN_TYPE_BADGE: Record<
 > = {
   enterprise: { label: 'Enterprise', variant: 'success' },
   team: { label: 'Team', variant: 'info' },
-  pro: { label: 'Pro', variant: 'blue' },
+  prolite: { label: 'Pro 5x', variant: 'blue' },
+  pro: { label: 'Pro 20x', variant: 'blue' },
   plus: { label: 'Plus', variant: 'purple' },
   free: { label: 'Free', variant: 'warning' },
 }
