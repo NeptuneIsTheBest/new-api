@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -41,6 +44,66 @@ func maybeMarkClaudeRefusal(c *gin.Context, stopReason string) {
 	}
 	if strings.EqualFold(stopReason, "refusal") {
 		common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "claude_stop_reason=refusal")
+	}
+}
+
+func normalizeMediaType(mediaType string) string {
+	mediaType = strings.TrimSpace(mediaType)
+	if idx := strings.Index(mediaType, ";"); idx >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:idx])
+	}
+	return strings.ToLower(mediaType)
+}
+
+func messageFileMediaType(file *dto.MessageFile) string {
+	if file == nil || file.FileName == "" {
+		return ""
+	}
+	return normalizeMediaType(mime.TypeByExtension(strings.ToLower(filepath.Ext(file.FileName))))
+}
+
+func openAIFileContentToClaudeMessages(c *gin.Context, mediaMessage dto.MediaContent) ([]dto.ClaudeMediaMessage, error) {
+	file := mediaMessage.GetFile()
+	if file == nil || file.FileData == "" {
+		return nil, nil
+	}
+	source := mediaMessage.ToFileSource()
+	if source == nil {
+		return nil, nil
+	}
+	base64Data, detectedMediaType, err := service.GetBase64Data(c, source, "formatting file for Claude")
+	if err != nil {
+		return nil, fmt.Errorf("get file data failed: %s", err.Error())
+	}
+	mediaType := messageFileMediaType(file)
+	if mediaType == "" {
+		mediaType = normalizeMediaType(detectedMediaType)
+	}
+	switch {
+	case mediaType == "application/pdf":
+		return []dto.ClaudeMediaMessage{
+			{
+				Type: "document",
+				Source: &dto.ClaudeMessageSource{
+					Type:      "base64",
+					MediaType: mediaType,
+					Data:      base64Data,
+				},
+			},
+		}, nil
+	case strings.HasPrefix(mediaType, "text/"):
+		decodedData, err := base64.StdEncoding.DecodeString(base64Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode text file data failed: %w", err)
+		}
+		return []dto.ClaudeMediaMessage{
+			{
+				Type: "text",
+				Text: common.GetPointer(string(decodedData)),
+			},
+		}, nil
+	default:
+		return nil, nil
 	}
 }
 
@@ -369,13 +432,19 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 				claudeMediaMessages := make([]dto.ClaudeMediaMessage, 0)
 				for _, mediaMessage := range message.ParseContent() {
 					switch mediaMessage.Type {
-					case "text":
+					case dto.ContentTypeText:
 						if mediaMessage.Text != "" {
 							claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
 								Type: "text",
 								Text: common.GetPointer[string](mediaMessage.Text),
 							})
 						}
+					case dto.ContentTypeFile:
+						fileMessages, err := openAIFileContentToClaudeMessages(c, mediaMessage)
+						if err != nil {
+							return nil, err
+						}
+						claudeMediaMessages = append(claudeMediaMessages, fileMessages...)
 					default:
 						source := mediaMessage.ToFileSource()
 						if source == nil {
@@ -406,7 +475,7 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 				if message.ToolCalls != nil {
 					for _, toolCall := range message.ParseToolCalls() {
 						inputObj := make(map[string]any)
-						if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &inputObj); err != nil {
+						if err := common.Unmarshal([]byte(toolCall.Function.Arguments), &inputObj); err != nil {
 							common.SysLog("tool call function arguments is not a map[string]any: " + fmt.Sprintf("%v", toolCall.Function.Arguments))
 							continue
 						}
@@ -540,7 +609,7 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 	for _, message := range claudeResponse.Content {
 		switch message.Type {
 		case "tool_use":
-			args, _ := json.Marshal(message.Input)
+			args, _ := common.Marshal(message.Input)
 			tools = append(tools, dto.ToolCallResponse{
 				ID:   message.Id,
 				Type: "function", // compatible with other OpenAI derivative applications
@@ -919,7 +988,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	case types.RelayFormatOpenAI:
 		openaiResponse := ResponseClaude2OpenAI(&claudeResponse)
 		openaiResponse.Usage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
-		responseData, err = json.Marshal(openaiResponse)
+		responseData, err = common.Marshal(openaiResponse)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
