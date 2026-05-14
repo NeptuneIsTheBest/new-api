@@ -504,6 +504,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		return nil, errors.New("resp is nil")
 	}
 
+	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
+		c.Set(common2.UpstreamRequestIdKey, upID)
+	}
+
 	var stopPinger context.CancelFunc
 	if info.IsStream && resp.StatusCode == http.StatusOK {
 		helper.SetEventStreamHeaders(c)
