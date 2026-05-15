@@ -89,6 +89,8 @@ export const useLogsData = () => {
   const [stat, setStat] = useState({
     quota: 0,
     token: 0,
+    rpm: 0,
+    tpm: 0,
   });
 
   // Form state
