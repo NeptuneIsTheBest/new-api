@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 import React from 'react';
 import { Tag, Space, Skeleton } from '@douyinfe/semi-ui';
-import { renderNumber, renderQuota } from '../../../helpers';
+import { renderQuota } from '../../../helpers';
 import CompactModeToggle from '../../common/ui/CompactModeToggle';
 import { useMinimumLoadingTime } from '../../../hooks/common/useMinimumLoadingTime';
 
@@ -33,6 +33,7 @@ const LogsActions = ({
 }) => {
   const showSkeleton = useMinimumLoadingTime(loadingStat);
   const needSkeleton = !showStat || showSkeleton;
+  const totalTokens = Number(stat.token) || 0;
 
   const placeholder = (
     <Space>
@@ -67,7 +68,7 @@ const LogsActions = ({
             }}
             className='!rounded-lg'
           >
-            {t('总计')} Tokens: {renderNumber(stat.token || 0)}
+            {t('总计')} Tokens: {totalTokens.toLocaleString()}
           </Tag>
           <Tag
             color='pink'
