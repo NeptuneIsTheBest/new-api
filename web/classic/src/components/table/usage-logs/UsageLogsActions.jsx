@@ -23,6 +23,18 @@ import { renderQuota } from '../../../helpers';
 import CompactModeToggle from '../../common/ui/CompactModeToggle';
 import { useMinimumLoadingTime } from '../../../hooks/common/useMinimumLoadingTime';
 
+function formatCacheHitRate(value) {
+  const rate = Number(value);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    return '0.00%';
+  }
+  const percentage = rate * 100;
+  if (percentage < 0.01) {
+    return '<0.01%';
+  }
+  return `${percentage.toFixed(2)}%`;
+}
+
 const LogsActions = ({
   stat,
   loadingStat,
@@ -34,6 +46,7 @@ const LogsActions = ({
   const showSkeleton = useMinimumLoadingTime(loadingStat);
   const needSkeleton = !showStat || showSkeleton;
   const totalTokens = Number(stat.token) || 0;
+  const formattedCacheHitRate = formatCacheHitRate(stat.cache_hit_rate);
 
   const placeholder = (
     <Space>
@@ -41,6 +54,7 @@ const LogsActions = ({
       <Skeleton.Title style={{ width: 96, height: 21, borderRadius: 6 }} />
       <Skeleton.Title style={{ width: 65, height: 21, borderRadius: 6 }} />
       <Skeleton.Title style={{ width: 64, height: 21, borderRadius: 6 }} />
+      <Skeleton.Title style={{ width: 96, height: 21, borderRadius: 6 }} />
     </Space>
   );
 
@@ -92,6 +106,17 @@ const LogsActions = ({
             className='!rounded-lg'
           >
             TPM: {stat.tpm}
+          </Tag>
+          <Tag
+            color='orange'
+            style={{
+              fontWeight: 500,
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+              padding: 13,
+            }}
+            className='!rounded-lg'
+          >
+            {t('缓存命中率')}: {formattedCacheHitRate}
           </Tag>
         </Space>
       </Skeleton>

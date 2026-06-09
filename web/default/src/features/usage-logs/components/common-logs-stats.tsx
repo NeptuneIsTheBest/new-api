@@ -46,6 +46,12 @@ function StatBadge(props: {
   )
 }
 
+function formatRate(value: number | undefined): string {
+  const rate = Number(value)
+  if (!Number.isFinite(rate) || rate <= 0) return '0.00%'
+  return `${(rate * 100).toFixed(2)}%`
+}
+
 export function CommonLogsStats() {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
@@ -81,6 +87,7 @@ export function CommonLogsStats() {
         <Skeleton className='h-7 w-[135px] rounded-md' />
         <Skeleton className='h-7 w-[100px] rounded-md' />
         <Skeleton className='h-7 w-[120px] rounded-md' />
+        <Skeleton className='h-7 w-[110px] rounded-md' />
       </div>
     )
   }
@@ -106,6 +113,11 @@ export function CommonLogsStats() {
         label={t('TPM')}
         value={stats?.tpm || 0}
         accent='bg-slate-400/70'
+      />
+      <StatBadge
+        label={t('Cache Hit Rate')}
+        value={formatRate(stats?.cache_hit_rate)}
+        accent='bg-amber-500/70'
       />
     </div>
   )

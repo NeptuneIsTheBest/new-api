@@ -1041,6 +1041,7 @@
     "周": "semaine",
     "命中判定：usage 中存在 cached tokens（例如 cached_tokens/prompt_cache_hit_tokens）即视为命中。": "Détermination de hit : La présence de cached tokens dans usage (ex. cached_tokens/prompt_cache_hit_tokens) est considérée comme un hit.",
     "命中率": "Taux de hits",
+    "缓存命中率": "Taux de succès du cache",
     "命中该亲和规则后，会把此模板合并到渠道参数覆盖中（同名键由模板覆盖）。": "Lorsque cette règle d'affinité est déclenchée, le modèle est fusionné dans les remplacements de paramètres du canal (les clés homonymes sont remplacées par le modèle).",
     "和": "et",
     "和Claude不同，默认情况下Gemini的思考模型会自动决定要不要思考，就算不开启适配模型也可以正常使用，如果您需要计费，推荐设置无后缀模型价格按思考价格设置。支持使用 gemini-2.5-pro-preview-06-05-thinking-128 格式来精确传递思考预算。": "Contrairement à Claude, les modèles de réflexion Gemini décident automatiquement s'ils doivent réfléchir. Ils fonctionnent normalement même sans l'adaptateur activé. Si vous avez besoin de facturation, définissez le prix des modèles sans suffixe au prix de réflexion. Utilisez un format comme gemini-2.5-pro-preview-06-05-thinking-128 pour spécifier le budget de réflexion exact.",

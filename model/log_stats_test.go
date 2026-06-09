@@ -29,6 +29,7 @@ func TestSumUsedQuotaIncludesTokenTotal(t *testing.T) {
 		CompletionTokens: 60,
 		ChannelId:        1,
 		Group:            "default",
+		Other:            `{"cache_tokens":10}`,
 	}
 	insertLogForStatsTest(t, matching)
 
@@ -37,6 +38,7 @@ func TestSumUsedQuotaIncludesTokenTotal(t *testing.T) {
 	matching.Quota = 50
 	matching.PromptTokens = 10
 	matching.CompletionTokens = 20
+	matching.Other = `{"cache_tokens":5,"usage_semantic":"anthropic"}`
 	insertLogForStatsTest(t, matching)
 
 	ignoredError := matching
@@ -70,6 +72,9 @@ func TestSumUsedQuotaIncludesTokenTotal(t *testing.T) {
 	require.Equal(t, 130, stat.Token)
 	require.Equal(t, 2, stat.Rpm)
 	require.Equal(t, 130, stat.Tpm)
+	require.Equal(t, 15, stat.CacheTokens)
+	require.Equal(t, 55, stat.CacheInputTokens)
+	require.InDelta(t, 15.0/55.0, stat.CacheHitRate, 0.000001)
 }
 
 func TestSumUsedQuotaEmptyResultReturnsZeroToken(t *testing.T) {
@@ -91,4 +96,55 @@ func TestSumUsedQuotaEmptyResultReturnsZeroToken(t *testing.T) {
 	require.Equal(t, 0, stat.Token)
 	require.Equal(t, 0, stat.Rpm)
 	require.Equal(t, 0, stat.Tpm)
+	require.Equal(t, 0, stat.CacheTokens)
+	require.Equal(t, 0, stat.CacheInputTokens)
+	require.Equal(t, 0.0, stat.CacheHitRate)
+}
+
+func TestSumUsedQuotaCacheHitStatsHandlesInvalidOtherAndFallback(t *testing.T) {
+	truncateTables(t)
+	initCol()
+
+	now := time.Now().Unix()
+	insertLogForStatsTest(t, Log{
+		UserId:           1,
+		Username:         "alice",
+		CreatedAt:        now - 10,
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-4o",
+		TokenName:        "primary",
+		PromptTokens:     20,
+		CompletionTokens: 5,
+		ChannelId:        1,
+		Group:            "default",
+		Other:            `{bad json`,
+	})
+	insertLogForStatsTest(t, Log{
+		UserId:           1,
+		Username:         "alice",
+		CreatedAt:        now - 5,
+		Type:             LogTypeConsume,
+		ModelName:        "gpt-4o",
+		TokenName:        "primary",
+		PromptTokens:     0,
+		CompletionTokens: 5,
+		ChannelId:        1,
+		Group:            "default",
+		Other:            `{"cache_tokens":12}`,
+	})
+
+	stat, err := SumUsedQuota(
+		LogTypeUnknown,
+		now-60,
+		now+60,
+		"gpt-4o",
+		"alice",
+		"primary",
+		1,
+		"default",
+	)
+	require.NoError(t, err)
+	require.Equal(t, 12, stat.CacheTokens)
+	require.Equal(t, 32, stat.CacheInputTokens)
+	require.InDelta(t, 12.0/32.0, stat.CacheHitRate, 0.000001)
 }

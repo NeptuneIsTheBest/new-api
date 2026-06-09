@@ -199,6 +199,9 @@ export interface LogStatistics {
   token: number
   rpm: number
   tpm: number
+  cache_tokens: number
+  cache_input_tokens: number
+  cache_hit_rate: number
 }
 
 // ============================================================================

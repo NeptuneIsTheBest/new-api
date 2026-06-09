@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -449,10 +450,13 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Token int `json:"token"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota            int     `json:"quota"`
+	Token            int     `json:"token"`
+	Rpm              int     `json:"rpm"`
+	Tpm              int     `json:"tpm"`
+	CacheTokens      int     `json:"cache_tokens"`
+	CacheInputTokens int     `json:"cache_input_tokens"`
+	CacheHitRate     float64 `json:"cache_hit_rate"`
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
@@ -460,6 +464,7 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 
 	// 为rpm和tpm创建单独的查询
 	rpmTpmQuery := LOG_DB.Table("logs").Select("COUNT(*) AS rpm, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) AS tpm")
+	cacheQuery := LOG_DB.Table("logs")
 
 	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
 		return stat, err
@@ -467,15 +472,21 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
 		return stat, err
 	}
+	if cacheQuery, err = applyExplicitLogTextFilter(cacheQuery, "username", username); err != nil {
+		return stat, err
+	}
 	if tokenName != "" {
 		tx = tx.Where("token_name = ?", tokenName)
 		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
+		cacheQuery = cacheQuery.Where("token_name = ?", tokenName)
 	}
 	if startTimestamp != 0 {
 		tx = tx.Where("created_at >= ?", startTimestamp)
+		cacheQuery = cacheQuery.Where("created_at >= ?", startTimestamp)
 	}
 	if endTimestamp != 0 {
 		tx = tx.Where("created_at <= ?", endTimestamp)
+		cacheQuery = cacheQuery.Where("created_at <= ?", endTimestamp)
 	}
 	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
 		return stat, err
@@ -483,17 +494,23 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "model_name", modelName); err != nil {
 		return stat, err
 	}
+	if cacheQuery, err = applyExplicitLogTextFilter(cacheQuery, "model_name", modelName); err != nil {
+		return stat, err
+	}
 	if channel != 0 {
 		tx = tx.Where("channel_id = ?", channel)
 		rpmTpmQuery = rpmTpmQuery.Where("channel_id = ?", channel)
+		cacheQuery = cacheQuery.Where("channel_id = ?", channel)
 	}
 	if group != "" {
 		tx = tx.Where(logGroupCol+" = ?", group)
 		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
+		cacheQuery = cacheQuery.Where(logGroupCol+" = ?", group)
 	}
 
 	tx = tx.Where("type = ?", LogTypeConsume)
 	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
+	cacheQuery = cacheQuery.Where("type = ?", LogTypeConsume)
 
 	// 只统计最近60秒的rpm和tpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
@@ -507,8 +524,86 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		common.SysError("failed to query rpm/tpm stat: " + err.Error())
 		return stat, errors.New("查询统计数据失败")
 	}
+	if err := fillCacheHitStat(cacheQuery, &stat); err != nil {
+		common.SysError("failed to query cache hit stat: " + err.Error())
+		return stat, errors.New("查询统计数据失败")
+	}
 
 	return stat, nil
+}
+
+func fillCacheHitStat(tx *gorm.DB, stat *Stat) error {
+	rows, err := tx.Select("prompt_tokens, other").Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var promptTokens int
+		var otherStr string
+		if err := rows.Scan(&promptTokens, &otherStr); err != nil {
+			return err
+		}
+
+		inputTokens := promptTokens
+		other, err := common.StrToMap(otherStr)
+		if err == nil && other != nil {
+			cacheTokens := positiveLogNumber(other["cache_tokens"])
+			stat.CacheTokens += cacheTokens
+			if cacheTokens > 0 && other["usage_semantic"] == "anthropic" {
+				inputTokens += cacheTokens
+			}
+			if inputTokens < cacheTokens {
+				inputTokens = cacheTokens
+			}
+		}
+
+		if inputTokens > 0 {
+			stat.CacheInputTokens += inputTokens
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if stat.CacheInputTokens > 0 {
+		stat.CacheHitRate = float64(stat.CacheTokens) / float64(stat.CacheInputTokens)
+	}
+	return nil
+}
+
+func positiveLogNumber(value any) int {
+	var n float64
+	switch v := value.(type) {
+	case float64:
+		n = v
+	case float32:
+		n = float64(v)
+	case int:
+		n = float64(v)
+	case int64:
+		n = float64(v)
+	case int32:
+		n = float64(v)
+	case uint:
+		n = float64(v)
+	case uint64:
+		n = float64(v)
+	case uint32:
+		n = float64(v)
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0
+		}
+		n = parsed
+	default:
+		return 0
+	}
+	if n <= 0 {
+		return 0
+	}
+	return int(n)
 }
 
 func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string) (token int) {

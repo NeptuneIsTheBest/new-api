@@ -91,6 +91,9 @@ export const useLogsData = () => {
     token: 0,
     rpm: 0,
     tpm: 0,
+    cache_tokens: 0,
+    cache_input_tokens: 0,
+    cache_hit_rate: 0,
   });
 
   // Form state

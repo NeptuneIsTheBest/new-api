@@ -1029,6 +1029,7 @@
     "周": "tuần",
     "命中判定：usage 中存在 cached tokens（例如 cached_tokens/prompt_cache_hit_tokens）即视为命中。": "Xác định trúng: Sự tồn tại của cached tokens trong usage (VD: cached_tokens/prompt_cache_hit_tokens) được coi là trúng.",
     "命中率": "Tỷ lệ trúng",
+    "缓存命中率": "Tỷ lệ trúng cache",
     "命中该亲和规则后，会把此模板合并到渠道参数覆盖中（同名键由模板覆盖）。": "Khi quy tắc ưu ái này trúng, mẫu sẽ được hợp nhất vào ghi đè tham số kênh (key cùng tên bị mẫu ghi đè).",
     "和": "và",
     "和Claude不同，默认情况下Gemini的思考模型会自动决定要不要思考，就算不开启适配模型也可以正常使用，如果您需要计费，推荐设置无后缀模型价格按思考价格设置。支持使用 gemini-2.5-pro-preview-06-05-thinking-128 格式来精确传递思考预算。": "Không giống Claude, mô hình tư duy Gemini tự động quyết định có suy nghĩ hay không. Chúng hoạt động bình thường ngay cả khi không bật adapter. Nếu cần tính phí, hãy đặt giá của mô hình không có hậu tố theo giá tư duy. Sử dụng định dạng như gemini-2.5-pro-preview-06-05-thinking-128 để chỉ định ngân sách tư duy chính xác.",
