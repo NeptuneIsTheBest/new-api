@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('web/default/bun.lock', 'web/classic/bun.lock') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -66,8 +66,9 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=4096"
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          cd web/default
+          cd web
           bun install --frozen-lockfile
+          cd default
           DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$VERSION bun run build
 
       - name: Build Frontend (classic)
@@ -76,8 +77,9 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=4096"
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          cd web/classic
+          cd web
           bun install --frozen-lockfile
+          cd classic
           VITE_REACT_APP_VERSION=$VERSION bun run build
 
       - name: Upload Frontend Artifact
