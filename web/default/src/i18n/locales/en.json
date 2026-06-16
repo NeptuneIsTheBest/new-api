@@ -4600,6 +4600,16 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Rate Limit Reset Credits": "Rate Limit Reset Credits",
+    "Available reset credits for this Codex account. Consume one to immediately reset rate limit windows.": "Available reset credits for this Codex account. Consume one to immediately reset rate limit windows.",
+    "No reset credits available": "No reset credits available",
+    "Consume Reset Credit": "Consume Reset Credit",
+    "Consuming...": "Consuming...",
+    "Rate limit reset successfully": "Rate limit reset successfully",
+    "Failed to reset rate limit": "Failed to reset rate limit",
+    "Failed to fetch reset credits": "Failed to fetch reset credits",
+    "Failed to consume reset credit": "Failed to consume reset credit",
+    "Are you sure you want to consume this reset credit? This will immediately reset the rate limit windows.": "Are you sure you want to consume this reset credit? This will immediately reset the rate limit windows."
   }
 }

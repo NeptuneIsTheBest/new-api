@@ -251,6 +251,8 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.POST("/fetch_models", middleware.RootAuth(), controller.FetchModels)
 			channelRoute.POST("/:id/codex/refresh", controller.RefreshCodexChannelCredential)
 			channelRoute.GET("/:id/codex/usage", controller.GetCodexChannelUsage)
+			channelRoute.GET("/:id/codex/reset-credits", controller.GetCodexRateLimitResetCredits)
+			channelRoute.POST("/:id/codex/reset-credits/consume", controller.ConsumeCodexRateLimitResetCredit)
 			channelRoute.POST("/ollama/pull", controller.OllamaPullModel)
 			channelRoute.POST("/ollama/pull/stream", controller.OllamaPullModelStream)
 			channelRoute.DELETE("/ollama/delete", controller.OllamaDeleteModel)

@@ -26,8 +26,11 @@ import {
   User,
   Mail,
   Hash,
+  Zap,
+  Clock,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import dayjs from '@/lib/dayjs'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { Button } from '@/components/ui/button'
@@ -35,6 +38,11 @@ import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import {
+  getCodexResetCredits,
+  consumeCodexResetCredit,
+} from '@/features/channels/api'
 
 type CodexRateLimitWindow = {
   used_percent?: number
@@ -67,6 +75,13 @@ type CodexUsagePayload = {
   account_id?: string
   rate_limit?: CodexRateLimit
   additional_rate_limits?: CodexAdditionalRateLimit[]
+}
+
+type CodexResetCredit = {
+  id?: string
+  status?: string
+  granted_at?: number
+  expires_at?: number
 }
 
 export type CodexUsageDialogData = {
@@ -350,6 +365,14 @@ export function CodexUsageDialog({
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const [showRawJson, setShowRawJson] = useState(false)
+  const [resetCreditsOpen, setResetCreditsOpen] = useState(false)
+  const [resetCreditsData, setResetCreditsData] = useState<
+    CodexResetCredit[] | null
+  >(null)
+  const [isLoadingResetCredits, setIsLoadingResetCredits] = useState(false)
+  const [isConsuming, setIsConsuming] = useState(false)
+  const [selectedCreditId, setSelectedCreditId] = useState<string | null>(null)
+  const [consumeConfirmOpen, setConsumeConfirmOpen] = useState(false)
 
   const payload: CodexUsagePayload | null = useMemo(() => {
     const raw = response?.data
@@ -406,6 +429,73 @@ export function CodexUsageDialog({
       return String(response?.data ?? '')
     }
   }, [response])
+
+  const fetchResetCredits = async () => {
+    if (!channelId) return
+    setIsLoadingResetCredits(true)
+    try {
+      const res = await getCodexResetCredits(channelId)
+      if (res.success && Array.isArray(res.data)) {
+        setResetCreditsData(res.data as CodexResetCredit[])
+      } else if (res.success && res.data && typeof res.data === 'object') {
+        const obj = res.data as Record<string, unknown>
+        setResetCreditsData(
+          (Array.isArray(obj.credits) ? obj.credits : []) as CodexResetCredit[]
+        )
+      } else {
+        setResetCreditsData([])
+        if (!res.success) {
+          toast.error(res.message || t('Failed to fetch reset credits'))
+        }
+      }
+    } catch {
+      setResetCreditsData([])
+      toast.error(t('Failed to fetch reset credits'))
+    } finally {
+      setIsLoadingResetCredits(false)
+    }
+  }
+
+  const handleToggleResetCredits = () => {
+    const next = !resetCreditsOpen
+    setResetCreditsOpen(next)
+    if (next && resetCreditsData === null) {
+      fetchResetCredits()
+    }
+  }
+
+  const handleConsumeClick = (creditId: string) => {
+    setSelectedCreditId(creditId)
+    setConsumeConfirmOpen(true)
+  }
+
+  const handleConsumeConfirm = async () => {
+    if (!channelId || !selectedCreditId) return
+    setConsumeConfirmOpen(false)
+    setIsConsuming(true)
+    try {
+      const res = await consumeCodexResetCredit(channelId, selectedCreditId)
+      if (res.success) {
+        onRefresh?.()
+        setResetCreditsData(null)
+        await fetchResetCredits()
+        toast.success(t('Rate limit reset successfully'))
+      } else {
+        toast.error(
+          res.message || t('Failed to reset rate limit')
+        )
+      }
+    } catch {
+      toast.error(t('Failed to consume reset credit'))
+    } finally {
+      setIsConsuming(false)
+      setSelectedCreditId(null)
+    }
+  }
+
+  const availableCredits = (resetCreditsData ?? []).filter(
+    (c) => c.status === 'available'
+  )
 
   return (
     <Dialog
@@ -550,6 +640,158 @@ export function CodexUsageDialog({
             </div>
           )}
         </div>
+
+        {/* Rate Limit Reset Credits */}
+        <div className='rounded-lg border'>
+          <button
+            type='button'
+            className='hover:bg-muted/40 flex w-full items-center justify-between gap-2 p-3 transition-colors'
+            onClick={handleToggleResetCredits}
+          >
+            <div className='flex items-center gap-2'>
+              <div className='text-sm font-medium'>
+                {t('Rate Limit Reset Credits')}
+              </div>
+              {availableCredits.length > 0 && (
+                <StatusBadge
+                  label={`${availableCredits.length}`}
+                  variant='success'
+                  copyable={false}
+                />
+              )}
+            </div>
+            <div className='flex items-center gap-2'>
+              {resetCreditsOpen && (
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='sm'
+                  className='h-6 w-6 p-0'
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    fetchResetCredits()
+                  }}
+                  disabled={isLoadingResetCredits}
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${isLoadingResetCredits ? 'animate-spin' : ''}`}
+                  />
+                </Button>
+              )}
+              {resetCreditsOpen ? (
+                <ChevronUp className='text-muted-foreground h-4 w-4' />
+              ) : (
+                <ChevronDown className='text-muted-foreground h-4 w-4' />
+              )}
+            </div>
+          </button>
+          {resetCreditsOpen && (
+            <div className='border-t px-3 py-3'>
+              {isLoadingResetCredits ? (
+                <div className='text-muted-foreground py-4 text-center text-sm'>
+                  {t('Loading...')}
+                </div>
+              ) : resetCreditsData === null ? (
+                <div className='text-muted-foreground py-4 text-center text-sm'>
+                  {t('Loading...')}
+                </div>
+              ) : resetCreditsData.length === 0 ? (
+                <div className='text-muted-foreground py-4 text-center text-sm'>
+                  {t('No reset credits available')}
+                </div>
+              ) : (
+                <div className='space-y-3'>
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'Available reset credits for this Codex account. Consume one to immediately reset rate limit windows.'
+                    )}
+                  </p>
+                  <ScrollArea className='max-h-[40vh]'>
+                    <div className='space-y-2'>
+                      {resetCreditsData.map((credit, index) => {
+                        const isAvailable = credit.status === 'available'
+                        return (
+                          <div
+                            key={credit.id || index}
+                            className='bg-muted/30 flex items-center justify-between gap-3 rounded-md px-3 py-2'
+                          >
+                            <div className='min-w-0 space-y-1 text-xs'>
+                              <div className='flex items-center gap-2'>
+                                <StatusBadge
+                                  label={
+                                    isAvailable
+                                      ? t('Available')
+                                      : credit.status || '-'
+                                  }
+                                  variant={isAvailable ? 'success' : 'neutral'}
+                                  copyable={false}
+                                />
+                                <span className='text-muted-foreground'>
+                                  {t('Credit ID:')}
+                                </span>
+                                <span className='font-mono truncate'>
+                                  {String(credit.id ?? '').slice(-20) || '-'}
+                                </span>
+                              </div>
+                              <div className='text-muted-foreground flex flex-wrap gap-x-4 gap-y-1'>
+                                {credit.granted_at && (
+                                  <span>
+                                    <Clock className='mr-1 inline h-3 w-3' />
+                                    {t('Granted:')}{' '}
+                                    {formatUnixSeconds(credit.granted_at)}
+                                  </span>
+                                )}
+                                {credit.expires_at && (
+                                  <span>
+                                    {t('Expires:')}{' '}
+                                    {formatUnixSeconds(credit.expires_at)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {isAvailable && (
+                              <Button
+                                type='button'
+                                variant='outline'
+                                size='sm'
+                                className='flex-shrink-0'
+                                onClick={() =>
+                                  handleConsumeClick(credit.id || '')
+                                }
+                                disabled={
+                                  isConsuming ||
+                                  !credit.id
+                                }
+                              >
+                                <Zap className='mr-1 h-3 w-3' />
+                                {isConsuming &&
+                                selectedCreditId === credit.id
+                                  ? t('Consuming...')
+                                  : t('Consume Reset Credit')}
+                              </Button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </ScrollArea>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <ConfirmDialog
+          open={consumeConfirmOpen}
+          onOpenChange={setConsumeConfirmOpen}
+          title={t('Consume Reset Credit')}
+          desc={t(
+            'Are you sure you want to consume this reset credit? This will immediately reset the rate limit windows.'
+          )}
+          confirmText={t('Consume')}
+          destructive
+          handleConfirm={handleConsumeConfirm}
+        />
 
         {/* Raw JSON collapsible */}
         <div className='rounded-lg border'>

@@ -4600,6 +4600,16 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Rate Limit Reset Credits": "速率限制重置额度",
+    "Available reset credits for this Codex account. Consume one to immediately reset rate limit windows.": "此 Codex 帐号可用的重置额度，消耗一个可立即重置速率限制窗口。",
+    "No reset credits available": "没有可用的重置额度",
+    "Consume Reset Credit": "消耗重置额度",
+    "Consuming...": "消耗中...",
+    "Rate limit reset successfully": "速率限制重置成功",
+    "Failed to reset rate limit": "速率限制重置失败",
+    "Failed to fetch reset credits": "获取重置额度失败",
+    "Failed to consume reset credit": "消耗重置额度失败",
+    "Are you sure you want to consume this reset credit? This will immediately reset the rate limit windows.": "确定要消耗此重置额度吗？这将立即重置速率限制窗口。"
   }
 }

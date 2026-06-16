@@ -67,6 +67,20 @@ export type CodexCredentialRefreshResponse = {
   }
 }
 
+export type CodexResetCreditsResponse = {
+  success: boolean
+  message?: string
+  upstream_status?: number
+  data?: unknown
+}
+
+export type CodexConsumeResetCreditResponse = {
+  success: boolean
+  message?: string
+  upstream_status?: number
+  data?: unknown
+}
+
 // ============================================================================
 // Base Channel CRUD Operations
 // ============================================================================
@@ -283,6 +297,28 @@ export async function getCodexUsage(
   const res = await api.get(
     `/api/channel/${channelId}/codex/usage`,
     channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function getCodexResetCredits(
+  channelId: number
+): Promise<CodexResetCreditsResponse> {
+  const res = await api.get(
+    `/api/channel/${channelId}/codex/reset-credits`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function consumeCodexResetCredit(
+  channelId: number,
+  creditId: string
+): Promise<CodexConsumeResetCreditResponse> {
+  const res = await api.post(
+    `/api/channel/${channelId}/codex/reset-credits/consume`,
+    { credit_id: creditId },
+    channelActionConfig()
   )
   return res.data
 }

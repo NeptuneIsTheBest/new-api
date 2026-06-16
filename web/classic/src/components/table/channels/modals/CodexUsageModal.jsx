@@ -27,8 +27,9 @@ import {
   Tag,
   Descriptions,
   Collapse,
+  Popconfirm,
 } from '@douyinfe/semi-ui';
-import { API, showError } from '../../../../helpers';
+import { API, showError, showSuccess } from '../../../../helpers';
 import { MOBILE_BREAKPOINT } from '../../../../hooks/common/useIsMobile';
 
 const { Text } = Typography;
@@ -371,7 +372,170 @@ const RateLimitGroupSection = ({
   );
 };
 
-const CodexUsageView = ({ t, record, payload, onCopy, onRefresh }) => {
+const ResetCreditsSection = ({
+  t,
+  resetCredits,
+  loading,
+  onFetch,
+  onConsume,
+  consuming,
+}) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  const [expanded, setExpanded] = useState(false);
+
+  const handleToggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && resetCredits === null) {
+      onFetch?.();
+    }
+  };
+
+  const availableCredits = (resetCredits ?? []).filter(
+    (c) => c?.status === 'available',
+  );
+
+  return (
+    <div className='rounded-xl border border-semi-color-border bg-semi-color-bg-0'>
+      <div
+        className='flex cursor-pointer items-center justify-between p-3 transition-colors hover:bg-semi-color-fill-0'
+        onClick={handleToggle}
+      >
+        <div className='flex items-center gap-2'>
+          <div className='text-sm font-semibold text-semi-color-text-0'>
+            {tt('速率限制重置额度')}
+          </div>
+          {availableCredits.length > 0 && (
+            <Tag color='green' type='light' shape='circle'>
+              {availableCredits.length}
+            </Tag>
+          )}
+        </div>
+        <div className='flex items-center gap-2'>
+          {expanded && (
+            <Button
+              size='small'
+              type='tertiary'
+              theme='borderless'
+              onClick={(e) => {
+                e.stopPropagation();
+                onFetch?.();
+              }}
+              disabled={loading}
+            >
+              {tt('刷新')}
+            </Button>
+          )}
+          <Text
+            type='tertiary'
+            style={{ fontSize: 16, transform: expanded ? 'rotate(180deg)' : 'none' }}
+          >
+            ▼
+          </Text>
+        </div>
+      </div>
+      {expanded && (
+        <div className='border-t border-semi-color-border px-3 py-3'>
+          {loading ? (
+            <div className='flex items-center justify-center py-4'>
+              <Spin spinning={true} size='small' />
+            </div>
+          ) : resetCredits === null ? (
+            <div className='py-4 text-center text-sm text-semi-color-text-2'>
+              {tt('加载中...')}
+            </div>
+          ) : resetCredits.length === 0 ? (
+            <div className='py-4 text-center text-sm text-semi-color-text-2'>
+              {tt('没有可用的重置额度')}
+            </div>
+          ) : (
+            <div className='space-y-3'>
+              <Text type='tertiary' size='small'>
+                {tt(
+                  '此 Codex 帐号可用的重置额度，消耗一个可立即重置速率限制窗口。',
+                )}
+              </Text>
+              <div className='max-h-[40vh] space-y-2 overflow-y-auto'>
+                {resetCredits.map((credit, index) => {
+                  const isAvailable = credit?.status === 'available';
+                  return (
+                    <div
+                      key={credit?.id || index}
+                      className='flex items-center justify-between gap-3 rounded-lg bg-semi-color-fill-0 px-3 py-2'
+                    >
+                      <div className='min-w-0 space-y-1 text-xs'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          <Tag
+                            color={isAvailable ? 'green' : 'grey'}
+                            type='light'
+                            shape='circle'
+                          >
+                            {isAvailable ? tt('可用') : (credit?.status || '-')}
+                          </Tag>
+                          <span className='text-semi-color-text-2'>
+                            {tt('额度 ID：')}
+                          </span>
+                          <span className='font-mono'>
+                            {String(credit?.id ?? '').slice(-20) || '-'}
+                          </span>
+                        </div>
+                        <div className='flex flex-wrap gap-x-4 gap-y-1 text-semi-color-text-2'>
+                          {credit?.granted_at && (
+                            <span>
+                              {tt('授予时间：')}
+                              {formatUnixSeconds(credit.granted_at)}
+                            </span>
+                          )}
+                          {credit?.expires_at && (
+                            <span>
+                              {tt('过期时间：')}
+                              {formatUnixSeconds(credit.expires_at)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {isAvailable && (
+                        <Popconfirm
+                          title={tt('确定要消耗此重置额度吗？')}
+                          content={tt('这将立即重置速率限制窗口。')}
+                          onConfirm={() => onConsume?.(credit?.id || '')}
+                          okText={tt('消耗')}
+                          cancelText={tt('取消')}
+                        >
+                          <Button
+                            size='small'
+                            type='primary'
+                            theme='solid'
+                            disabled={consuming || !credit?.id}
+                          >
+                            {consuming ? tt('消耗中...') : tt('消耗重置额度')}
+                          </Button>
+                        </Popconfirm>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const CodexUsageView = ({
+  t,
+  record,
+  payload,
+  onCopy,
+  onRefresh,
+  resetCredits,
+  loadingResetCredits,
+  onFetchResetCredits,
+  onConsumeResetCredit,
+  consuming,
+}) => {
   const tt = typeof t === 'function' ? t : (v) => v;
   const [showRawJson, setShowRawJson] = useState(false);
   const data = payload?.data ?? null;
@@ -533,6 +697,15 @@ const CodexUsageView = ({ t, record, payload, onCopy, onRefresh }) => {
         ) : null}
       </div>
 
+      <ResetCreditsSection
+        t={tt}
+        resetCredits={resetCredits}
+        loading={loadingResetCredits}
+        onFetch={onFetchResetCredits}
+        onConsume={onConsumeResetCredit}
+        consuming={consuming}
+      />
+
       <Collapse
         activeKey={showRawJson ? ['raw-json'] : []}
         onChange={(activeKey) => {
@@ -569,6 +742,10 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
   const mountedRef = useRef(true);
   const recordId = record?.id;
 
+  const [resetCredits, setResetCredits] = useState(null);
+  const [loadingResetCredits, setLoadingResetCredits] = useState(false);
+  const [consuming, setConsuming] = useState(false);
+
   const fetchUsage = useCallback(async () => {
     if (!recordId) {
       if (mountedRef.current) setPayload(null);
@@ -597,6 +774,59 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
       if (mountedRef.current) setLoading(false);
     }
   }, [recordId, tt]);
+
+  const fetchResetCredits = useCallback(async () => {
+    if (!recordId) return;
+    setLoadingResetCredits(true);
+    try {
+      const res = await API.get(
+        `/api/channel/${recordId}/codex/reset-credits`,
+        { skipErrorHandler: true }
+      );
+      if (!mountedRef.current) return;
+      const resp = res?.data;
+      if (resp?.success && Array.isArray(resp?.data)) {
+        setResetCredits(resp.data);
+      } else if (resp?.success && resp?.data && typeof resp?.data === 'object') {
+        setResetCredits(Array.isArray(resp.data.credits) ? resp.data.credits : []);
+      } else {
+        setResetCredits([]);
+      }
+    } catch {
+      if (mountedRef.current) setResetCredits([]);
+    } finally {
+      if (mountedRef.current) setLoadingResetCredits(false);
+    }
+  }, [recordId]);
+
+  const handleConsumeResetCredit = useCallback(
+    async (creditId) => {
+      if (!recordId || !creditId) return;
+      setConsuming(true);
+      try {
+        const res = await API.post(
+          `/api/channel/${recordId}/codex/reset-credits/consume`,
+          { credit_id: creditId },
+          { skipErrorHandler: true }
+        );
+        if (!mountedRef.current) return;
+        const resp = res?.data;
+        if (resp?.success) {
+          await fetchUsage();
+          setResetCredits(null);
+          await fetchResetCredits();
+          showSuccess(tt('速率限制重置成功'));
+        } else {
+          showError(resp?.message || tt('速率限制重置失败'));
+        }
+      } catch (error) {
+        if (mountedRef.current) showError(tt('消耗重置额度失败'));
+      } finally {
+        if (mountedRef.current) setConsuming(false);
+      }
+    },
+    [recordId, tt, fetchUsage, fetchResetCredits]
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -643,6 +873,11 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
       payload={payload}
       onCopy={onCopy}
       onRefresh={fetchUsage}
+      resetCredits={resetCredits}
+      loadingResetCredits={loadingResetCredits}
+      onFetchResetCredits={fetchResetCredits}
+      onConsumeResetCredit={handleConsumeResetCredit}
+      consuming={consuming}
     />
   );
 };
