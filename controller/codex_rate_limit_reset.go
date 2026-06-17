@@ -72,7 +72,7 @@ func GetCodexRateLimitResetCredits(c *gin.Context) {
 	statusCode, body, err := service.FetchCodexRateLimitResetCredits(ctx, client, ch.GetBaseURL(), accessToken, accountID)
 	if err != nil {
 		common.SysError("failed to fetch codex reset credits: " + err.Error())
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取重置额度信息失败，请稍后重试"})
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取限流重置次数失败，请稍后重试"})
 		return
 	}
 
@@ -100,7 +100,7 @@ func GetCodexRateLimitResetCredits(c *gin.Context) {
 			statusCode, body, err = service.FetchCodexRateLimitResetCredits(ctx2, client, ch.GetBaseURL(), accessToken, accountID)
 			if err != nil {
 				common.SysError("failed to fetch codex reset credits after refresh: " + err.Error())
-				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取重置额度信息失败，请稍后重试"})
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取限流重置次数失败，请稍后重试"})
 				return
 			}
 		}
@@ -193,7 +193,7 @@ func ConsumeCodexRateLimitResetCredit(c *gin.Context) {
 	statusCode, body, err := service.ConsumeCodexRateLimitResetCredit(ctx, client, ch.GetBaseURL(), accessToken, accountID, creditID, redeemRequestID)
 	if err != nil {
 		common.SysError("failed to consume codex reset credit: " + err.Error())
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "消耗重置额度失败，请稍后重试"})
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "使用限流重置次数失败，请稍后重试"})
 		return
 	}
 
@@ -221,7 +221,7 @@ func ConsumeCodexRateLimitResetCredit(c *gin.Context) {
 			statusCode, body, err = service.ConsumeCodexRateLimitResetCredit(ctx2, client, ch.GetBaseURL(), accessToken, accountID, creditID, redeemRequestID)
 			if err != nil {
 				common.SysError("failed to consume codex reset credit after refresh: " + err.Error())
-				c.JSON(http.StatusOK, gin.H{"success": false, "message": "消耗重置额度失败，请稍后重试"})
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "使用限流重置次数失败，请稍后重试"})
 				return
 			}
 		}

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Copy,
   Check,
@@ -36,9 +36,9 @@ import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   getCodexResetCredits,
   consumeCodexResetCredit,
@@ -46,7 +46,7 @@ import {
 
 type CodexRateLimitWindow = {
   used_percent?: number
-  reset_at?: number
+  reset_at?: string
   reset_after_seconds?: number
   limit_window_seconds?: number
 }
@@ -80,8 +80,18 @@ type CodexUsagePayload = {
 type CodexResetCredit = {
   id?: string
   status?: string
-  granted_at?: number
-  expires_at?: number
+  granted_at?: string
+  expires_at?: string
+}
+
+type CodexResetCreditsState = {
+  channelId: number
+  data: CodexResetCredit[]
+}
+
+type CodexSelectedCreditState = {
+  channelId: number
+  creditId: string
 }
 
 export type CodexUsageDialogData = {
@@ -106,14 +116,15 @@ function clampPercent(value: unknown): number {
   return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0
 }
 
-function formatUnixSeconds(unixSeconds: unknown): string {
-  const v = Number(unixSeconds)
-  if (!Number.isFinite(v) || v <= 0) return '-'
-  try {
-    return dayjs(v * 1000).format('YYYY-MM-DD HH:mm:ss')
-  } catch {
-    return String(unixSeconds)
-  }
+function formatIsoDateTime(value: unknown): string {
+  if (value == null || typeof value === 'number') return '-'
+
+  const text = String(value).trim()
+  if (!text) return '-'
+  if (Number.isFinite(Number(text))) return '-'
+
+  const parsed = dayjs(text)
+  return parsed.isValid() ? parsed.format('YYYY-MM-DD HH:mm:ss') : text
 }
 
 function formatDurationSeconds(
@@ -254,7 +265,7 @@ function RateLimitWindow(props: RateLimitWindowProps) {
       {hasData ? (
         <div className='text-muted-foreground mt-2 space-y-1 text-xs'>
           <div>
-            {t('Reset at:')} {formatUnixSeconds(props.window?.reset_at)}
+            {t('Reset at:')} {formatIsoDateTime(props.window?.reset_at)}
           </div>
           <div>
             {t('Resets in:')}{' '}
@@ -365,14 +376,47 @@ export function CodexUsageDialog({
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const [showRawJson, setShowRawJson] = useState(false)
-  const [resetCreditsOpen, setResetCreditsOpen] = useState(false)
-  const [resetCreditsData, setResetCreditsData] = useState<
-    CodexResetCredit[] | null
+  const [resetCreditsOpenChannelId, setResetCreditsOpenChannelId] = useState<
+    number | null
   >(null)
-  const [isLoadingResetCredits, setIsLoadingResetCredits] = useState(false)
-  const [isConsuming, setIsConsuming] = useState(false)
-  const [selectedCreditId, setSelectedCreditId] = useState<string | null>(null)
+  const [resetCreditsState, setResetCreditsState] =
+    useState<CodexResetCreditsState | null>(null)
+  const [loadingResetCreditsChannelId, setLoadingResetCreditsChannelId] =
+    useState<number | null>(null)
+  const [consumingCreditState, setConsumingCreditState] =
+    useState<CodexSelectedCreditState | null>(null)
+  const [selectedCreditState, setSelectedCreditState] =
+    useState<CodexSelectedCreditState | null>(null)
   const [consumeConfirmOpen, setConsumeConfirmOpen] = useState(false)
+  const activeChannelIdRef = useRef(channelId)
+  const dialogOpenRef = useRef(open)
+  const resetCreditsRequestRef = useRef(0)
+  const consumeResetCreditRequestRef = useRef(0)
+
+  const resetResetCreditsState = useCallback(() => {
+    resetCreditsRequestRef.current += 1
+    consumeResetCreditRequestRef.current += 1
+    setResetCreditsOpenChannelId(null)
+    setResetCreditsState(null)
+    setLoadingResetCreditsChannelId(null)
+    setConsumingCreditState(null)
+    setSelectedCreditState(null)
+    setConsumeConfirmOpen(false)
+  }, [])
+
+  useEffect(() => {
+    activeChannelIdRef.current = channelId
+    resetCreditsRequestRef.current += 1
+    consumeResetCreditRequestRef.current += 1
+  }, [channelId])
+
+  useEffect(() => {
+    dialogOpenRef.current = open
+    if (!open) {
+      resetCreditsRequestRef.current += 1
+      consumeResetCreditRequestRef.current += 1
+    }
+  }, [open])
 
   const payload: CodexUsagePayload | null = useMemo(() => {
     const raw = response?.data
@@ -430,67 +474,165 @@ export function CodexUsageDialog({
     }
   }, [response])
 
-  const fetchResetCredits = async () => {
-    if (!channelId) return
-    setIsLoadingResetCredits(true)
-    try {
-      const res = await getCodexResetCredits(channelId)
-      if (res.success && Array.isArray(res.data)) {
-        setResetCreditsData(res.data as CodexResetCredit[])
-      } else if (res.success && res.data && typeof res.data === 'object') {
-        const obj = res.data as Record<string, unknown>
-        setResetCreditsData(
-          (Array.isArray(obj.credits) ? obj.credits : []) as CodexResetCredit[]
-        )
-      } else {
-        setResetCreditsData([])
-        if (!res.success) {
-          toast.error(res.message || t('Failed to fetch reset credits'))
+  const resetCreditsOpen = Boolean(
+    open && channelId && resetCreditsOpenChannelId === channelId
+  )
+  const resetCreditsData =
+    open && channelId && resetCreditsState?.channelId === channelId
+      ? resetCreditsState.data
+      : null
+  const isLoadingResetCredits = Boolean(
+    open && channelId && loadingResetCreditsChannelId === channelId
+  )
+  const selectedCreditId =
+    open && channelId && selectedCreditState?.channelId === channelId
+      ? selectedCreditState.creditId
+      : null
+  const isConsuming = Boolean(
+    open && channelId && consumingCreditState?.channelId === channelId
+  )
+  const effectiveConsumeConfirmOpen = Boolean(
+    consumeConfirmOpen && selectedCreditId
+  )
+
+  const isActiveDialogChannel = useCallback((targetChannelId: number) => {
+    return (
+      dialogOpenRef.current && activeChannelIdRef.current === targetChannelId
+    )
+  }, [])
+
+  const fetchResetCredits = useCallback(
+    async (targetChannelId = channelId) => {
+      if (!targetChannelId) return
+
+      const requestId = ++resetCreditsRequestRef.current
+      setLoadingResetCreditsChannelId(targetChannelId)
+      try {
+        const res = await getCodexResetCredits(targetChannelId)
+        if (
+          resetCreditsRequestRef.current !== requestId ||
+          !isActiveDialogChannel(targetChannelId)
+        ) {
+          return
+        }
+
+        if (res.success && Array.isArray(res.data)) {
+          setResetCreditsState({
+            channelId: targetChannelId,
+            data: res.data as CodexResetCredit[],
+          })
+        } else if (res.success && res.data && typeof res.data === 'object') {
+          const obj = res.data as Record<string, unknown>
+          setResetCreditsState({
+            channelId: targetChannelId,
+            data: (Array.isArray(obj.credits)
+              ? obj.credits
+              : []) as CodexResetCredit[],
+          })
+        } else {
+          setResetCreditsState({ channelId: targetChannelId, data: [] })
+          if (!res.success) {
+            toast.error(res.message || t('Failed to fetch reset credits'))
+          }
+        }
+      } catch {
+        if (
+          resetCreditsRequestRef.current === requestId &&
+          isActiveDialogChannel(targetChannelId)
+        ) {
+          setResetCreditsState({ channelId: targetChannelId, data: [] })
+          toast.error(t('Failed to fetch reset credits'))
+        }
+      } finally {
+        if (
+          resetCreditsRequestRef.current === requestId &&
+          isActiveDialogChannel(targetChannelId)
+        ) {
+          setLoadingResetCreditsChannelId(null)
         }
       }
-    } catch {
-      setResetCreditsData([])
-      toast.error(t('Failed to fetch reset credits'))
-    } finally {
-      setIsLoadingResetCredits(false)
-    }
-  }
+    },
+    [channelId, isActiveDialogChannel, t]
+  )
 
   const handleToggleResetCredits = () => {
+    if (!channelId) return
+
     const next = !resetCreditsOpen
-    setResetCreditsOpen(next)
+    setResetCreditsOpenChannelId(next ? channelId : null)
     if (next && resetCreditsData === null) {
-      fetchResetCredits()
+      fetchResetCredits(channelId)
     }
   }
 
   const handleConsumeClick = (creditId: string) => {
-    setSelectedCreditId(creditId)
+    if (!channelId || !creditId) return
+
+    setSelectedCreditState({ channelId, creditId })
     setConsumeConfirmOpen(true)
   }
 
   const handleConsumeConfirm = async () => {
-    if (!channelId || !selectedCreditId) return
+    const targetChannelId = channelId
+    const targetCreditId = selectedCreditId
+    if (!targetChannelId || !targetCreditId) return
+
+    const requestId = ++consumeResetCreditRequestRef.current
     setConsumeConfirmOpen(false)
-    setIsConsuming(true)
+    setConsumingCreditState({
+      channelId: targetChannelId,
+      creditId: targetCreditId,
+    })
     try {
-      const res = await consumeCodexResetCredit(channelId, selectedCreditId)
+      const res = await consumeCodexResetCredit(targetChannelId, targetCreditId)
+      if (
+        consumeResetCreditRequestRef.current !== requestId ||
+        !isActiveDialogChannel(targetChannelId)
+      ) {
+        return
+      }
+
       if (res.success) {
         onRefresh?.()
-        setResetCreditsData(null)
-        await fetchResetCredits()
+        setResetCreditsState(null)
+        await fetchResetCredits(targetChannelId)
         toast.success(t('Rate limit reset successfully'))
       } else {
-        toast.error(
-          res.message || t('Failed to reset rate limit')
-        )
+        toast.error(res.message || t('Failed to reset rate limit'))
       }
     } catch {
-      toast.error(t('Failed to consume reset credit'))
+      if (
+        consumeResetCreditRequestRef.current === requestId &&
+        isActiveDialogChannel(targetChannelId)
+      ) {
+        toast.error(t('Failed to consume reset credit'))
+      }
     } finally {
-      setIsConsuming(false)
-      setSelectedCreditId(null)
+      if (
+        consumeResetCreditRequestRef.current === requestId &&
+        isActiveDialogChannel(targetChannelId)
+      ) {
+        setConsumingCreditState((current) =>
+          current?.channelId === targetChannelId &&
+          current.creditId === targetCreditId
+            ? null
+            : current
+        )
+        setSelectedCreditState((current) =>
+          current?.channelId === targetChannelId &&
+          current.creditId === targetCreditId
+            ? null
+            : current
+        )
+      }
     }
+  }
+
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      resetResetCreditsState()
+    }
+    onOpenChange(nextOpen)
   }
 
   const availableCredits = (resetCreditsData ?? []).filter(
@@ -500,7 +642,7 @@ export function CodexUsageDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={handleDialogOpenChange}
       title={t('Codex Account & Usage')}
       description={
         <>
@@ -518,7 +660,7 @@ export function CodexUsageDialog({
           <Button
             type='button'
             variant='outline'
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleDialogOpenChange(false)}
           >
             {t('Close')}
           </Button>
@@ -729,7 +871,7 @@ export function CodexUsageDialog({
                                 <span className='text-muted-foreground'>
                                   {t('Credit ID:')}
                                 </span>
-                                <span className='font-mono truncate'>
+                                <span className='truncate font-mono'>
                                   {String(credit.id ?? '').slice(-20) || '-'}
                                 </span>
                               </div>
@@ -738,13 +880,13 @@ export function CodexUsageDialog({
                                   <span>
                                     <Clock className='mr-1 inline h-3 w-3' />
                                     {t('Granted:')}{' '}
-                                    {formatUnixSeconds(credit.granted_at)}
+                                    {formatIsoDateTime(credit.granted_at)}
                                   </span>
                                 )}
                                 {credit.expires_at && (
                                   <span>
                                     {t('Expires:')}{' '}
-                                    {formatUnixSeconds(credit.expires_at)}
+                                    {formatIsoDateTime(credit.expires_at)}
                                   </span>
                                 )}
                               </div>
@@ -758,14 +900,10 @@ export function CodexUsageDialog({
                                 onClick={() =>
                                   handleConsumeClick(credit.id || '')
                                 }
-                                disabled={
-                                  isConsuming ||
-                                  !credit.id
-                                }
+                                disabled={isConsuming || !credit.id}
                               >
                                 <Zap className='mr-1 h-3 w-3' />
-                                {isConsuming &&
-                                selectedCreditId === credit.id
+                                {isConsuming && selectedCreditId === credit.id
                                   ? t('Consuming...')
                                   : t('Consume Reset Credit')}
                               </Button>
@@ -782,13 +920,18 @@ export function CodexUsageDialog({
         </div>
 
         <ConfirmDialog
-          open={consumeConfirmOpen}
-          onOpenChange={setConsumeConfirmOpen}
+          open={effectiveConsumeConfirmOpen}
+          onOpenChange={(nextOpen) => {
+            setConsumeConfirmOpen(nextOpen)
+            if (!nextOpen) {
+              setSelectedCreditState(null)
+            }
+          }}
           title={t('Consume Reset Credit')}
           desc={t(
             'Are you sure you want to consume this reset credit? This will immediately reset the rate limit windows.'
           )}
-          confirmText={t('Consume')}
+          confirmText={t('Consume Reset Credit')}
           destructive
           handleConfirm={handleConsumeConfirm}
         />

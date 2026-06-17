@@ -124,14 +124,15 @@ const formatDurationSeconds = (seconds, t) => {
   return `${secs}${tt('秒')}`;
 };
 
-const formatUnixSeconds = (unixSeconds) => {
-  const v = Number(unixSeconds);
-  if (!Number.isFinite(v) || v <= 0) return '-';
-  try {
-    return new Date(v * 1000).toLocaleString();
-  } catch (error) {
-    return String(unixSeconds);
-  }
+const formatIsoDateTime = (value) => {
+  if (value == null || typeof value === 'number') return '-';
+
+  const text = String(value).trim();
+  if (!text) return '-';
+  if (Number.isFinite(Number(text))) return '-';
+
+  const date = new Date(text);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : text;
 };
 
 const getDisplayText = (value) => {
@@ -269,7 +270,7 @@ const RateLimitWindowCard = ({ t, title, windowData }) => {
         <div className='font-medium'>{title}</div>
         <Text type='tertiary' size='small'>
           {tt('重置时间：')}
-          {formatUnixSeconds(resetAt)}
+          {formatIsoDateTime(resetAt)}
         </Text>
       </div>
 
@@ -403,7 +404,7 @@ const ResetCreditsSection = ({
       >
         <div className='flex items-center gap-2'>
           <div className='text-sm font-semibold text-semi-color-text-0'>
-            {tt('速率限制重置额度')}
+            {tt('限流重置次数')}
           </div>
           {availableCredits.length > 0 && (
             <Tag color='green' type='light' shape='circle'>
@@ -428,7 +429,10 @@ const ResetCreditsSection = ({
           )}
           <Text
             type='tertiary'
-            style={{ fontSize: 16, transform: expanded ? 'rotate(180deg)' : 'none' }}
+            style={{
+              fontSize: 16,
+              transform: expanded ? 'rotate(180deg)' : 'none',
+            }}
           >
             ▼
           </Text>
@@ -446,13 +450,13 @@ const ResetCreditsSection = ({
             </div>
           ) : resetCredits.length === 0 ? (
             <div className='py-4 text-center text-sm text-semi-color-text-2'>
-              {tt('没有可用的重置额度')}
+              {tt('没有可用的限流重置次数')}
             </div>
           ) : (
             <div className='space-y-3'>
               <Text type='tertiary' size='small'>
                 {tt(
-                  '此 Codex 帐号可用的重置额度，消耗一个可立即重置速率限制窗口。',
+                  '当前 Codex 账号可用的限流重置次数。使用 1 次可立即重置限流窗口。',
                 )}
               </Text>
               <div className='max-h-[40vh] space-y-2 overflow-y-auto'>
@@ -470,10 +474,10 @@ const ResetCreditsSection = ({
                             type='light'
                             shape='circle'
                           >
-                            {isAvailable ? tt('可用') : (credit?.status || '-')}
+                            {isAvailable ? tt('可用') : credit?.status || '-'}
                           </Tag>
                           <span className='text-semi-color-text-2'>
-                            {tt('额度 ID：')}
+                            {tt('重置次数 ID：')}
                           </span>
                           <span className='font-mono'>
                             {String(credit?.id ?? '').slice(-20) || '-'}
@@ -483,23 +487,23 @@ const ResetCreditsSection = ({
                           {credit?.granted_at && (
                             <span>
                               {tt('授予时间：')}
-                              {formatUnixSeconds(credit.granted_at)}
+                              {formatIsoDateTime(credit.granted_at)}
                             </span>
                           )}
                           {credit?.expires_at && (
                             <span>
                               {tt('过期时间：')}
-                              {formatUnixSeconds(credit.expires_at)}
+                              {formatIsoDateTime(credit.expires_at)}
                             </span>
                           )}
                         </div>
                       </div>
                       {isAvailable && (
                         <Popconfirm
-                          title={tt('确定要消耗此重置额度吗？')}
-                          content={tt('这将立即重置速率限制窗口。')}
+                          title={tt('确定要使用此限流重置次数吗？')}
+                          content={tt('这将立即重置限流窗口。')}
                           onConfirm={() => onConsume?.(credit?.id || '')}
-                          okText={tt('消耗')}
+                          okText={tt('使用')}
                           cancelText={tt('取消')}
                         >
                           <Button
@@ -508,7 +512,7 @@ const ResetCreditsSection = ({
                             theme='solid'
                             disabled={consuming || !credit?.id}
                           >
-                            {consuming ? tt('消耗中...') : tt('消耗重置额度')}
+                            {consuming ? tt('使用中...') : tt('使用限流重置次数')}
                           </Button>
                         </Popconfirm>
                       )}
@@ -781,14 +785,20 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
     try {
       const res = await API.get(
         `/api/channel/${recordId}/codex/reset-credits`,
-        { skipErrorHandler: true }
+        { skipErrorHandler: true },
       );
       if (!mountedRef.current) return;
       const resp = res?.data;
       if (resp?.success && Array.isArray(resp?.data)) {
         setResetCredits(resp.data);
-      } else if (resp?.success && resp?.data && typeof resp?.data === 'object') {
-        setResetCredits(Array.isArray(resp.data.credits) ? resp.data.credits : []);
+      } else if (
+        resp?.success &&
+        resp?.data &&
+        typeof resp?.data === 'object'
+      ) {
+        setResetCredits(
+          Array.isArray(resp.data.credits) ? resp.data.credits : [],
+        );
       } else {
         setResetCredits([]);
       }
@@ -807,7 +817,7 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
         const res = await API.post(
           `/api/channel/${recordId}/codex/reset-credits/consume`,
           { credit_id: creditId },
-          { skipErrorHandler: true }
+          { skipErrorHandler: true },
         );
         if (!mountedRef.current) return;
         const resp = res?.data;
@@ -815,17 +825,17 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
           await fetchUsage();
           setResetCredits(null);
           await fetchResetCredits();
-          showSuccess(tt('速率限制重置成功'));
+          showSuccess(tt('限流重置成功'));
         } else {
-          showError(resp?.message || tt('速率限制重置失败'));
+          showError(resp?.message || tt('限流重置失败'));
         }
       } catch (error) {
-        if (mountedRef.current) showError(tt('消耗重置额度失败'));
+        if (mountedRef.current) showError(tt('使用限流重置次数失败'));
       } finally {
         if (mountedRef.current) setConsuming(false);
       }
     },
-    [recordId, tt, fetchUsage, fetchResetCredits]
+    [recordId, tt, fetchUsage, fetchResetCredits],
   );
 
   useEffect(() => {
