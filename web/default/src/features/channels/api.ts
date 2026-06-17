@@ -53,6 +53,46 @@ export type CodexUsageResponse = {
   data?: Record<string, unknown>
 }
 
+export type CodexRateLimitResetCredit = {
+  id?: string
+  title?: string
+  description?: string
+  profile_user_id?: string
+  profile_image_url?: string
+  [key: string]: unknown
+}
+
+export type CodexRateLimitResetCreditsPayload = {
+  available_count?: number
+  credits?: CodexRateLimitResetCredit[]
+  [key: string]: unknown
+}
+
+export type CodexRateLimitResetCreditsResponse = {
+  success: boolean
+  message?: string
+  upstream_status?: number
+  data?: CodexRateLimitResetCreditsPayload | string
+}
+
+export type ConsumeCodexRateLimitResetCreditParams = {
+  credit_id: string
+  redeem_request_id?: string
+}
+
+export type ConsumeCodexRateLimitResetCreditResponse = {
+  success: boolean
+  message?: string
+  upstream_status?: number
+  data?:
+    | {
+        code?: string
+        message?: string
+        [key: string]: unknown
+      }
+    | string
+}
+
 export type CodexCredentialRefreshResponse = {
   success: boolean
   message?: string
@@ -283,6 +323,28 @@ export async function getCodexUsage(
   const res = await api.get(
     `/api/channel/${channelId}/codex/usage`,
     channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function getCodexRateLimitResetCredits(
+  channelId: number
+): Promise<CodexRateLimitResetCreditsResponse> {
+  const res = await api.get(
+    `/api/channel/${channelId}/codex/rate-limit-reset-credits`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+export async function consumeCodexRateLimitResetCredit(
+  channelId: number,
+  params: ConsumeCodexRateLimitResetCreditParams
+): Promise<ConsumeCodexRateLimitResetCreditResponse> {
+  const res = await api.post(
+    `/api/channel/${channelId}/codex/rate-limit-reset-credits/consume`,
+    params,
+    channelActionConfig()
   )
   return res.data
 }

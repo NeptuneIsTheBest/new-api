@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Loader2, RefreshCw, DollarSign } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -52,34 +58,63 @@ export function BalanceQueryDialog({
   )
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
+  const dialogStateRef = useRef({ open, currentRowId: currentRow?.id })
+  const codexUsageRequestRef = useRef(0)
 
+  const currentRowId = currentRow?.id
   const isCodex = currentRow?.type === 57
 
-  const handleQueryCodexUsage = async () => {
-    const row = currentRow
-    if (!row) return
+  useLayoutEffect(() => {
+    dialogStateRef.current = { open, currentRowId }
+    codexUsageRequestRef.current += 1
+  }, [currentRowId, open])
+
+  const handleQueryCodexUsage = useCallback(async () => {
+    if (!currentRowId) return
+
+    const requestedRowId = currentRowId
+    const requestId = codexUsageRequestRef.current + 1
+    codexUsageRequestRef.current = requestId
+    const isCurrentRequest = () => {
+      const state = dialogStateRef.current
+      return (
+        state.open &&
+        state.currentRowId === requestedRowId &&
+        codexUsageRequestRef.current === requestId
+      )
+    }
+
     setIsQuerying(true)
     try {
-      const res = await getCodexUsage(row.id)
+      const res = await getCodexUsage(requestedRowId)
+      if (!isCurrentRequest()) return
       if (!res.success) {
         throw new Error(res.message || t('Failed to fetch usage'))
       }
       setCodexUsageResponse(res)
     } catch (error: unknown) {
+      if (!isCurrentRequest()) return
       toast.error(
         error instanceof Error ? error.message : t('Failed to fetch usage')
       )
     } finally {
-      setIsQuerying(false)
+      if (isCurrentRequest()) {
+        setIsQuerying(false)
+      }
     }
-  }
+  }, [currentRowId, t])
 
   useEffect(() => {
-    if (!isCodex) return
-    if (!open) return
-    handleQueryCodexUsage()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, isCodex])
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCodexUsageResponse(null)
+
+    if (!isCodex || !open) {
+      setIsQuerying(false)
+      return
+    }
+
+    void handleQueryCodexUsage()
+  }, [currentRowId, handleQueryCodexUsage, isCodex, open])
 
   if (!currentRow) return null
 

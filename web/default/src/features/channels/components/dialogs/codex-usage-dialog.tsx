@@ -16,7 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   Copy,
   Check,
@@ -30,11 +37,29 @@ import {
 import { useTranslation } from 'react-i18next'
 import dayjs from '@/lib/dayjs'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Spinner } from '@/components/ui/spinner'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import {
+  consumeCodexRateLimitResetCredit,
+  getCodexRateLimitResetCredits,
+  type CodexRateLimitResetCredit,
+  type CodexRateLimitResetCreditsResponse,
+  type ConsumeCodexRateLimitResetCreditResponse,
+} from '../../api'
 
 type CodexRateLimitWindow = {
   used_percent?: number
@@ -82,7 +107,7 @@ type CodexUsageDialogProps = {
   channelName?: string
   channelId?: number
   response: CodexUsageDialogData | null
-  onRefresh?: () => void
+  onRefresh?: () => void | Promise<void>
   isRefreshing?: boolean
 }
 
@@ -338,6 +363,110 @@ function CopyableField(props: {
   )
 }
 
+type ConsumeNotice = {
+  type: 'success' | 'error'
+  message: string
+}
+
+function trimDisplayValue(value: unknown): string {
+  if (value == null) return ''
+  return String(value).trim()
+}
+
+function getResetCreditsPayload(
+  response: CodexRateLimitResetCreditsResponse | null
+) {
+  const raw = response?.data
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  return raw
+}
+
+function getResetCreditID(credit: CodexRateLimitResetCredit): string {
+  return trimDisplayValue(credit.id)
+}
+
+function getResetCreditTitle(
+  credit: CodexRateLimitResetCredit | null,
+  t: (key: string) => string
+): string {
+  if (!credit) return ''
+  return (
+    trimDisplayValue(credit.title) ||
+    getResetCreditID(credit) ||
+    t('Reset credit')
+  )
+}
+
+function getResetCreditDescription(
+  credit: CodexRateLimitResetCredit | null,
+  t: (key: string) => string
+): string {
+  if (!credit) return ''
+  return trimDisplayValue(credit.description) || t('No description')
+}
+
+function getResetCreditProfileUserID(
+  credit: CodexRateLimitResetCredit | null
+): string {
+  if (!credit) return ''
+  return trimDisplayValue(credit.profile_user_id)
+}
+
+function getResetCreditProfileImageURL(
+  credit: CodexRateLimitResetCredit | null
+): string {
+  if (!credit) return ''
+  return trimDisplayValue(credit.profile_image_url)
+}
+
+function getResetCreditAvatarFallback(
+  credit: CodexRateLimitResetCredit | null,
+  t: (key: string) => string
+): string {
+  const title = getResetCreditTitle(credit, t)
+  return title.slice(0, 1).toUpperCase() || 'R'
+}
+
+function createRedeemRequestID(): string | undefined {
+  if (
+    typeof crypto !== 'undefined' &&
+    typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID()
+  }
+  return undefined
+}
+
+function getConsumeResponseData(
+  response: ConsumeCodexRateLimitResetCreditResponse
+) {
+  const raw = response.data
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  return raw
+}
+
+function formatConsumeFailureMessage(
+  response: ConsumeCodexRateLimitResetCreditResponse,
+  t: (key: string) => string
+): string {
+  const data = getConsumeResponseData(response)
+  const code = trimDisplayValue(data?.code)
+  const message =
+    trimDisplayValue(data?.message) || trimDisplayValue(response.message)
+
+  if (code === 'already_redeemed') {
+    return t('This reset credit has already been redeemed.')
+  }
+  if (code === 'no_credit') {
+    return t('No reset credit is available for this account.')
+  }
+  if (code === 'nothing_to_reset') {
+    return t('There is no active rate limit to reset.')
+  }
+  if (message && code) return `${message} (${code})`
+  return message || code || t('Failed to reset rate limit')
+}
+
 export function CodexUsageDialog({
   open,
   onOpenChange,
@@ -350,12 +479,183 @@ export function CodexUsageDialog({
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const [showRawJson, setShowRawJson] = useState(false)
+  const [resetCreditsResponse, setResetCreditsResponse] =
+    useState<CodexRateLimitResetCreditsResponse | null>(null)
+  const [resetCreditsLoading, setResetCreditsLoading] = useState(false)
+  const [resetCreditsError, setResetCreditsError] = useState('')
+  const [selectedResetCreditId, setSelectedResetCreditId] = useState('')
+  const [consumingResetCredit, setConsumingResetCredit] = useState(false)
+  const [consumeNotice, setConsumeNotice] = useState<ConsumeNotice | null>(null)
+  const dialogStateRef = useRef({ open, channelId })
+  const resetCreditsRequestRef = useRef(0)
+  const consumeResetCreditRequestRef = useRef(0)
 
   const payload: CodexUsagePayload | null = useMemo(() => {
     const raw = response?.data
     if (!raw || typeof raw !== 'object') return null
     return raw as CodexUsagePayload
   }, [response?.data])
+
+  useLayoutEffect(() => {
+    dialogStateRef.current = { open, channelId }
+    resetCreditsRequestRef.current += 1
+    consumeResetCreditRequestRef.current += 1
+  }, [channelId, open])
+
+  const isCurrentDialogRequest = useCallback(
+    (requestId: number, requestedChannelId: number) => {
+      const state = dialogStateRef.current
+      return (
+        state.open &&
+        state.channelId === requestedChannelId &&
+        resetCreditsRequestRef.current === requestId
+      )
+    },
+    []
+  )
+
+  const fetchResetCredits = useCallback(async () => {
+    const requestedChannelId = channelId
+    if (!requestedChannelId) return
+
+    const requestId = resetCreditsRequestRef.current + 1
+    resetCreditsRequestRef.current = requestId
+
+    setResetCreditsLoading(true)
+    setResetCreditsError('')
+    try {
+      const res = await getCodexRateLimitResetCredits(requestedChannelId)
+      if (!isCurrentDialogRequest(requestId, requestedChannelId)) return
+      setResetCreditsResponse(res)
+      if (!res.success) {
+        setResetCreditsError(
+          res.message?.trim() || t('Failed to load reset credits')
+        )
+      }
+    } catch (error) {
+      if (!isCurrentDialogRequest(requestId, requestedChannelId)) return
+      setResetCreditsResponse(null)
+      setResetCreditsError(
+        error instanceof Error
+          ? error.message
+          : t('Failed to load reset credits')
+      )
+    } finally {
+      if (isCurrentDialogRequest(requestId, requestedChannelId)) {
+        setResetCreditsLoading(false)
+      }
+    }
+  }, [channelId, isCurrentDialogRequest, t])
+
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setResetCreditsResponse(null)
+    setResetCreditsError('')
+    setSelectedResetCreditId('')
+    setConsumeNotice(null)
+    setResetCreditsLoading(false)
+    setConsumingResetCredit(false)
+    /* eslint-enable react-hooks/set-state-in-effect */
+
+    if (!open) {
+      setShowRawJson(false)
+      return
+    }
+
+    void fetchResetCredits()
+  }, [channelId, fetchResetCredits, open])
+
+  const resetCreditsPayload = useMemo(
+    () => getResetCreditsPayload(resetCreditsResponse),
+    [resetCreditsResponse]
+  )
+
+  const usableResetCredits = useMemo(() => {
+    return (resetCreditsPayload?.credits ?? []).filter((credit) => {
+      return credit && getResetCreditID(credit) !== ''
+    })
+  }, [resetCreditsPayload])
+
+  const activeSelectedResetCreditId = useMemo(() => {
+    if (usableResetCredits.length === 0) return ''
+    const selectedStillExists = usableResetCredits.some(
+      (credit) => getResetCreditID(credit) === selectedResetCreditId
+    )
+    return selectedStillExists
+      ? selectedResetCreditId
+      : getResetCreditID(usableResetCredits[0])
+  }, [selectedResetCreditId, usableResetCredits])
+
+  const selectedResetCredit = useMemo(() => {
+    return (
+      usableResetCredits.find(
+        (credit) => getResetCreditID(credit) === activeSelectedResetCreditId
+      ) ?? null
+    )
+  }, [activeSelectedResetCreditId, usableResetCredits])
+
+  const availableResetCreditsCount = useMemo(() => {
+    const count = Number(resetCreditsPayload?.available_count)
+    if (Number.isFinite(count)) return count
+    return usableResetCredits.length
+  }, [resetCreditsPayload?.available_count, usableResetCredits.length])
+
+  const handleConsumeResetCredit = useCallback(async () => {
+    const requestedChannelId = channelId
+    const requestedCreditId = activeSelectedResetCreditId
+    if (!requestedChannelId || !requestedCreditId) return
+
+    const requestId = consumeResetCreditRequestRef.current + 1
+    consumeResetCreditRequestRef.current = requestId
+
+    const isCurrentConsumeRequest = () => {
+      const state = dialogStateRef.current
+      return (
+        state.open &&
+        state.channelId === requestedChannelId &&
+        consumeResetCreditRequestRef.current === requestId
+      )
+    }
+
+    setConsumingResetCredit(true)
+    setConsumeNotice(null)
+    try {
+      const res = await consumeCodexRateLimitResetCredit(requestedChannelId, {
+        credit_id: requestedCreditId,
+        redeem_request_id: createRedeemRequestID(),
+      })
+      if (!isCurrentConsumeRequest()) return
+      const data = getConsumeResponseData(res)
+      const code = trimDisplayValue(data?.code)
+
+      if (code === 'reset') {
+        setConsumeNotice({
+          type: 'success',
+          message: t('Rate limit reset successfully.'),
+        })
+        await Promise.all([fetchResetCredits(), Promise.resolve(onRefresh?.())])
+        return
+      }
+
+      setConsumeNotice({
+        type: 'error',
+        message: formatConsumeFailureMessage(res, t),
+      })
+    } catch (error) {
+      if (!isCurrentConsumeRequest()) return
+      setConsumeNotice({
+        type: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : t('Failed to reset rate limit'),
+      })
+    } finally {
+      if (isCurrentConsumeRequest()) {
+        setConsumingResetCredit(false)
+      }
+    }
+  }, [activeSelectedResetCreditId, channelId, fetchResetCredits, onRefresh, t])
 
   const rateLimit = payload?.rate_limit
   const accountType = payload?.plan_type ?? rateLimit?.plan_type
@@ -547,6 +847,152 @@ export function CodexUsageDialog({
                   )
                 })}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Rate limit reset credits */}
+        <div className='rounded-lg border p-4'>
+          <div className='flex flex-wrap items-start justify-between gap-3'>
+            <div className='min-w-0'>
+              <div className='text-sm font-medium'>
+                {t('Rate Limit Resets')}
+              </div>
+              <p className='text-muted-foreground mt-1 text-xs'>
+                {t(
+                  'Use an available reset credit to clear the current Codex rate limit.'
+                )}
+              </p>
+            </div>
+            <StatusBadge
+              label={`${t('Available:')} ${availableResetCreditsCount}`}
+              variant={availableResetCreditsCount > 0 ? 'success' : 'neutral'}
+              copyable={false}
+            />
+          </div>
+
+          {resetCreditsError && (
+            <Alert variant='destructive' className='mt-3'>
+              <AlertDescription>{resetCreditsError}</AlertDescription>
+            </Alert>
+          )}
+
+          {consumeNotice && (
+            <Alert
+              variant={
+                consumeNotice.type === 'error' ? 'destructive' : 'default'
+              }
+              className='mt-3'
+            >
+              <AlertDescription className='flex items-center gap-2'>
+                <StatusBadge
+                  label={
+                    consumeNotice.type === 'success'
+                      ? t('Success')
+                      : t('Failed')
+                  }
+                  variant={
+                    consumeNotice.type === 'success' ? 'success' : 'danger'
+                  }
+                  copyable={false}
+                />
+                <span>{consumeNotice.message}</span>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {resetCreditsLoading ? (
+            <div className='text-muted-foreground mt-3 flex items-center gap-2 text-xs'>
+              <Spinner />
+              <span>{t('Loading reset credits...')}</span>
+            </div>
+          ) : usableResetCredits.length === 0 ? (
+            <div className='text-muted-foreground mt-3 text-xs'>
+              {t('No reset credits available.')}
+            </div>
+          ) : (
+            <div className='mt-3 flex flex-col gap-3'>
+              <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+                <Select
+                  items={usableResetCredits.map((credit) => ({
+                    value: getResetCreditID(credit),
+                    label: getResetCreditTitle(credit, t),
+                  }))}
+                  value={activeSelectedResetCreditId}
+                  onValueChange={(value) => {
+                    if (value) setSelectedResetCreditId(value)
+                  }}
+                >
+                  <SelectTrigger className='w-full sm:w-[260px]'>
+                    <SelectValue placeholder={t('Select a reset credit')} />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectGroup>
+                      {usableResetCredits.map((credit) => {
+                        const creditId = getResetCreditID(credit)
+                        return (
+                          <SelectItem key={creditId} value={creditId}>
+                            {getResetCreditTitle(credit, t)}
+                          </SelectItem>
+                        )
+                      })}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type='button'
+                  size='sm'
+                  onClick={handleConsumeResetCredit}
+                  disabled={
+                    !activeSelectedResetCreditId || consumingResetCredit
+                  }
+                >
+                  {consumingResetCredit ? (
+                    <Spinner data-icon='inline-start' />
+                  ) : (
+                    <RefreshCw data-icon='inline-start' />
+                  )}
+                  {t('Reset rate limit')}
+                </Button>
+              </div>
+
+              {selectedResetCredit && (
+                <div className='bg-muted/30 rounded-md px-3 py-2'>
+                  <div className='flex min-w-0 items-start gap-3'>
+                    {getResetCreditProfileImageURL(selectedResetCredit) && (
+                      <Avatar size='sm' className='mt-0.5'>
+                        <AvatarImage
+                          src={getResetCreditProfileImageURL(
+                            selectedResetCredit
+                          )}
+                          alt={getResetCreditTitle(selectedResetCredit, t)}
+                        />
+                        <AvatarFallback>
+                          {getResetCreditAvatarFallback(selectedResetCredit, t)}
+                        </AvatarFallback>
+                      </Avatar>
+                    )}
+                    <div className='min-w-0 flex-1'>
+                      <div className='truncate text-sm font-medium'>
+                        {getResetCreditTitle(selectedResetCredit, t)}
+                      </div>
+                      <div className='text-muted-foreground mt-1 text-xs'>
+                        {getResetCreditDescription(selectedResetCredit, t)}
+                      </div>
+                      {getResetCreditProfileUserID(selectedResetCredit) && (
+                        <div className='text-muted-foreground mt-2 flex min-w-0 items-center gap-2 text-xs'>
+                          <span className='flex-shrink-0'>
+                            {t('Profile user ID:')}
+                          </span>
+                          <span className='min-w-0 truncate font-mono'>
+                            {getResetCreditProfileUserID(selectedResetCredit)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -15,47 +15,76 @@ import (
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-func GetCodexChannelUsage(c *gin.Context) {
+type codexWhamFetchFunc func(
+	ctx context.Context,
+	client *http.Client,
+	baseURL string,
+	accessToken string,
+	accountID string,
+) (statusCode int, body []byte, err error)
+
+var (
+	codexWhamUsageFetcher              = service.FetchCodexWhamUsage
+	codexWhamResetCreditsFetcher       = service.FetchCodexWhamRateLimitResetCredits
+	codexWhamResetCreditConsumer       = service.ConsumeCodexWhamRateLimitResetCredit
+	codexOAuthTokenRefresher           = service.RefreshCodexOAuthTokenWithProxy
+	codexRedeemRequestIDGenerator      = uuid.NewString
+	codexWhamUpstreamRequestTimeout    = 15 * time.Second
+	codexWhamCredentialRefreshTimeout  = 10 * time.Second
+	codexWhamOriginCredentialErrorText = "解析凭证失败，请检查渠道配置"
+)
+
+func loadCodexChannelCredential(c *gin.Context) (*model.Channel, *codex.OAuthKey, string, string, bool) {
 	channelId, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		common.ApiError(c, fmt.Errorf("invalid channel id: %w", err))
-		return
+		return nil, nil, "", "", false
 	}
 
 	ch, err := model.GetChannelById(channelId, true)
 	if err != nil {
 		common.ApiError(c, err)
-		return
+		return nil, nil, "", "", false
 	}
 	if ch == nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "channel not found"})
-		return
+		return nil, nil, "", "", false
 	}
 	if ch.Type != constant.ChannelTypeCodex {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "channel type is not Codex"})
-		return
+		return nil, nil, "", "", false
 	}
 	if ch.ChannelInfo.IsMultiKey {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "multi-key channel is not supported"})
-		return
+		return nil, nil, "", "", false
 	}
 
 	oauthKey, err := codex.ParseOAuthKey(strings.TrimSpace(ch.Key))
 	if err != nil {
 		common.SysError("failed to parse oauth key: " + err.Error())
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "解析凭证失败，请检查渠道配置"})
-		return
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": codexWhamOriginCredentialErrorText})
+		return nil, nil, "", "", false
 	}
 	accessToken := strings.TrimSpace(oauthKey.AccessToken)
 	accountID := strings.TrimSpace(oauthKey.AccountID)
 	if accessToken == "" {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "codex channel: access_token is required"})
-		return
+		return nil, nil, "", "", false
 	}
 	if accountID == "" {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "codex channel: account_id is required"})
+		return nil, nil, "", "", false
+	}
+
+	return ch, oauthKey, accessToken, accountID, true
+}
+
+func handleCodexWhamProxyRequest(c *gin.Context, actionName string, failureMessage string, fetch codexWhamFetchFunc) {
+	ch, oauthKey, accessToken, accountID, ok := loadCodexChannelCredential(c)
+	if !ok {
 		return
 	}
 
@@ -65,22 +94,22 @@ func GetCodexChannelUsage(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), codexWhamUpstreamRequestTimeout)
 	defer cancel()
 
-	statusCode, body, err := service.FetchCodexWhamUsage(ctx, client, ch.GetBaseURL(), accessToken, accountID)
+	statusCode, body, err := fetch(ctx, client, ch.GetBaseURL(), accessToken, accountID)
 	if err != nil {
-		common.SysError("failed to fetch codex usage: " + err.Error())
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取用量信息失败，请稍后重试"})
+		common.SysError("failed to " + actionName + ": " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": failureMessage})
 		return
 	}
 
 	if (statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden) && strings.TrimSpace(oauthKey.RefreshToken) != "" {
-		refreshCtx, refreshCancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+		refreshCtx, refreshCancel := context.WithTimeout(c.Request.Context(), codexWhamCredentialRefreshTimeout)
 		defer refreshCancel()
 
-		res, refreshErr := service.RefreshCodexOAuthTokenWithProxy(refreshCtx, oauthKey.RefreshToken, ch.GetSetting().Proxy)
-		if refreshErr == nil {
+		res, refreshErr := codexOAuthTokenRefresher(refreshCtx, oauthKey.RefreshToken, ch.GetSetting().Proxy)
+		if refreshErr == nil && res != nil {
 			oauthKey.AccessToken = res.AccessToken
 			oauthKey.RefreshToken = res.RefreshToken
 			oauthKey.LastRefresh = time.Now().Format(time.RFC3339)
@@ -96,12 +125,12 @@ func GetCodexChannelUsage(c *gin.Context) {
 				service.ResetProxyClientCache()
 			}
 
-			ctx2, cancel2 := context.WithTimeout(c.Request.Context(), 15*time.Second)
+			ctx2, cancel2 := context.WithTimeout(c.Request.Context(), codexWhamUpstreamRequestTimeout)
 			defer cancel2()
-			statusCode, body, err = service.FetchCodexWhamUsage(ctx2, client, ch.GetBaseURL(), oauthKey.AccessToken, accountID)
+			statusCode, body, err = fetch(ctx2, client, ch.GetBaseURL(), oauthKey.AccessToken, accountID)
 			if err != nil {
-				common.SysError("failed to fetch codex usage after refresh: " + err.Error())
-				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取用量信息失败，请稍后重试"})
+				common.SysError("failed to " + actionName + " after refresh: " + err.Error())
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": failureMessage})
 				return
 			}
 		}
@@ -112,15 +141,55 @@ func GetCodexChannelUsage(c *gin.Context) {
 		payload = string(body)
 	}
 
-	ok := statusCode >= 200 && statusCode < 300
+	success := statusCode >= 200 && statusCode < 300
 	resp := gin.H{
-		"success":         ok,
+		"success":         success,
 		"message":         "",
 		"upstream_status": statusCode,
 		"data":            payload,
 	}
-	if !ok {
+	if !success {
 		resp["message"] = fmt.Sprintf("upstream status: %d", statusCode)
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func GetCodexChannelUsage(c *gin.Context) {
+	handleCodexWhamProxyRequest(c, "fetch codex usage", "获取用量信息失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
+		return codexWhamUsageFetcher(ctx, client, baseURL, accessToken, accountID)
+	})
+}
+
+func GetCodexChannelRateLimitResetCredits(c *gin.Context) {
+	handleCodexWhamProxyRequest(c, "fetch codex rate limit reset credits", "获取重置额度失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
+		return codexWhamResetCreditsFetcher(ctx, client, baseURL, accessToken, accountID)
+	})
+}
+
+type consumeCodexRateLimitResetCreditRequest struct {
+	CreditID        string `json:"credit_id"`
+	RedeemRequestID string `json:"redeem_request_id,omitempty"`
+}
+
+func ConsumeCodexChannelRateLimitResetCredit(c *gin.Context) {
+	var req consumeCodexRateLimitResetCreditRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	creditID := strings.TrimSpace(req.CreditID)
+	if creditID == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "credit_id is required"})
+		return
+	}
+
+	redeemRequestID := strings.TrimSpace(req.RedeemRequestID)
+	if redeemRequestID == "" {
+		redeemRequestID = codexRedeemRequestIDGenerator()
+	}
+
+	handleCodexWhamProxyRequest(c, "consume codex rate limit reset credit", "重置额度失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
+		return codexWhamResetCreditConsumer(ctx, client, baseURL, accessToken, accountID, creditID, redeemRequestID)
+	})
 }
