@@ -55,6 +55,12 @@ export type CodexUsageResponse = {
 
 export type CodexRateLimitResetCredit = {
   id?: string
+  reset_type?: string
+  status?: string
+  granted_at?: string | null
+  expires_at?: string | null
+  redeem_started_at?: string | null
+  redeemed_at?: string | null
   title?: string
   description?: string
   profile_user_id?: string

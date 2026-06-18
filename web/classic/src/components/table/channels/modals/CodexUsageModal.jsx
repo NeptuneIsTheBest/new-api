@@ -27,8 +27,9 @@ import {
   Tag,
   Descriptions,
   Collapse,
+  Select,
 } from '@douyinfe/semi-ui';
-import { API, showError } from '../../../../helpers';
+import { API, showError, showSuccess } from '../../../../helpers';
 import { MOBILE_BREAKPOINT } from '../../../../hooks/common/useIsMobile';
 
 const { Text } = Typography;
@@ -136,6 +137,127 @@ const formatUnixSeconds = (unixSeconds) => {
 const getDisplayText = (value) => {
   if (value == null) return '';
   return String(value).trim();
+};
+
+const formatISODateTime = (value) => {
+  const text = getDisplayText(value);
+  if (!text) return '-';
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return '-';
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate(),
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds(),
+  )}`;
+};
+
+const humanizeRawValue = (value) =>
+  getDisplayText(value)
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const getResetCreditID = (credit) => getDisplayText(credit?.id);
+
+const getResetCreditTitle = (credit, t) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  return (
+    getDisplayText(credit?.title) || getResetCreditID(credit) || tt('重置额度')
+  );
+};
+
+const getResetCreditDescription = (credit, t) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  return getDisplayText(credit?.description) || tt('暂无描述');
+};
+
+const getResetCreditStatus = (credit) => getDisplayText(credit?.status);
+
+const getResetCreditResetType = (credit) => getDisplayText(credit?.reset_type);
+
+const getResetCreditProfileUserID = (credit) =>
+  getDisplayText(credit?.profile_user_id);
+
+const getResetCreditProfileImageURL = (credit) =>
+  getDisplayText(credit?.profile_image_url);
+
+const getResetCreditAvatarFallback = (credit, t) =>
+  getResetCreditTitle(credit, t).slice(0, 1).toUpperCase() || 'R';
+
+const canRedeemResetCredit = (credit) => {
+  if (!credit) return false;
+  return (
+    getDisplayText(credit.redeemed_at) === '' &&
+    ['', 'available'].includes(getResetCreditStatus(credit).toLowerCase())
+  );
+};
+
+const getResetCreditStatusTag = (credit, t) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  const status = getResetCreditStatus(credit);
+  const normalized = status.toLowerCase();
+  if (normalized === 'available') {
+    return <Tag color='green'>{tt('可用')}</Tag>;
+  }
+  if (normalized === 'redeemed') {
+    return <Tag color='grey'>{tt('已兑换')}</Tag>;
+  }
+  if (normalized === 'expired') {
+    return <Tag color='amber'>{tt('已过期')}</Tag>;
+  }
+  if (normalized === 'redeeming' || normalized === 'in_progress') {
+    return <Tag color='blue'>{tt('兑换中')}</Tag>;
+  }
+  if (normalized === 'unavailable') {
+    return <Tag color='grey'>{tt('不可用')}</Tag>;
+  }
+  return (
+    <Tag color='grey'>{status ? humanizeRawValue(status) : tt('未知状态')}</Tag>
+  );
+};
+
+const getResetCreditsPayload = (response) => {
+  const raw = response?.data;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw;
+};
+
+const getConsumeResponseData = (response) => {
+  const raw = response?.data;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw;
+};
+
+const formatConsumeFailureMessage = (response, t) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  const data = getConsumeResponseData(response);
+  const code = getDisplayText(data?.code);
+  const message =
+    getDisplayText(data?.message) || getDisplayText(response?.message);
+
+  if (code === 'already_redeemed') {
+    return tt('此重置额度已被兑换。');
+  }
+  if (code === 'no_credit') {
+    return tt('此账号没有可用的重置额度。');
+  }
+  if (code === 'nothing_to_reset') {
+    return tt('当前没有可重置的速率限制。');
+  }
+  if (message && code) return `${message} (${code})`;
+  return message || code || tt('重置速率限制失败');
+};
+
+const createRedeemRequestID = () => {
+  if (
+    typeof crypto !== 'undefined' &&
+    typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID();
+  }
+  return undefined;
 };
 
 const isMobileViewport = () =>
@@ -371,7 +493,273 @@ const RateLimitGroupSection = ({
   );
 };
 
-const CodexUsageView = ({ t, record, payload, onCopy, onRefresh }) => {
+const ResetCreditField = ({ label, value, monospace = false }) => (
+  <div className='flex min-w-0 items-center gap-2 text-xs leading-5 text-semi-color-text-2'>
+    <span className='shrink-0'>{label}</span>
+    <span
+      className={`min-w-0 truncate text-semi-color-text-0 ${
+        monospace ? 'font-mono' : ''
+      }`}
+      title={value}
+    >
+      {value || '-'}
+    </span>
+  </div>
+);
+
+const ResetCreditCard = ({ t, credit, selected }) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  const title = getResetCreditTitle(credit, tt);
+  const profileImageURL = getResetCreditProfileImageURL(credit);
+  const profileUserID = getResetCreditProfileUserID(credit);
+  const status = getResetCreditStatus(credit);
+
+  return (
+    <div
+      className={`rounded-lg border border-semi-color-border px-3 py-2 ${
+        selected ? 'bg-semi-color-fill-0' : 'bg-semi-color-bg-0'
+      }`}
+    >
+      <div className='flex min-w-0 items-start gap-3'>
+        {profileImageURL ? (
+          <img
+            src={profileImageURL}
+            alt={title}
+            className='mt-0.5 h-7 w-7 shrink-0 rounded-full object-cover'
+            onError={(event) => {
+              event.currentTarget.style.display = 'none';
+            }}
+          />
+        ) : (
+          <div className='mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-semi-color-fill-0 text-xs font-semibold text-semi-color-text-2'>
+            {getResetCreditAvatarFallback(credit, tt)}
+          </div>
+        )}
+        <div className='min-w-0 flex-1'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <div className='min-w-0 flex-1 truncate text-sm font-semibold text-semi-color-text-0'>
+              {title}
+            </div>
+            {getResetCreditStatusTag(credit, tt)}
+          </div>
+          <div className='mt-1 text-xs leading-5 text-semi-color-text-2'>
+            {getResetCreditDescription(credit, tt)}
+          </div>
+          <div className='mt-2 grid grid-cols-1 gap-1 md:grid-cols-2'>
+            <ResetCreditField
+              label={tt('额度 ID：')}
+              value={getResetCreditID(credit)}
+              monospace={true}
+            />
+            <ResetCreditField
+              label={tt('重置类型：')}
+              value={getResetCreditResetType(credit)}
+              monospace={true}
+            />
+            <ResetCreditField
+              label={tt('状态：')}
+              value={status ? humanizeRawValue(status) : '-'}
+            />
+            <ResetCreditField
+              label={tt('发放时间：')}
+              value={formatISODateTime(credit?.granted_at)}
+            />
+            <ResetCreditField
+              label={tt('过期时间：')}
+              value={formatISODateTime(credit?.expires_at)}
+            />
+            <ResetCreditField
+              label={tt('兑换开始时间：')}
+              value={formatISODateTime(credit?.redeem_started_at)}
+            />
+            <ResetCreditField
+              label={tt('兑换时间：')}
+              value={formatISODateTime(credit?.redeemed_at)}
+            />
+            {profileUserID ? (
+              <ResetCreditField
+                label={tt('Profile 用户 ID：')}
+                value={profileUserID}
+                monospace={true}
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const CodexResetCreditsPanel = ({
+  t,
+  response,
+  loading,
+  error,
+  selectedResetCreditId,
+  onSelectedResetCreditIdChange,
+  consuming,
+  consumeNotice,
+  onConsume,
+  onRefresh,
+}) => {
+  const tt = typeof t === 'function' ? t : (v) => v;
+  const payload = getResetCreditsPayload(response);
+  const resetCredits = Array.isArray(payload?.credits)
+    ? payload.credits.filter((credit) => getResetCreditID(credit) !== '')
+    : [];
+  const redeemableResetCredits = resetCredits.filter(canRedeemResetCredit);
+  const availableCount = Number.isFinite(Number(payload?.available_count))
+    ? Number(payload?.available_count)
+    : redeemableResetCredits.length;
+  const activeSelectedResetCreditId = redeemableResetCredits.some(
+    (credit) => getResetCreditID(credit) === selectedResetCreditId,
+  )
+    ? selectedResetCreditId
+    : getResetCreditID(redeemableResetCredits[0]);
+  const selectedResetCredit = resetCredits.find(
+    (credit) => getResetCreditID(credit) === activeSelectedResetCreditId,
+  );
+
+  useEffect(() => {
+    if (
+      activeSelectedResetCreditId &&
+      activeSelectedResetCreditId !== selectedResetCreditId
+    ) {
+      onSelectedResetCreditIdChange(activeSelectedResetCreditId);
+    }
+  }, [
+    activeSelectedResetCreditId,
+    onSelectedResetCreditIdChange,
+    selectedResetCreditId,
+  ]);
+
+  return (
+    <div className='rounded-xl border border-semi-color-border bg-semi-color-bg-0 p-3'>
+      <div className='flex flex-wrap items-start justify-between gap-3'>
+        <div className='min-w-0'>
+          <div className='text-sm font-semibold text-semi-color-text-0'>
+            {tt('速率限制重置')}
+          </div>
+          <Text type='tertiary' size='small'>
+            {tt('使用可用的重置额度清除此 Codex 当前的速率限制。')}
+          </Text>
+        </div>
+        <div className='flex flex-wrap items-center gap-2'>
+          <Tag color={availableCount > 0 ? 'green' : 'grey'} type='light'>
+            {tt('可用数量：')}
+            {availableCount}
+          </Tag>
+          <Button
+            size='small'
+            type='tertiary'
+            theme='outline'
+            onClick={onRefresh}
+            loading={loading}
+          >
+            {tt('刷新')}
+          </Button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className='mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700'>
+          {error}
+        </div>
+      ) : null}
+
+      {consumeNotice ? (
+        <div
+          className={`mt-3 rounded-lg border px-3 py-2 text-sm ${
+            consumeNotice.type === 'success'
+              ? 'border-semi-color-success-light-default bg-semi-color-success-light-default text-semi-color-success'
+              : 'border-red-200 bg-red-50 text-red-700'
+          }`}
+        >
+          {consumeNotice.message}
+        </div>
+      ) : null}
+
+      {loading ? (
+        <div className='mt-4 flex items-center justify-center py-4'>
+          <Spin spinning={true} tip={tt('正在加载重置额度...')} />
+        </div>
+      ) : resetCredits.length === 0 ? (
+        <div className='mt-3 text-sm text-semi-color-text-2'>
+          {tt('暂无可用重置额度。')}
+        </div>
+      ) : (
+        <div className='mt-3 flex flex-col gap-3'>
+          {redeemableResetCredits.length > 0 ? (
+            <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+              <Select
+                className='w-full sm:w-[280px]'
+                value={activeSelectedResetCreditId}
+                placeholder={tt('选择重置额度')}
+                optionList={redeemableResetCredits.map((credit) => ({
+                  value: getResetCreditID(credit),
+                  label: getResetCreditTitle(credit, tt),
+                }))}
+                onChange={(value) => {
+                  onSelectedResetCreditIdChange(getDisplayText(value));
+                }}
+              />
+              <Button
+                size='small'
+                type='primary'
+                theme='solid'
+                loading={consuming}
+                disabled={!activeSelectedResetCreditId || consuming}
+                onClick={() => onConsume?.(activeSelectedResetCreditId)}
+              >
+                {tt('重置速率限制')}
+              </Button>
+            </div>
+          ) : (
+            <div className='text-sm text-semi-color-text-2'>
+              {tt('没有可兑换的重置额度。')}
+            </div>
+          )}
+
+          <div className='flex max-h-80 flex-col gap-2 overflow-y-auto pr-1'>
+            {resetCredits.map((credit) => {
+              const creditId = getResetCreditID(credit);
+              return (
+                <ResetCreditCard
+                  key={creditId}
+                  t={tt}
+                  credit={credit}
+                  selected={
+                    creditId ===
+                    (selectedResetCredit
+                      ? getResetCreditID(selectedResetCredit)
+                      : '')
+                  }
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const CodexUsageView = ({
+  t,
+  record,
+  payload,
+  onCopy,
+  onRefresh,
+  resetCreditsResponse,
+  resetCreditsLoading,
+  resetCreditsError,
+  selectedResetCreditId,
+  onSelectedResetCreditIdChange,
+  consumingResetCredit,
+  consumeNotice,
+  onRefreshResetCredits,
+  onConsumeResetCredit,
+}) => {
   const tt = typeof t === 'function' ? t : (v) => v;
   const [showRawJson, setShowRawJson] = useState(false);
   const data = payload?.data ?? null;
@@ -533,6 +921,19 @@ const CodexUsageView = ({ t, record, payload, onCopy, onRefresh }) => {
         ) : null}
       </div>
 
+      <CodexResetCreditsPanel
+        t={tt}
+        response={resetCreditsResponse}
+        loading={resetCreditsLoading}
+        error={resetCreditsError}
+        selectedResetCreditId={selectedResetCreditId}
+        onSelectedResetCreditIdChange={onSelectedResetCreditIdChange}
+        consuming={consumingResetCredit}
+        consumeNotice={consumeNotice}
+        onRefresh={onRefreshResetCredits}
+        onConsume={onConsumeResetCredit}
+      />
+
       <Collapse
         activeKey={showRawJson ? ['raw-json'] : []}
         onChange={(activeKey) => {
@@ -565,8 +966,17 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
   const tt = typeof t === 'function' ? t : (v) => v;
   const [loading, setLoading] = useState(!initialPayload);
   const [payload, setPayload] = useState(initialPayload ?? null);
+  const [resetCreditsResponse, setResetCreditsResponse] = useState(null);
+  const [resetCreditsLoading, setResetCreditsLoading] = useState(false);
+  const [resetCreditsError, setResetCreditsError] = useState('');
+  const [selectedResetCreditId, setSelectedResetCreditId] = useState('');
+  const [consumingResetCredit, setConsumingResetCredit] = useState(false);
+  const [consumeNotice, setConsumeNotice] = useState(null);
   const hasShownErrorRef = useRef(false);
+  const hasShownResetCreditsErrorRef = useRef(false);
   const mountedRef = useRef(true);
+  const resetCreditsRequestRef = useRef(0);
+  const consumeResetCreditRequestRef = useRef(0);
   const recordId = record?.id;
 
   const fetchUsage = useCallback(async () => {
@@ -598,17 +1008,153 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
     }
   }, [recordId, tt]);
 
+  const fetchResetCredits = useCallback(async () => {
+    if (!recordId) {
+      if (mountedRef.current) {
+        setResetCreditsResponse(null);
+        setResetCreditsError('');
+      }
+      return;
+    }
+
+    const requestId = resetCreditsRequestRef.current + 1;
+    resetCreditsRequestRef.current = requestId;
+
+    if (mountedRef.current) {
+      setResetCreditsLoading(true);
+      setResetCreditsError('');
+    }
+
+    try {
+      const res = await API.get(
+        `/api/channel/${recordId}/codex/rate-limit-reset-credits`,
+        {
+          skipErrorHandler: true,
+          disableDuplicate: true,
+        },
+      );
+      if (!mountedRef.current || resetCreditsRequestRef.current !== requestId) {
+        return;
+      }
+
+      const response = res?.data ?? null;
+      setResetCreditsResponse(response);
+      if (!response?.success) {
+        const message =
+          getDisplayText(response?.message) || tt('获取重置额度失败');
+        setResetCreditsError(message);
+        if (!hasShownResetCreditsErrorRef.current) {
+          hasShownResetCreditsErrorRef.current = true;
+          showError(message);
+        }
+      }
+    } catch (error) {
+      if (!mountedRef.current || resetCreditsRequestRef.current !== requestId) {
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : tt('获取重置额度失败');
+      setResetCreditsResponse(null);
+      setResetCreditsError(message);
+      if (!hasShownResetCreditsErrorRef.current) {
+        hasShownResetCreditsErrorRef.current = true;
+        showError(message);
+      }
+    } finally {
+      if (mountedRef.current && resetCreditsRequestRef.current === requestId) {
+        setResetCreditsLoading(false);
+      }
+    }
+  }, [recordId, tt]);
+
+  const handleConsumeResetCredit = useCallback(
+    async (creditId) => {
+      const requestedCreditId = getDisplayText(creditId);
+      if (!recordId || !requestedCreditId) return;
+
+      const requestId = consumeResetCreditRequestRef.current + 1;
+      consumeResetCreditRequestRef.current = requestId;
+
+      if (mountedRef.current) {
+        setConsumingResetCredit(true);
+        setConsumeNotice(null);
+      }
+
+      try {
+        const res = await API.post(
+          `/api/channel/${recordId}/codex/rate-limit-reset-credits/consume`,
+          {
+            credit_id: requestedCreditId,
+            redeem_request_id: createRedeemRequestID(),
+          },
+          { skipErrorHandler: true },
+        );
+        if (
+          !mountedRef.current ||
+          consumeResetCreditRequestRef.current !== requestId
+        ) {
+          return;
+        }
+
+        const response = res?.data ?? {};
+        const data = getConsumeResponseData(response);
+        const code = getDisplayText(data?.code);
+        if (code === 'reset') {
+          const message = tt('速率限制重置成功。');
+          setConsumeNotice({ type: 'success', message });
+          showSuccess(message);
+          await Promise.all([fetchUsage(), fetchResetCredits()]);
+          return;
+        }
+
+        const message = formatConsumeFailureMessage(response, tt);
+        setConsumeNotice({ type: 'error', message });
+        showError(message);
+      } catch (error) {
+        if (
+          !mountedRef.current ||
+          consumeResetCreditRequestRef.current !== requestId
+        ) {
+          return;
+        }
+        const message =
+          error instanceof Error ? error.message : tt('重置速率限制失败');
+        setConsumeNotice({ type: 'error', message });
+        showError(message);
+      } finally {
+        if (
+          mountedRef.current &&
+          consumeResetCreditRequestRef.current === requestId
+        ) {
+          setConsumingResetCredit(false);
+        }
+      }
+    },
+    [fetchResetCredits, fetchUsage, recordId, tt],
+  );
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      resetCreditsRequestRef.current += 1;
+      consumeResetCreditRequestRef.current += 1;
     };
   }, []);
 
   useEffect(() => {
-    if (initialPayload) return;
-    fetchUsage().catch(() => {});
-  }, [fetchUsage, initialPayload]);
+    setResetCreditsResponse(null);
+    setResetCreditsError('');
+    setSelectedResetCreditId('');
+    setConsumeNotice(null);
+    setConsumingResetCredit(false);
+    hasShownResetCreditsErrorRef.current = false;
+
+    if (!initialPayload) {
+      fetchUsage().catch(() => {});
+    }
+    fetchResetCredits().catch(() => {});
+  }, [fetchResetCredits, fetchUsage, initialPayload, recordId]);
 
   if (loading) {
     return (
@@ -643,6 +1189,15 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
       payload={payload}
       onCopy={onCopy}
       onRefresh={fetchUsage}
+      resetCreditsResponse={resetCreditsResponse}
+      resetCreditsLoading={resetCreditsLoading}
+      resetCreditsError={resetCreditsError}
+      selectedResetCreditId={selectedResetCreditId}
+      onSelectedResetCreditIdChange={setSelectedResetCreditId}
+      consumingResetCredit={consumingResetCredit}
+      consumeNotice={consumeNotice}
+      onRefreshResetCredits={fetchResetCredits}
+      onConsumeResetCredit={handleConsumeResetCredit}
     />
   );
 };

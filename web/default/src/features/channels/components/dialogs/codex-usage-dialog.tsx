@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import dayjs from '@/lib/dayjs'
+import { cn } from '@/lib/utils'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -373,6 +374,21 @@ function trimDisplayValue(value: unknown): string {
   return String(value).trim()
 }
 
+function formatISODateTime(value: unknown): string {
+  const text = trimDisplayValue(value)
+  if (!text) return '-'
+  const parsed = dayjs(text)
+  return parsed.isValid() ? parsed.format('YYYY-MM-DD HH:mm:ss') : '-'
+}
+
+function humanizeRawValue(value: string): string {
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
 function getResetCreditsPayload(
   response: CodexRateLimitResetCreditsResponse | null
 ) {
@@ -405,6 +421,42 @@ function getResetCreditDescription(
   return trimDisplayValue(credit.description) || t('No description')
 }
 
+function getResetCreditResetType(credit: CodexRateLimitResetCredit | null) {
+  if (!credit) return ''
+  return trimDisplayValue(credit.reset_type)
+}
+
+function getResetCreditStatus(credit: CodexRateLimitResetCredit | null) {
+  if (!credit) return ''
+  return trimDisplayValue(credit.status)
+}
+
+function getResetCreditStatusBadge(
+  status: string,
+  t: (key: string) => string
+): { label: string; variant: StatusBadgeProps['variant'] } {
+  const normalized = status.toLowerCase()
+  if (normalized === 'available') {
+    return { label: t('Available'), variant: 'success' }
+  }
+  if (normalized === 'redeemed') {
+    return { label: t('Redeemed'), variant: 'neutral' }
+  }
+  if (normalized === 'expired') {
+    return { label: t('Expired'), variant: 'warning' }
+  }
+  if (normalized === 'redeeming' || normalized === 'in_progress') {
+    return { label: t('Redeeming'), variant: 'info' }
+  }
+  if (normalized === 'unavailable') {
+    return { label: t('Unavailable'), variant: 'neutral' }
+  }
+  return {
+    label: status ? humanizeRawValue(status) : t('Unknown'),
+    variant: 'neutral',
+  }
+}
+
 function getResetCreditProfileUserID(
   credit: CodexRateLimitResetCredit | null
 ): string {
@@ -425,6 +477,113 @@ function getResetCreditAvatarFallback(
 ): string {
   const title = getResetCreditTitle(credit, t)
   return title.slice(0, 1).toUpperCase() || 'R'
+}
+
+function canRedeemResetCredit(credit: CodexRateLimitResetCredit | null) {
+  if (!credit) return false
+  if (trimDisplayValue(credit.redeemed_at) !== '') return false
+
+  const normalizedStatus = getResetCreditStatus(credit).toLowerCase()
+  return normalizedStatus === '' || normalizedStatus === 'available'
+}
+
+function ResetCreditField(props: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className='flex min-w-0 items-center gap-2'>
+      <span className='text-muted-foreground flex-shrink-0'>{props.label}</span>
+      <span
+        className={cn('min-w-0 truncate', props.mono && 'font-mono')}
+        title={props.value}
+      >
+        {props.value || '-'}
+      </span>
+    </div>
+  )
+}
+
+function ResetCreditCard(props: {
+  credit: CodexRateLimitResetCredit
+  selected: boolean
+  t: (key: string) => string
+}) {
+  const { credit, selected, t } = props
+  const title = getResetCreditTitle(credit, t)
+  const status = getResetCreditStatus(credit)
+  const statusBadge = getResetCreditStatusBadge(status, t)
+  const resetType = getResetCreditResetType(credit)
+  const profileImageURL = getResetCreditProfileImageURL(credit)
+  const profileUserID = getResetCreditProfileUserID(credit)
+
+  return (
+    <div
+      className={cn('rounded-md border px-3 py-2', selected && 'bg-muted/40')}
+    >
+      <div className='flex min-w-0 items-start gap-3'>
+        {profileImageURL && (
+          <Avatar size='sm' className='mt-0.5'>
+            <AvatarImage src={profileImageURL} alt={title} />
+            <AvatarFallback>
+              {getResetCreditAvatarFallback(credit, t)}
+            </AvatarFallback>
+          </Avatar>
+        )}
+        <div className='min-w-0 flex-1'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <div className='min-w-0 flex-1 truncate text-sm font-medium'>
+              {title}
+            </div>
+            <StatusBadge
+              label={statusBadge.label}
+              variant={statusBadge.variant}
+              copyable={false}
+            />
+          </div>
+          <div className='text-muted-foreground mt-1 text-xs'>
+            {getResetCreditDescription(credit, t)}
+          </div>
+          <div className='text-muted-foreground mt-2 grid grid-cols-1 gap-1 text-xs md:grid-cols-2'>
+            <ResetCreditField
+              label={t('Credit ID:')}
+              value={getResetCreditID(credit)}
+              mono
+            />
+            <ResetCreditField label={t('Reset type:')} value={resetType} mono />
+            <ResetCreditField
+              label={t('Status:')}
+              value={status ? humanizeRawValue(status) : '-'}
+            />
+            <ResetCreditField
+              label={t('Granted at:')}
+              value={formatISODateTime(credit.granted_at)}
+            />
+            <ResetCreditField
+              label={t('Expires at:')}
+              value={formatISODateTime(credit.expires_at)}
+            />
+            <ResetCreditField
+              label={t('Redeem started at:')}
+              value={formatISODateTime(credit.redeem_started_at)}
+            />
+            <ResetCreditField
+              label={t('Redeemed at:')}
+              value={formatISODateTime(credit.redeemed_at)}
+            />
+            {profileUserID && (
+              <ResetCreditField
+                label={t('Profile user ID:')}
+                value={profileUserID}
+                mono
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function createRedeemRequestID(): string | undefined {
@@ -570,35 +729,39 @@ export function CodexUsageDialog({
     [resetCreditsResponse]
   )
 
-  const usableResetCredits = useMemo(() => {
+  const resetCredits = useMemo(() => {
     return (resetCreditsPayload?.credits ?? []).filter((credit) => {
       return credit && getResetCreditID(credit) !== ''
     })
   }, [resetCreditsPayload])
 
+  const redeemableResetCredits = useMemo(() => {
+    return resetCredits.filter((credit) => canRedeemResetCredit(credit))
+  }, [resetCredits])
+
   const activeSelectedResetCreditId = useMemo(() => {
-    if (usableResetCredits.length === 0) return ''
-    const selectedStillExists = usableResetCredits.some(
+    if (redeemableResetCredits.length === 0) return ''
+    const selectedStillExists = redeemableResetCredits.some(
       (credit) => getResetCreditID(credit) === selectedResetCreditId
     )
     return selectedStillExists
       ? selectedResetCreditId
-      : getResetCreditID(usableResetCredits[0])
-  }, [selectedResetCreditId, usableResetCredits])
+      : getResetCreditID(redeemableResetCredits[0])
+  }, [selectedResetCreditId, redeemableResetCredits])
 
   const selectedResetCredit = useMemo(() => {
     return (
-      usableResetCredits.find(
+      resetCredits.find(
         (credit) => getResetCreditID(credit) === activeSelectedResetCreditId
       ) ?? null
     )
-  }, [activeSelectedResetCreditId, usableResetCredits])
+  }, [activeSelectedResetCreditId, resetCredits])
 
   const availableResetCreditsCount = useMemo(() => {
     const count = Number(resetCreditsPayload?.available_count)
     if (Number.isFinite(count)) return count
-    return usableResetCredits.length
-  }, [resetCreditsPayload?.available_count, usableResetCredits.length])
+    return redeemableResetCredits.length
+  }, [redeemableResetCredits.length, resetCreditsPayload?.available_count])
 
   const handleConsumeResetCredit = useCallback(async () => {
     const requestedChannelId = channelId
@@ -906,93 +1069,80 @@ export function CodexUsageDialog({
               <Spinner />
               <span>{t('Loading reset credits...')}</span>
             </div>
-          ) : usableResetCredits.length === 0 ? (
+          ) : resetCredits.length === 0 ? (
             <div className='text-muted-foreground mt-3 text-xs'>
               {t('No reset credits available.')}
             </div>
           ) : (
             <div className='mt-3 flex flex-col gap-3'>
-              <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-                <Select
-                  items={usableResetCredits.map((credit) => ({
-                    value: getResetCreditID(credit),
-                    label: getResetCreditTitle(credit, t),
-                  }))}
-                  value={activeSelectedResetCreditId}
-                  onValueChange={(value) => {
-                    if (value) setSelectedResetCreditId(value)
-                  }}
-                >
-                  <SelectTrigger className='w-full sm:w-[260px]'>
-                    <SelectValue placeholder={t('Select a reset credit')} />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectGroup>
-                      {usableResetCredits.map((credit) => {
-                        const creditId = getResetCreditID(credit)
-                        return (
-                          <SelectItem key={creditId} value={creditId}>
-                            {getResetCreditTitle(credit, t)}
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <Button
-                  type='button'
-                  size='sm'
-                  onClick={handleConsumeResetCredit}
-                  disabled={
-                    !activeSelectedResetCreditId || consumingResetCredit
-                  }
-                >
-                  {consumingResetCredit ? (
-                    <Spinner data-icon='inline-start' />
-                  ) : (
-                    <RefreshCw data-icon='inline-start' />
-                  )}
-                  {t('Reset rate limit')}
-                </Button>
-              </div>
-
-              {selectedResetCredit && (
-                <div className='bg-muted/30 rounded-md px-3 py-2'>
-                  <div className='flex min-w-0 items-start gap-3'>
-                    {getResetCreditProfileImageURL(selectedResetCredit) && (
-                      <Avatar size='sm' className='mt-0.5'>
-                        <AvatarImage
-                          src={getResetCreditProfileImageURL(
-                            selectedResetCredit
-                          )}
-                          alt={getResetCreditTitle(selectedResetCredit, t)}
-                        />
-                        <AvatarFallback>
-                          {getResetCreditAvatarFallback(selectedResetCredit, t)}
-                        </AvatarFallback>
-                      </Avatar>
+              {redeemableResetCredits.length > 0 ? (
+                <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+                  <Select
+                    items={redeemableResetCredits.map((credit) => ({
+                      value: getResetCreditID(credit),
+                      label: getResetCreditTitle(credit, t),
+                    }))}
+                    value={activeSelectedResetCreditId}
+                    onValueChange={(value) => {
+                      if (value) setSelectedResetCreditId(value)
+                    }}
+                  >
+                    <SelectTrigger className='w-full sm:w-[260px]'>
+                      <SelectValue placeholder={t('Select a reset credit')} />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        {redeemableResetCredits.map((credit) => {
+                          const creditId = getResetCreditID(credit)
+                          return (
+                            <SelectItem key={creditId} value={creditId}>
+                              {getResetCreditTitle(credit, t)}
+                            </SelectItem>
+                          )
+                        })}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type='button'
+                    size='sm'
+                    onClick={handleConsumeResetCredit}
+                    disabled={
+                      !activeSelectedResetCreditId || consumingResetCredit
+                    }
+                  >
+                    {consumingResetCredit ? (
+                      <Spinner data-icon='inline-start' />
+                    ) : (
+                      <RefreshCw data-icon='inline-start' />
                     )}
-                    <div className='min-w-0 flex-1'>
-                      <div className='truncate text-sm font-medium'>
-                        {getResetCreditTitle(selectedResetCredit, t)}
-                      </div>
-                      <div className='text-muted-foreground mt-1 text-xs'>
-                        {getResetCreditDescription(selectedResetCredit, t)}
-                      </div>
-                      {getResetCreditProfileUserID(selectedResetCredit) && (
-                        <div className='text-muted-foreground mt-2 flex min-w-0 items-center gap-2 text-xs'>
-                          <span className='flex-shrink-0'>
-                            {t('Profile user ID:')}
-                          </span>
-                          <span className='min-w-0 truncate font-mono'>
-                            {getResetCreditProfileUserID(selectedResetCredit)}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                    {t('Reset rate limit')}
+                  </Button>
+                </div>
+              ) : (
+                <div className='text-muted-foreground text-xs'>
+                  {t('No redeemable reset credits available.')}
                 </div>
               )}
+
+              <div className='flex max-h-80 flex-col gap-2 overflow-y-auto pr-1'>
+                {resetCredits.map((credit) => {
+                  const creditId = getResetCreditID(credit)
+                  return (
+                    <ResetCreditCard
+                      key={creditId}
+                      credit={credit}
+                      selected={
+                        creditId ===
+                        (selectedResetCredit
+                          ? getResetCreditID(selectedResetCredit)
+                          : '')
+                      }
+                      t={t}
+                    />
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>
