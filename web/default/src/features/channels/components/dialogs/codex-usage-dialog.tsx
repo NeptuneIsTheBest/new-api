@@ -1027,11 +1027,29 @@ export function CodexUsageDialog({
                 )}
               </p>
             </div>
-            <StatusBadge
-              label={`${t('Available:')} ${availableResetCreditsCount}`}
-              variant={availableResetCreditsCount > 0 ? 'success' : 'neutral'}
-              copyable={false}
-            />
+            <div className='flex flex-wrap items-center gap-2'>
+              <StatusBadge
+                label={`${t('Available:')} ${availableResetCreditsCount}`}
+                variant={
+                  availableResetCreditsCount > 0 ? 'success' : 'neutral'
+                }
+                copyable={false}
+              />
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                onClick={fetchResetCredits}
+                disabled={resetCreditsLoading}
+              >
+                {resetCreditsLoading ? (
+                  <Spinner data-icon='inline-start' />
+                ) : (
+                  <RefreshCw data-icon='inline-start' />
+                )}
+                {t('Refresh')}
+              </Button>
+            </div>
           </div>
 
           {resetCreditsError && (

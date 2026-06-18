@@ -244,10 +244,10 @@ const formatConsumeFailureMessage = (response, t) => {
     return tt('此账号没有可用的重置额度。');
   }
   if (code === 'nothing_to_reset') {
-    return tt('当前没有可重置的速率限制。');
+    return tt('当前没有可重置的 Codex 额度限制。');
   }
   if (message && code) return `${message} (${code})`;
-  return message || code || tt('重置速率限制失败');
+  return message || code || tt('重置 Codex 额度失败');
 };
 
 const createRedeemRequestID = () => {
@@ -547,7 +547,7 @@ const ResetCreditCard = ({ t, credit, selected }) => {
           </div>
           <div className='mt-2 grid grid-cols-1 gap-1 md:grid-cols-2'>
             <ResetCreditField
-              label={tt('额度 ID：')}
+              label={tt('重置额度 ID：')}
               value={getResetCreditID(credit)}
               monospace={true}
             />
@@ -638,10 +638,10 @@ const CodexResetCreditsPanel = ({
       <div className='flex flex-wrap items-start justify-between gap-3'>
         <div className='min-w-0'>
           <div className='text-sm font-semibold text-semi-color-text-0'>
-            {tt('速率限制重置')}
+            {tt('Codex 重置额度')}
           </div>
           <Text type='tertiary' size='small'>
-            {tt('使用可用的重置额度清除此 Codex 当前的速率限制。')}
+            {tt('使用可用的重置额度重置当前 Codex 额度。')}
           </Text>
         </div>
         <div className='flex flex-wrap items-center gap-2'>
@@ -714,7 +714,7 @@ const CodexResetCreditsPanel = ({
                 disabled={!activeSelectedResetCreditId || consuming}
                 onClick={() => onConsume?.(activeSelectedResetCreditId)}
               >
-                {tt('重置速率限制')}
+                {tt('重置 Codex 额度')}
               </Button>
             </div>
           ) : (
@@ -1103,7 +1103,7 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
         const data = getConsumeResponseData(response);
         const code = getDisplayText(data?.code);
         if (code === 'reset') {
-          const message = tt('速率限制重置成功。');
+          const message = tt('Codex 额度已重置。');
           setConsumeNotice({ type: 'success', message });
           showSuccess(message);
           await Promise.all([fetchUsage(), fetchResetCredits()]);
@@ -1121,7 +1121,7 @@ const CodexUsageLoader = ({ t, record, initialPayload, onCopy }) => {
           return;
         }
         const message =
-          error instanceof Error ? error.message : tt('重置速率限制失败');
+          error instanceof Error ? error.message : tt('重置 Codex 额度失败');
         setConsumeNotice({ type: 'error', message });
         showError(message);
       } finally {
