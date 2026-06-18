@@ -681,7 +681,10 @@ const CodexResetCreditsPanel = ({
 
       {loading ? (
         <div className='mt-4 flex items-center justify-center py-4'>
-          <Spin spinning={true} tip={tt('正在加载重置额度...')} />
+          <div className='inline-flex items-center gap-2 whitespace-nowrap text-sm text-semi-color-text-2'>
+            <Spin spinning={true} size='small' />
+            <span>{tt('正在加载重置额度...')}</span>
+          </div>
         </div>
       ) : resetCredits.length === 0 ? (
         <div className='mt-3 text-sm text-semi-color-text-2'>
