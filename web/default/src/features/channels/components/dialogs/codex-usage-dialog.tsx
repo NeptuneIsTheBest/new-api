@@ -52,6 +52,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import {
@@ -644,6 +645,8 @@ export function CodexUsageDialog({
   const [resetCreditsError, setResetCreditsError] = useState('')
   const [selectedResetCreditId, setSelectedResetCreditId] = useState('')
   const [consumingResetCredit, setConsumingResetCredit] = useState(false)
+  const [resetCreditConfirmOpen, setResetCreditConfirmOpen] = useState(false)
+  const [pendingResetCreditId, setPendingResetCreditId] = useState('')
   const [consumeNotice, setConsumeNotice] = useState<ConsumeNotice | null>(null)
   const dialogStateRef = useRef({ open, channelId })
   const resetCreditsRequestRef = useRef(0)
@@ -714,6 +717,8 @@ export function CodexUsageDialog({
     setConsumeNotice(null)
     setResetCreditsLoading(false)
     setConsumingResetCredit(false)
+    setResetCreditConfirmOpen(false)
+    setPendingResetCreditId('')
     /* eslint-enable react-hooks/set-state-in-effect */
 
     if (!open) {
@@ -763,9 +768,9 @@ export function CodexUsageDialog({
     return redeemableResetCredits.length
   }, [redeemableResetCredits.length, resetCreditsPayload?.available_count])
 
-  const handleConsumeResetCredit = useCallback(async () => {
+  const handleConsumeResetCredit = useCallback(async (creditId: string) => {
     const requestedChannelId = channelId
-    const requestedCreditId = activeSelectedResetCreditId
+    const requestedCreditId = creditId
     if (!requestedChannelId || !requestedCreditId) return
 
     const requestId = consumeResetCreditRequestRef.current + 1
@@ -818,7 +823,19 @@ export function CodexUsageDialog({
         setConsumingResetCredit(false)
       }
     }
-  }, [activeSelectedResetCreditId, channelId, fetchResetCredits, onRefresh, t])
+  }, [channelId, fetchResetCredits, onRefresh, t])
+
+  const handleRequestConsumeResetCredit = useCallback(() => {
+    if (!activeSelectedResetCreditId || consumingResetCredit) return
+    setPendingResetCreditId(activeSelectedResetCreditId)
+    setResetCreditConfirmOpen(true)
+  }, [activeSelectedResetCreditId, consumingResetCredit])
+
+  const handleConfirmConsumeResetCredit = useCallback(() => {
+    if (!pendingResetCreditId || consumingResetCredit) return
+    setResetCreditConfirmOpen(false)
+    void handleConsumeResetCredit(pendingResetCreditId)
+  }, [consumingResetCredit, handleConsumeResetCredit, pendingResetCreditId])
 
   const rateLimit = payload?.rate_limit
   const accountType = payload?.plan_type ?? rateLimit?.plan_type
@@ -1124,7 +1141,7 @@ export function CodexUsageDialog({
                   <Button
                     type='button'
                     size='sm'
-                    onClick={handleConsumeResetCredit}
+                    onClick={handleRequestConsumeResetCredit}
                     disabled={
                       !activeSelectedResetCreditId || consumingResetCredit
                     }
@@ -1206,6 +1223,18 @@ export function CodexUsageDialog({
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={resetCreditConfirmOpen}
+        onOpenChange={setResetCreditConfirmOpen}
+        title={t('Reset rate limit')}
+        desc={t(
+          'Use an available reset credit to clear the current Codex rate limit.'
+        )}
+        confirmText={t('Reset rate limit')}
+        disabled={!pendingResetCreditId || consumingResetCredit}
+        isLoading={consumingResetCredit}
+        handleConfirm={handleConfirmConsumeResetCredit}
+      />
     </Dialog>
   )
 }

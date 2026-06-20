@@ -712,7 +712,17 @@ const CodexResetCreditsPanel = ({
                 theme='solid'
                 loading={consuming}
                 disabled={!activeSelectedResetCreditId || consuming}
-                onClick={() => onConsume?.(activeSelectedResetCreditId)}
+                onClick={() => {
+                  const creditId = activeSelectedResetCreditId;
+                  if (!creditId || consuming) return;
+                  Modal.confirm({
+                    title: tt('重置 Codex 额度'),
+                    content: tt('使用可用的重置额度重置当前 Codex 额度。'),
+                    onOk: () => onConsume?.(creditId),
+                    size: 'small',
+                    centered: true,
+                  });
+                }}
               >
                 {tt('重置 Codex 额度')}
               </Button>
