@@ -30,6 +30,7 @@ var (
 	codexWhamUsageFetcher              = service.FetchCodexWhamUsage
 	codexWhamResetCreditsFetcher       = service.FetchCodexWhamRateLimitResetCredits
 	codexWhamResetCreditConsumer       = service.ConsumeCodexWhamRateLimitResetCredit
+	codexWhamUsageResetter             = service.ResetCodexWhamUsage
 	codexOAuthTokenRefresher           = service.RefreshCodexOAuthTokenWithProxy
 	codexRedeemRequestIDGenerator      = uuid.NewString
 	codexWhamUpstreamRequestTimeout    = 15 * time.Second
@@ -163,6 +164,13 @@ func GetCodexChannelUsage(c *gin.Context) {
 func GetCodexChannelRateLimitResetCredits(c *gin.Context) {
 	handleCodexWhamProxyRequest(c, "fetch codex rate limit reset credits", "获取重置额度失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
 		return codexWhamResetCreditsFetcher(ctx, client, baseURL, accessToken, accountID)
+	})
+}
+
+func ResetCodexChannelUsage(c *gin.Context) {
+	redeemRequestID := codexRedeemRequestIDGenerator()
+	handleCodexWhamProxyRequest(c, "reset codex usage", "重置用量失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
+		return codexWhamUsageResetter(ctx, client, baseURL, accessToken, accountID, redeemRequestID)
 	})
 }
 

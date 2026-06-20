@@ -32,6 +32,7 @@ const OBFUSCATED_KEYS = [
 const BRAND_AND_LITERAL_KEYS = new Set([
   'AI Proxy',
   'AIGC2D',
+  'Alibaba Bailian',
   'Alipay',
   'Anthropic',
   'API URL',
@@ -39,6 +40,7 @@ const BRAND_AND_LITERAL_KEYS = new Set([
   'AccessKey / SecretAccessKey',
   'AZURE_OPENAI_ENDPOINT *',
   'Baidu V2',
+  'CC Switch',
   'ChatGPT',
   'ChatGPT Subscription (Codex)',
   'Claude',
@@ -57,9 +59,8 @@ const BRAND_AND_LITERAL_KEYS = new Set([
   'JustSong',
   'LingYiWanWu',
   'LinuxDO',
-  'Midjourney',
-  'MidjourneyPlus',
-  'Midjourney-Proxy',
+  'MjProxy',
+  'MjProxyPlus',
   'MiniMax',
   'Mistral',
   'MokaAI',
@@ -317,4 +318,3 @@ main().catch((err) => {
   console.error(err)
   process.exitCode = 1
 })
-

@@ -63,6 +63,31 @@ func ConsumeCodexWhamRateLimitResetCredit(
 	return doCodexWhamRequest(ctx, client, http.MethodPost, baseURL, "/backend-api/wham/rate-limit-reset-credits/consume", accessToken, accountID, payload)
 }
 
+func ResetCodexWhamUsage(
+	ctx context.Context,
+	client *http.Client,
+	baseURL string,
+	accessToken string,
+	accountID string,
+	redeemRequestID string,
+) (statusCode int, body []byte, err error) {
+	rrid := strings.TrimSpace(redeemRequestID)
+	if rrid == "" {
+		return 0, nil, fmt.Errorf("empty redeemRequestID")
+	}
+
+	payload, err := common.Marshal(struct {
+		RedeemRequestID string `json:"redeem_request_id"`
+	}{
+		RedeemRequestID: rrid,
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+
+	return doCodexWhamRequest(ctx, client, http.MethodPost, baseURL, "/backend-api/wham/rate-limit-reset-credits/consume", accessToken, accountID, payload)
+}
+
 func doCodexWhamRequest(
 	ctx context.Context,
 	client *http.Client,

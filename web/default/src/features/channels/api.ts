@@ -99,6 +99,10 @@ export type ConsumeCodexRateLimitResetCreditResponse = {
     | string
 }
 
+export type CodexResetCreditsResponse = CodexRateLimitResetCreditsResponse
+
+export type CodexUsageResetResponse = CodexUsageResponse
+
 export type CodexCredentialRefreshResponse = {
   success: boolean
   message?: string
@@ -343,6 +347,16 @@ export async function getCodexRateLimitResetCredits(
   return res.data
 }
 
+export async function getCodexResetCredits(
+  channelId: number
+): Promise<CodexResetCreditsResponse> {
+  const res = await api.get(
+    `/api/channel/${channelId}/codex/usage/reset-credits`,
+    channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
 export async function consumeCodexRateLimitResetCredit(
   channelId: number,
   params: ConsumeCodexRateLimitResetCreditParams
@@ -351,6 +365,17 @@ export async function consumeCodexRateLimitResetCredit(
     `/api/channel/${channelId}/codex/rate-limit-reset-credits/consume`,
     params,
     channelActionConfig()
+  )
+  return res.data
+}
+
+export async function resetCodexUsage(
+  channelId: number
+): Promise<CodexUsageResetResponse> {
+  const res = await api.post(
+    `/api/channel/${channelId}/codex/usage/reset`,
+    {},
+    channelActionConfig({ disableDuplicate: true })
   )
   return res.data
 }
