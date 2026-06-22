@@ -1,11 +1,18 @@
 package controller
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +95,113 @@ func TestGetWaffoPancakePayMoney(t *testing.T) {
 			require.InDelta(t, tc.expected, actual, 0.000001)
 		})
 	}
+}
+
+func TestListWaffoPancakeCatalog_GETIgnoresCredentialQuery(t *testing.T) {
+	setWaffoPancakeCatalogCredentialsForTest(t, "persisted-merchant", "persisted-private")
+
+	var gotMerchantID string
+	var gotPrivateKey string
+	var callCount int
+	stubWaffoPancakeCatalogLister(t, func(ctx context.Context, merchantID, privateKey string) (*service.WaffoPancakeCatalog, error) {
+		callCount++
+		gotMerchantID = merchantID
+		gotPrivateKey = privateKey
+		return &service.WaffoPancakeCatalog{}, nil
+	})
+
+	recorder := performWaffoPancakeCatalogRequest(
+		http.MethodGet,
+		"/catalog?merchant_id=query-merchant&private_key=query-private",
+		"",
+	)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "persisted-merchant", gotMerchantID)
+	assert.Equal(t, "persisted-private", gotPrivateKey)
+}
+
+func TestListWaffoPancakeCatalog_POSTUsesBodyCredentials(t *testing.T) {
+	setWaffoPancakeCatalogCredentialsForTest(t, "persisted-merchant", "persisted-private")
+
+	var gotMerchantID string
+	var gotPrivateKey string
+	var callCount int
+	stubWaffoPancakeCatalogLister(t, func(ctx context.Context, merchantID, privateKey string) (*service.WaffoPancakeCatalog, error) {
+		callCount++
+		gotMerchantID = merchantID
+		gotPrivateKey = privateKey
+		return &service.WaffoPancakeCatalog{}, nil
+	})
+
+	recorder := performWaffoPancakeCatalogRequest(
+		http.MethodPost,
+		"/catalog",
+		`{"merchant_id":"body-merchant","private_key":"body-private"}`,
+	)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "body-merchant", gotMerchantID)
+	assert.Equal(t, "body-private", gotPrivateKey)
+}
+
+func TestListWaffoPancakeCatalog_POSTBlankBodyFallsBackToPersistedCredentials(t *testing.T) {
+	setWaffoPancakeCatalogCredentialsForTest(t, "persisted-merchant", "persisted-private")
+
+	var gotMerchantID string
+	var gotPrivateKey string
+	var callCount int
+	stubWaffoPancakeCatalogLister(t, func(ctx context.Context, merchantID, privateKey string) (*service.WaffoPancakeCatalog, error) {
+		callCount++
+		gotMerchantID = merchantID
+		gotPrivateKey = privateKey
+		return &service.WaffoPancakeCatalog{}, nil
+	})
+
+	recorder := performWaffoPancakeCatalogRequest(http.MethodPost, "/catalog", "")
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, 1, callCount)
+	assert.Equal(t, "persisted-merchant", gotMerchantID)
+	assert.Equal(t, "persisted-private", gotPrivateKey)
+}
+
+func setWaffoPancakeCatalogCredentialsForTest(t *testing.T, merchantID, privateKey string) {
+	t.Helper()
+
+	originalMerchantID := setting.WaffoPancakeMerchantID
+	originalPrivateKey := setting.WaffoPancakePrivateKey
+	setting.WaffoPancakeMerchantID = merchantID
+	setting.WaffoPancakePrivateKey = privateKey
+
+	t.Cleanup(func() {
+		setting.WaffoPancakeMerchantID = originalMerchantID
+		setting.WaffoPancakePrivateKey = originalPrivateKey
+	})
+}
+
+func stubWaffoPancakeCatalogLister(t *testing.T, lister func(context.Context, string, string) (*service.WaffoPancakeCatalog, error)) {
+	t.Helper()
+
+	originalLister := waffoPancakeCatalogLister
+	waffoPancakeCatalogLister = lister
+
+	t.Cleanup(func() {
+		waffoPancakeCatalogLister = originalLister
+	})
+}
+
+func performWaffoPancakeCatalogRequest(method string, target string, body string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/catalog", ListWaffoPancakeCatalog)
+	router.POST("/catalog", ListWaffoPancakeCatalog)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	return recorder
 }

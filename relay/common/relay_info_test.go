@@ -38,3 +38,33 @@ func TestRelayInfoGetFinalRequestRelayFormatNilReceiver(t *testing.T) {
 	var info *RelayInfo
 	require.Equal(t, types.RelayFormat(""), info.GetFinalRequestRelayFormat())
 }
+
+func TestNormalizeRequestURLPath(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestURLPath string
+		want           string
+	}{
+		{
+			name:           "playground chat completions path",
+			requestURLPath: "/pg/chat/completions",
+			want:           "/v1/chat/completions",
+		},
+		{
+			name:           "playground path with query",
+			requestURLPath: "/pg/chat/completions?client=playground",
+			want:           "/v1/chat/completions?client=playground",
+		},
+		{
+			name:           "regular relay path",
+			requestURLPath: "/v1/chat/completions",
+			want:           "/v1/chat/completions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, NormalizeRequestURLPath(tt.requestURLPath))
+		})
+	}
+}

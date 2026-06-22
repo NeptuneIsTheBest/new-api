@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 
 // Catalog / pair / save admin endpoints. Match
-// controller/topup_waffo_pancake.go: empty body creds make the backend
+// controller/topup_waffo_pancake.go: empty POST body creds make the backend
 // fall back to persisted OptionMap values, so returning admins don't
 // have to re-paste the private key (stripped from GET /api/option/).
 
@@ -64,9 +64,9 @@ export async function listWaffoPancakeCatalog(
   merchantID: string,
   privateKey: string
 ): Promise<CatalogResponse> {
-  const res = await api.get<CatalogResponse>(
+  const res = await api.post<CatalogResponse>(
     '/api/option/waffo-pancake/catalog',
-    { params: { merchant_id: merchantID, private_key: privateKey } }
+    { merchant_id: merchantID, private_key: privateKey }
   )
   return res.data
 }

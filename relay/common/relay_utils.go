@@ -36,6 +36,13 @@ func GetFullRequestURL(baseURL string, requestURL string, channelType int) strin
 	return fullRequestURL
 }
 
+func NormalizeRequestURLPath(requestURLPath string) string {
+	if strings.HasPrefix(requestURLPath, "/pg") {
+		return "/v1" + strings.TrimPrefix(requestURLPath, "/pg")
+	}
+	return requestURLPath
+}
+
 func GetAPIVersion(c *gin.Context) string {
 	query := c.Request.URL.Query()
 	apiVersion := query.Get("api-version")

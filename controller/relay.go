@@ -182,7 +182,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		Ctx:            c,
 		TokenGroup:     relayInfo.TokenGroup,
 		ModelName:      relayInfo.OriginModelName,
-		RequestPath:    c.Request.URL.Path,
+		RequestPath:    relaycommon.NormalizeRequestURLPath(c.Request.URL.Path),
 		PreferredGroup: relayInfo.UsingGroup,
 		Retry:          common.GetPointer(0),
 	}

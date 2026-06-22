@@ -276,10 +276,11 @@ func testChannel(channel *model.Channel, testUserID int, testModel string, endpo
 	apiType, _ := common.ChannelType2APIType(channel.Type)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact &&
 		apiType != constant.APITypeOpenAI &&
-		apiType != constant.APITypeCodex {
+		apiType != constant.APITypeCodex &&
+		apiType != constant.APITypeAdvancedCustom {
 		return testResult{
 			context:     c,
-			localErr:    fmt.Errorf("responses compaction test only supports openai/codex channels, got api type %d", apiType),
+			localErr:    fmt.Errorf("responses compaction test only supports openai/codex/advanced custom channels, got api type %d", apiType),
 			newAPIError: types.NewError(fmt.Errorf("unsupported api type: %d", apiType), types.ErrorCodeInvalidApiType),
 		}
 	}

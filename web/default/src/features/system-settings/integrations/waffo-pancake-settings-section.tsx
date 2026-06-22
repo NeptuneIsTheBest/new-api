@@ -239,7 +239,7 @@ export function WaffoPancakeSettingsSection({
 
   // Initial-load verify: GET /api/option/ strips PrivateKey so a returning
   // admin opens the page with empty key. Send blank creds in the body —
-  // the catalog controller falls back to the persisted OptionMap creds.
+  // POST /waffo-pancake/catalog falls back to the persisted OptionMap creds.
   const initialLoadRef = React.useRef(false)
   React.useEffect(() => {
     if (initialLoadRef.current) return
