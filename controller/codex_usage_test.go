@@ -33,15 +33,12 @@ func setupCodexUsageControllerTestDB(t *testing.T) *gorm.DB {
 
 	oldDB := model.DB
 	oldLogDB := model.LOG_DB
-	oldUsingSQLite := common.UsingSQLite
-	oldUsingMySQL := common.UsingMySQL
-	oldUsingPostgreSQL := common.UsingPostgreSQL
+	oldMainDatabaseType := common.MainDatabaseType()
+	oldLogDatabaseType := common.LogDatabaseType()
 	oldMemoryCacheEnabled := common.MemoryCacheEnabled
 
 	gin.SetMode(gin.TestMode)
-	common.UsingSQLite = true
-	common.UsingMySQL = false
-	common.UsingPostgreSQL = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.MemoryCacheEnabled = false
 
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
@@ -58,9 +55,7 @@ func setupCodexUsageControllerTestDB(t *testing.T) *gorm.DB {
 		}
 		model.DB = oldDB
 		model.LOG_DB = oldLogDB
-		common.UsingSQLite = oldUsingSQLite
-		common.UsingMySQL = oldUsingMySQL
-		common.UsingPostgreSQL = oldUsingPostgreSQL
+		common.SetDatabaseTypes(oldMainDatabaseType, oldLogDatabaseType)
 		common.MemoryCacheEnabled = oldMemoryCacheEnabled
 	})
 

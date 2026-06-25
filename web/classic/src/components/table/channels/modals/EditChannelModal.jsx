@@ -61,6 +61,7 @@ import ModelSelectModal from './ModelSelectModal';
 import SingleModelSelectModal from './SingleModelSelectModal';
 import OllamaModelModal from './OllamaModelModal';
 import ParamOverrideEditorModal from './ParamOverrideEditorModal';
+import CodexOAuthModal from './CodexOAuthModal';
 import JSONEditor from '../../../common/ui/JSONEditor';
 import SecureVerificationModal from '../../../common/modals/SecureVerificationModal';
 import StatusCodeRiskGuardModal from './StatusCodeRiskGuardModal';
@@ -382,6 +383,7 @@ const EditChannelModal = (props) => {
   const [ionetMetadata, setIonetMetadata] = useState(null);
   const [codexCredentialRefreshing, setCodexCredentialRefreshing] =
     useState(false);
+  const [codexOAuthModalVisible, setCodexOAuthModalVisible] = useState(false);
   const [paramOverrideEditorVisible, setParamOverrideEditorVisible] =
     useState(false);
 
@@ -2840,6 +2842,17 @@ const EditChannelModal = (props) => {
                                   </Text>
 
                                   <Space wrap spacing='tight'>
+                                    <Button
+                                      size='small'
+                                      type='primary'
+                                      theme='outline'
+                                      onClick={() =>
+                                        setCodexOAuthModalVisible(true)
+                                      }
+                                      disabled={isIonetLocked}
+                                    >
+                                      {t('授权生成')}
+                                    </Button>
                                     {isEdit && (
                                       <Button
                                         size='small'
@@ -3828,6 +3841,14 @@ const EditChannelModal = (props) => {
         onSave={(nextValue) => {
           handleInputChange('param_override', nextValue);
           setParamOverrideEditorVisible(false);
+        }}
+      />
+
+      <CodexOAuthModal
+        visible={codexOAuthModalVisible}
+        onCancel={() => setCodexOAuthModalVisible(false)}
+        onSuccess={(key) => {
+          handleInputChange('key', key);
         }}
       />
 

@@ -232,6 +232,9 @@
     "SMTP 端口": "Port SMTP",
     "SMTP 访问凭证": "Informations d'identification d'accès SMTP",
     "SMTP 账户": "Compte SMTP",
+    "SMTP 加密方式": "Chiffrement SMTP",
+    "SSL/TLS": "SSL/TLS",
+    "STARTTLS": "STARTTLS",
     "Sonnet 模型": "Modèle Sonnet",
     "speed 字段用于控制 Claude 推理速度模式。默认关闭以避免意外切换到 fast 模式": "Le champ speed contrôle le mode de vitesse d'inférence de Claude. Désactivé par défaut pour éviter un passage involontaire au mode fast",
     "SSE 事件": "Événement SSE",
@@ -1802,6 +1805,7 @@
     "新获取的模型": "Nouveaux modèles",
     "新额度：": "Nouveau quota : ",
     "无": "Aucun",
+    "无加密": "Aucun chiffrement",
     "无GPU": "No GPU",
     "无冲突项": "Aucun élément en conflit",
     "无效的部署信息": "Invalid deployment information",
@@ -3217,6 +3221,7 @@
     "请选择该渠道所支持的模型，留空则不更改": "Veuillez sélectionner les modèles pris en charge par le canal, laisser vide ne changera rien",
     "请选择过期时间": "Veuillez sélectionner une date d'expiration",
     "请选择通知方式": "Veuillez sélectionner la méthode de notification",
+    "请选择一种 SMTP 传输加密方式": "Veuillez sélectionner un mode de sécurité de transport SMTP",
     "调整额度": "Ajuster le quota",
     "调整额度成功": "Quota ajusté avec succès",
     "调用次数": "Nombre d'appels",
@@ -3703,6 +3708,13 @@
     "重置 Codex 额度": "Réinitialiser le quota Codex",
     "重置 Codex 额度失败": "Échec de la réinitialisation du quota Codex",
     "重置额度": "Crédit de réinitialisation",
-    "重置额度 ID：": "ID du crédit de réinitialisation :"
+    "重置额度 ID：": "ID du crédit de réinitialisation :",
+    "1) 点击「打开授权页面」完成登录；2) 浏览器会跳转到 localhost（页面打不开也没关系）；3) 复制地址栏完整 URL 粘贴到下方；4) 点击「生成并填入」。": "1) Cliquez sur « Ouvrir la page d’autorisation » et connectez-vous. 2) Le navigateur redirigera vers localhost (ce n’est pas grave si la page ne charge pas). 3) Copiez l’URL complète depuis la barre d’adresse et collez-la ci-dessous. 4) Cliquez sur « Générer et remplir ».",
+    "Codex 授权": "Autorisation Codex",
+    "复制授权链接": "Copier le lien d’autorisation",
+    "已打开授权页面": "Page d’autorisation ouverte",
+    "已生成授权凭据": "Identifiant d’autorisation généré",
+    "打开授权页面": "Ouvrir la page d’autorisation",
+    "授权生成": "Autoriser et générer"
   }
 }

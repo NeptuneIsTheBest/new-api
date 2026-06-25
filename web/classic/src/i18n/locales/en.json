@@ -234,6 +234,9 @@
     "SMTP 端口": "SMTP Port",
     "SMTP 访问凭证": "SMTP Access Credential",
     "SMTP 账户": "SMTP Account",
+    "SMTP 加密方式": "SMTP encryption",
+    "SSL/TLS": "SSL/TLS",
+    "STARTTLS": "STARTTLS",
     "Sonnet 模型": "Sonnet Model",
     "speed 字段用于控制 Claude 推理速度模式。默认关闭以避免意外切换到 fast 模式": "The speed field controls Claude inference speed mode. Disabled by default to avoid unintentionally switching to fast mode",
     "SSE 事件": "SSE Events",
@@ -1809,6 +1812,7 @@
     "新获取的模型": "New models",
     "新额度：": "New quota: ",
     "无": "None",
+    "无加密": "No encryption",
     "无GPU": "No GPU",
     "无冲突项": "No conflict items",
     "无效的部署信息": "Invalid deployment information",
@@ -3233,6 +3237,7 @@
     "请选择该渠道所支持的模型，留空则不更改": "Please select the models supported by the channel, leaving blank will not change",
     "请选择过期时间": "Please select expiration time",
     "请选择通知方式": "Please select notification method",
+    "请选择一种 SMTP 传输加密方式": "Please select one SMTP transport security mode",
     "调整额度": "Adjust Quota",
     "调整额度成功": "Quota adjusted successfully",
     "调用次数": "Call Count",
@@ -3849,6 +3854,13 @@
     "重置 Codex 额度": "Reset Codex quota",
     "重置 Codex 额度失败": "Failed to reset Codex quota",
     "重置额度": "Reset credit",
-    "重置额度 ID：": "Reset credit ID:"
+    "重置额度 ID：": "Reset credit ID:",
+    "1) 点击「打开授权页面」完成登录；2) 浏览器会跳转到 localhost（页面打不开也没关系）；3) 复制地址栏完整 URL 粘贴到下方；4) 点击「生成并填入」。": "1) Click \"Open authorization page\" and complete login. 2) Your browser will redirect to localhost (it is OK if the page does not load). 3) Copy the full URL from the address bar and paste it below. 4) Click \"Generate and Fill\".",
+    "Codex 授权": "Codex Authorization",
+    "复制授权链接": "Copy authorization link",
+    "已打开授权页面": "Authorization page opened",
+    "已生成授权凭据": "Authorization credential generated",
+    "打开授权页面": "Open authorization page",
+    "授权生成": "Authorize and generate"
   }
 }

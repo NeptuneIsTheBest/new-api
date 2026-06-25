@@ -38,6 +38,7 @@ import {
   Eraser,
   Plus,
   Eye,
+  Link2,
   RefreshCw,
   Code,
   Route,
@@ -150,6 +151,7 @@ import {
 import type { Channel } from '../../types'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
+import { CodexOAuthDialog } from '../dialogs/codex-oauth-dialog'
 import { FetchModelsDialog } from '../dialogs/fetch-models-dialog'
 import {
   MissingModelsConfirmationDialog,
@@ -283,6 +285,7 @@ export function ChannelMutateDrawer({
   const [fetchModelsDialogOpen, setFetchModelsDialogOpen] = useState(false)
   const [channelKey, setChannelKey] = useState<string | null>(null)
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
+  const [codexOAuthDialogOpen, setCodexOAuthDialogOpen] = useState(false)
   const [isCodexCredentialRefreshing, setIsCodexCredentialRefreshing] =
     useState(false)
   const initialModelsRef = useRef<string[]>([])
@@ -2069,12 +2072,26 @@ export function ChannelMutateDrawer({
                       {currentType === 57 && (
                         <div className='border-border/60 flex flex-col gap-3 border-y py-4'>
                           <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                            <div className='text-muted-foreground text-xs'>
-                              {t(
-                                'Codex channels use an OAuth JSON credential as the key.'
-                              )}
+                            <div className='flex flex-col gap-0.5'>
+                              <div className='text-sm font-semibold'>
+                                {t('Codex Authorization')}
+                              </div>
+                              <div className='text-muted-foreground text-xs'>
+                                {t(
+                                  'Codex channels use an OAuth JSON credential as the key.'
+                                )}
+                              </div>
                             </div>
                             <div className='flex flex-wrap items-center gap-2'>
+                              <Button
+                                type='button'
+                                variant='outline'
+                                size='sm'
+                                onClick={() => setCodexOAuthDialogOpen(true)}
+                              >
+                                <Link2 data-icon='inline-start' />
+                                {t('Authorize')}
+                              </Button>
                               {isEditing && channelId && (
                                 <Button
                                   type='button'
@@ -2104,6 +2121,14 @@ export function ChannelMutateDrawer({
                           </Alert>
                         </div>
                       )}
+
+                      <CodexOAuthDialog
+                        open={codexOAuthDialogOpen}
+                        onOpenChange={setCodexOAuthDialogOpen}
+                        onKeyGenerated={(key) => {
+                          form.setValue('key', key, { shouldDirty: true })
+                        }}
+                      />
 
                       {isEditing && isMultiKeyChannel && (
                         <FormField
@@ -3238,6 +3263,31 @@ export function ChannelMutateDrawer({
                                 <FormLabel>{t('Pass Through Body')}</FormLabel>
                                 <FormDescription>
                                   {t('Pass request body directly to upstream')}
+                                </FormDescription>
+                              </div>
+                              <FormControl>
+                                <Switch
+                                  checked={field.value}
+                                  onCheckedChange={field.onChange}
+                                />
+                              </FormControl>
+                            </FormItem>
+                          )}
+                        />
+
+                        <FormField
+                          control={form.control}
+                          name='disable_task_polling_sleep'
+                          render={({ field }) => (
+                            <FormItem className='flex items-center justify-between px-4 py-3'>
+                              <div className='space-y-0.5'>
+                                <FormLabel>
+                                  {t('Skip async task polling delay')}
+                                </FormLabel>
+                                <FormDescription>
+                                  {t(
+                                    'Do not wait one second between polling async tasks for this channel'
+                                  )}
                                 </FormDescription>
                               </div>
                               <FormControl>
