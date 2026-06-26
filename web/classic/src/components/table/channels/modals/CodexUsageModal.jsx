@@ -182,6 +182,12 @@ const getResetCreditTitle = (credit, t) => {
   );
 };
 
+const getResetCreditSelectLabel = (credit, t) => {
+  const creditId = getResetCreditID(credit);
+  const expiresAt = formatISODateTime(credit?.expires_at);
+  return `${getResetCreditTitle(credit, t)} · ${expiresAt} · ${creditId}`;
+};
+
 const getResetCreditDescription = (credit, t) => {
   const tt = typeof t === 'function' ? t : (v) => v;
   return getDisplayText(credit?.description) || tt('暂无描述');
@@ -755,9 +761,15 @@ const CodexResetCreditsPanel = ({
                 value={activeSelectedResetCreditId}
                 placeholder={tt('选择重置额度')}
                 optionList={redeemableResetCredits.map((credit) => ({
+                  key: getResetCreditID(credit),
                   value: getResetCreditID(credit),
-                  label: getResetCreditTitle(credit, tt),
+                  label: getResetCreditSelectLabel(credit, tt),
+                  title: getResetCreditTitle(credit, tt),
                 }))}
+                renderSelectedItem={(optionNode) =>
+                  getDisplayText(optionNode?.title) ||
+                  getDisplayText(optionNode?.label)
+                }
                 onChange={(value) => {
                   onSelectedResetCreditIdChange(getDisplayText(value));
                 }}
