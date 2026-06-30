@@ -31,8 +31,9 @@ export const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'Originator',
   'Session_id',
   'User-Agent',
-  'X-Codex-Beta-Features',
-  'X-Codex-Turn-Metadata',
+  'X-Codex-Installation-Id',
+  'X-Codex-Window-Id',
+  'X-Codex-Parent-Thread-Id',
 ];
 
 export const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
