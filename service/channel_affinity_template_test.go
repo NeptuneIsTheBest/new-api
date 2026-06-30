@@ -306,9 +306,17 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 
 	info := &relaycommon.RelayInfo{
 		RequestHeaders: map[string]string{
-			"Originator": "Codex CLI",
-			"Session_id": "sess-123",
-			"User-Agent": "codex-cli-test",
+			"Originator":                            "Codex CLI",
+			"Session_id":                            "sess-123",
+			"User-Agent":                            "codex-cli-test",
+			"X-Codex-Installation-Id":               "install-123",
+			"X-Codex-Window-Id":                     "window-123",
+			"X-Codex-Parent-Thread-Id":              "thread-123",
+			"X-Codex-Beta-Features":                 "beta-feature",
+			"X-Codex-Turn-Metadata":                 "turn-metadata",
+			"X-Client-Request-Id":                   "request-123",
+			"X-OAI-Attestation":                     "attestation-123",
+			"X-ResponsesAPI-Include-Timing-Metrics": "1",
 		},
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ParamOverride: mergedOverride,
@@ -326,9 +334,18 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.Equal(t, "Codex CLI", info.RuntimeHeadersOverride["originator"])
 	require.Equal(t, "sess-123", info.RuntimeHeadersOverride["session_id"])
 	require.Equal(t, "codex-cli-test", info.RuntimeHeadersOverride["user-agent"])
+	require.Equal(t, "install-123", info.RuntimeHeadersOverride["x-codex-installation-id"])
+	require.Equal(t, "window-123", info.RuntimeHeadersOverride["x-codex-window-id"])
+	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["x-codex-parent-thread-id"])
 
 	_, exists := info.RuntimeHeadersOverride["x-codex-beta-features"]
 	require.False(t, exists)
 	_, exists = info.RuntimeHeadersOverride["x-codex-turn-metadata"]
+	require.False(t, exists)
+	_, exists = info.RuntimeHeadersOverride["x-client-request-id"]
+	require.False(t, exists)
+	_, exists = info.RuntimeHeadersOverride["x-oai-attestation"]
+	require.False(t, exists)
+	_, exists = info.RuntimeHeadersOverride["x-responsesapi-include-timing-metrics"]
 	require.False(t, exists)
 }
