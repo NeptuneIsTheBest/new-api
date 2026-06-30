@@ -13,20 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        # os: [macos-latest, windows-latest]
-        os: [windows-latest]
-
-    runs-on: ${{ matrix.os }}
-    env:
-      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
-    defaults:
-      run:
-        shell: bash
-
+  prepare:
+    name: Prepare Electron version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -34,10 +25,25 @@ jobs:
           fetch-depth: 0
 
       - name: Determine version
+        id: version
         run: |
           VERSION=$(git describe --tags)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
+
+  frontend:
+    name: Build Frontend (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [default, classic]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -51,6 +57,56 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
+
+      - name: Cache Rsbuild output
+        uses: actions/cache@v5
+        with:
+          path: web/${{ matrix.app }}/node_modules/.cache
+          key: ${{ runner.os }}-rsbuild-${{ matrix.app }}-${{ hashFiles('web/bun.lock', 'web/package.json', 'web/default/package.json', 'web/classic/package.json', 'web/default/rsbuild.config.ts', 'web/classic/rsbuild.config.ts') }}
+          restore-keys: |
+            ${{ runner.os }}-rsbuild-${{ matrix.app }}-
+
+      - name: Build frontend
+        env:
+          CI: ""
+          DISABLE_ESLINT_PLUGIN: "true"
+          NODE_OPTIONS: "--max-old-space-size=4096"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cd web
+          bun install --filter ./${{ matrix.app }} --frozen-lockfile
+          cd ${{ matrix.app }}
+          VITE_REACT_APP_VERSION=$VERSION bun run build
+
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist-${{ matrix.app }}
+          path: web/${{ matrix.app }}/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: [prepare, frontend]
+    strategy:
+      matrix:
+        # os: [macos-latest, windows-latest]
+        os: [windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      VERSION: ${{ needs.prepare.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -76,27 +132,29 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Build frontend
-        env:
-          CI: ""
-          NODE_OPTIONS: "--max-old-space-size=4096"
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$VERSION bun run build
-          cd ..
+      - name: Download Default Frontend Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist-default
+          path: web/default/dist
+
+      - name: Download Classic Frontend Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist-classic
+          path: web/classic/dist
 
       # - name: Build Go binary (macos/Linux)
       #   if: runner.os != 'Windows'
       #   run: |
       #     go mod download
-      #     go build -ldflags "-s -w -X 'new-api/common.Version=$(git describe --tags)' -extldflags '-static'" -o new-api
+      #     go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION' -extldflags '-static'" -o new-api
 
       - name: Build Go binary (Windows)
         if: runner.os == 'Windows'
         run: |
           go mod download
-          go build -ldflags "-s -w -X 'new-api/common.Version=$VERSION'" -o new-api.exe
+          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'" -o new-api.exe
 
       - name: Update Electron version
         run: |
@@ -163,8 +221,11 @@ jobs:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download Windows Artifact
         uses: actions/download-artifact@v8
+        with:
+          name: windows-build
+          path: windows-build
 
       - name: Upload to Release
         env:

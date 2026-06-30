@@ -25,7 +25,14 @@ import {
   RotateCcw,
   AlertTriangle,
 } from 'lucide-react'
-import { type ReactNode, useCallback, useMemo, useState } from 'react'
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -1037,6 +1044,7 @@ export function CodexUsageDialog({
   const [isResetting, setIsResetting] = useState(false)
   const [resetActionError, setResetActionError] = useState('')
   const [resetActionMessage, setResetActionMessage] = useState('')
+  const resetCreditsRequestRef = useRef(0)
 
   const payload: CodexUsagePayload | null = useMemo(() => {
     const raw = response?.data
@@ -1091,10 +1099,15 @@ export function CodexUsageDialog({
         return
       }
 
+      const requestId = resetCreditsRequestRef.current + 1
+      resetCreditsRequestRef.current = requestId
       setIsLoadingResetCredits(true)
       setResetCreditsError('')
       try {
         const res = await getCodexRateLimitResetCredits(channelId)
+        if (resetCreditsRequestRef.current !== requestId) {
+          return
+        }
         if (!res.success) {
           throw new Error(
             res.message || t('Failed to fetch reset credit details')
@@ -1102,17 +1115,36 @@ export function CodexUsageDialog({
         }
         setResetCreditsResponse(res)
       } catch (error) {
+        if (resetCreditsRequestRef.current !== requestId) {
+          return
+        }
         setResetCreditsError(
           error instanceof Error
             ? error.message
             : t('Failed to fetch reset credit details')
         )
       } finally {
-        setIsLoadingResetCredits(false)
+        if (resetCreditsRequestRef.current === requestId) {
+          setIsLoadingResetCredits(false)
+        }
       }
     },
     [channelId, isLoadingResetCredits, resetCreditsResponse, t]
   )
+
+  useEffect(() => {
+    resetCreditsRequestRef.current += 1
+    setShowResetCredits(false)
+    setResetCreditsResponse(null)
+    setResetCreditsError('')
+    setSelectedResetCreditId('')
+    setIsLoadingResetCredits(false)
+    setResetConfirmOpen(false)
+    setPendingResetCreditId('')
+    setIsResetting(false)
+    setResetActionError('')
+    setResetActionMessage('')
+  }, [channelId])
 
   const handleResetCreditsOpenChange = (nextOpen: boolean) => {
     setShowResetCredits(nextOpen)
@@ -1123,6 +1155,7 @@ export function CodexUsageDialog({
 
   const handleDialogOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
+      resetCreditsRequestRef.current += 1
       setShowRawJson(false)
       setShowResetCredits(false)
       setResetCreditsResponse(null)
@@ -1161,11 +1194,15 @@ export function CodexUsageDialog({
         credit_id: pendingResetCreditId,
         redeem_request_id: createRedeemRequestID(),
       })
+      const resetPayload = getConsumeResponseData(res)
+      const code = trimDisplayValue(resetPayload?.code)
       if (!res.success) {
         throw new Error(formatConsumeFailureMessage(res, t))
       }
+      if (code !== 'reset') {
+        throw new Error(formatConsumeFailureMessage(res, t))
+      }
 
-      const resetPayload = getConsumeResponseData(res)
       const windowsReset = Number(resetPayload?.windows_reset)
       setResetActionMessage(
         Number.isFinite(windowsReset)
@@ -1175,8 +1212,10 @@ export function CodexUsageDialog({
           : t('Reset completed. Latest usage has been refreshed.')
       )
       setResetConfirmOpen(false)
-      await Promise.resolve(onRefresh?.())
-      await loadResetCredits(true)
+      await Promise.all([
+        Promise.resolve(onRefresh?.()),
+        loadResetCredits(true),
+      ])
     } catch (error) {
       setResetActionError(
         error instanceof Error ? error.message : t('Failed to reset usage')
