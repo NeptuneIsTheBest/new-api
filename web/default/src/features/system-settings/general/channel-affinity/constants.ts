@@ -18,15 +18,6 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { AffinityRule } from './types'
 
-const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
-  'Originator',
-  'Session_id',
-  'User-Agent',
-  'X-Codex-Installation-Id',
-  'X-Codex-Window-Id',
-  'X-Codex-Parent-Thread-Id',
-]
-
 const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'X-Stainless-Arch',
   'X-Stainless-Lang',
@@ -42,6 +33,18 @@ const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'Anthropic-Dangerous-Direct-Browser-Access',
   'Anthropic-Version',
 ]
+
+function buildPassAllHeadersTemplate() {
+  return {
+    operations: [
+      {
+        mode: 'pass_headers',
+        value: '*',
+        keep_origin: true,
+      },
+    ],
+  }
+}
 
 function buildPassHeadersTemplate(headers: string[]) {
   return {
@@ -63,9 +66,7 @@ export const RULE_TEMPLATES: Record<string, RuleTemplate> = {
     model_regex: ['^gpt-.*$'],
     path_regex: ['/v1/responses'],
     key_sources: [{ type: 'gjson', path: 'prompt_cache_key' }],
-    param_override_template: buildPassHeadersTemplate(
-      CODEX_CLI_HEADER_PASSTHROUGH_HEADERS
-    ),
+    param_override_template: buildPassAllHeadersTemplate(),
     value_regex: '',
     ttl_seconds: 0,
     skip_retry_on_failure: true,

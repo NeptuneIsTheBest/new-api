@@ -215,7 +215,7 @@ const getModeToPlaceholder = (mode) => {
 
 const getModeValueLabel = (mode) => {
   if (mode === 'set_header') return '请求头值（支持字符串或 JSON 映射）';
-  if (mode === 'pass_headers') return '透传请求头（支持逗号分隔或 JSON 数组）';
+  if (mode === 'pass_headers') return '透传请求头（* 表示全部安全请求头，也支持逗号分隔或 JSON 数组）';
   if (
     mode === 'trim_prefix' ||
     mode === 'trim_suffix' ||
@@ -255,7 +255,7 @@ const getModeValuePlaceholder = (mode) => {
       '}',
     ].join('\n');
   }
-  if (mode === 'pass_headers') return 'Authorization, X-Request-Id';
+  if (mode === 'pass_headers') return '* 或 Authorization, X-Request-Id';
   if (
     mode === 'trim_prefix' ||
     mode === 'trim_suffix' ||

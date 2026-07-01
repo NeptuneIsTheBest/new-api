@@ -3062,6 +3062,8 @@
     "Pass through the speed field for Claude inference speed mode control": "透传 speed 字段用于控制 Claude 推理速度模式",
     "Pass when key is missing": "字段缺失时通过",
     "Pass-Through": "透传",
+    "Pass-through Headers (* for all safe headers, comma-separated, or JSON array)": "透传请求头（* 表示全部安全请求头，也支持逗号分隔或 JSON 数组）",
+    "* or Authorization, X-Request-Id": "* 或 Authorization, X-Request-Id",
     "Pass-through Headers (comma-separated or JSON array)": "透传请求头（逗号分隔或 JSON 数组）",
     "Passive recovery only": "仅被动恢复",
     "Passkey": "Passkey",

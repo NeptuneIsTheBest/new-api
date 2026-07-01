@@ -3062,6 +3062,8 @@
     "Pass through the speed field for Claude inference speed mode control": "Transmettre le champ speed pour le contrôle du mode de vitesse d'inférence Claude",
     "Pass when key is missing": "Accepter si la clé est absente",
     "Pass-Through": "Transmission directe",
+    "Pass-through Headers (* for all safe headers, comma-separated, or JSON array)": "En-têtes passthrough (* pour tous les en-têtes sûrs, séparés par des virgules ou tableau JSON)",
+    "* or Authorization, X-Request-Id": "* ou Authorization, X-Request-Id",
     "Pass-through Headers (comma-separated or JSON array)": "En-têtes passthrough (séparés par des virgules ou tableau JSON)",
     "Passive recovery only": "Récupération passive uniquement",
     "Passkey": "Passkey",

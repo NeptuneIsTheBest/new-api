@@ -3062,6 +3062,8 @@
     "Pass through the speed field for Claude inference speed mode control": "Chuyển tiếp trường speed để kiểm soát chế độ tốc độ suy luận Claude",
     "Pass when key is missing": "Cho qua khi thiếu khóa",
     "Pass-Through": "Chuyển tiếp",
+    "Pass-through Headers (* for all safe headers, comma-separated, or JSON array)": "Header chuyển tiếp (* cho tất cả header an toàn, phân cách bằng dấu phẩy hoặc mảng JSON)",
+    "* or Authorization, X-Request-Id": "* hoặc Authorization, X-Request-Id",
     "Pass-through Headers (comma-separated or JSON array)": "Header chuyển tiếp (phân cách bằng dấu phẩy hoặc mảng JSON)",
     "Passive recovery only": "Chỉ khôi phục thụ động",
     "Passkey": "Khóa truy cập",

@@ -3062,6 +3062,8 @@
     "Pass through the speed field for Claude inference speed mode control": "Проброс поля speed для управления режимом скорости инференса Claude",
     "Pass when key is missing": "Пропускать при отсутствии ключа",
     "Pass-Through": "Сквозной доступ",
+    "Pass-through Headers (* for all safe headers, comma-separated, or JSON array)": "Пробрасываемые заголовки (* для всех безопасных заголовков, через запятую или JSON-массив)",
+    "* or Authorization, X-Request-Id": "* или Authorization, X-Request-Id",
     "Pass-through Headers (comma-separated or JSON array)": "Пробрасываемые заголовки (через запятую или JSON-массив)",
     "Passive recovery only": "Только пассивное восстановление",
     "Passkey": "Passkey",

@@ -3062,6 +3062,8 @@
     "Pass through the speed field for Claude inference speed mode control": "Claude 推論速度モード制御用に speed フィールドをパススルー",
     "Pass when key is missing": "キーがない場合は通過",
     "Pass-Through": "パススルー",
+    "Pass-through Headers (* for all safe headers, comma-separated, or JSON array)": "パススルーヘッダー（* は安全な全ヘッダー、カンマ区切り、またはJSON配列）",
+    "* or Authorization, X-Request-Id": "* または Authorization, X-Request-Id",
     "Pass-through Headers (comma-separated or JSON array)": "パススルーヘッダー（カンマ区切りまたはJSON配列）",
     "Passive recovery only": "パッシブ復旧のみ",
     "Passkey": "Passkey",

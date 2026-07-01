@@ -12,6 +12,7 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
+	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -93,7 +94,27 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 	"sec-websocket-extensions": {},
 }
 
+var codexPassthroughSkipHeaderNamesLower = map[string]struct{}{
+	"accept":             {},
+	"chatgpt-account-id": {},
+	"content-type":       {},
+}
+
 var headerPassthroughRegexCache sync.Map // map[string]*regexp.Regexp
+
+type headerPassthroughRule struct {
+	all        bool
+	regex      *regexp.Regexp
+	runtime    bool
+	keepOrigin bool
+}
+
+func (rule headerPassthroughRule) matches(name string) bool {
+	if rule.all {
+		return true
+	}
+	return rule.regex != nil && rule.regex.MatchString(name)
+}
 
 func getHeaderPassthroughRegex(pattern string) (*regexp.Regexp, error) {
 	pattern = strings.TrimSpace(pattern)
@@ -132,7 +153,11 @@ func isHeaderPassthroughRuleKey(key string) bool {
 	return strings.HasPrefix(lower, headerPassthroughRegexPrefix) || strings.HasPrefix(lower, headerPassthroughRegexPrefixV2)
 }
 
-func shouldSkipPassthroughHeader(name string) bool {
+func isCodexChannel(info *common.RelayInfo) bool {
+	return info != nil && info.ChannelMeta != nil && info.ChannelMeta.ChannelType == channelconstant.ChannelTypeCodex
+}
+
+func shouldSkipPassthroughHeader(info *common.RelayInfo, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return true
@@ -140,6 +165,11 @@ func shouldSkipPassthroughHeader(name string) bool {
 	lower := strings.ToLower(name)
 	if _, ok := passthroughSkipHeaderNamesLower[lower]; ok {
 		return true
+	}
+	if isCodexChannel(info) {
+		if _, ok := codexPassthroughSkipHeaderNamesLower[lower]; ok {
+			return true
+		}
 	}
 	return false
 }
@@ -186,7 +216,9 @@ func applyHeaderOverridePlaceholders(template string, c *gin.Context, apiKey str
 //   - "*": passthrough all incoming headers by name (excluding unsafe headers)
 //   - "re:<regex>" / "regex:<regex>": passthrough headers whose names match the regex (Go regexp)
 //
-// Passthrough rules are applied first, then normal overrides are applied, so explicit overrides win.
+// Passthrough rules are applied first. Static passthrough keeps the old behavior
+// where explicit overrides win; ParamOverride passthrough with keep_origin=false
+// lets the matching client header win.
 func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]string, error) {
 	headerOverride := make(map[string]string)
 	if info == nil {
@@ -195,16 +227,20 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 
 	headerOverrideSource := common.GetEffectiveHeaderOverride(info)
 
-	passAll := false
-	var passthroughRegex []*regexp.Regexp
+	var passthroughRules []headerPassthroughRule
 	if !info.IsChannelTest {
 		for k := range headerOverrideSource {
 			key := strings.TrimSpace(strings.ToLower(k))
 			if key == "" {
 				continue
 			}
+			keepOrigin, runtimeRule := info.RuntimeHeaderPassthroughKeepOrigins[key]
 			if key == headerPassthroughAllKey {
-				passAll = true
+				passthroughRules = append(passthroughRules, headerPassthroughRule{
+					all:        true,
+					runtime:    runtimeRule,
+					keepOrigin: keepOrigin,
+				})
 				continue
 			}
 
@@ -225,35 +261,46 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 			if err != nil {
 				return nil, types.NewError(err, types.ErrorCodeChannelHeaderOverrideInvalid)
 			}
-			passthroughRegex = append(passthroughRegex, compiled)
+			passthroughRules = append(passthroughRules, headerPassthroughRule{
+				regex:      compiled,
+				runtime:    runtimeRule,
+				keepOrigin: keepOrigin,
+			})
 		}
 	}
 
-	if passAll || len(passthroughRegex) > 0 {
+	clientPassthroughHeaders := make(map[string]struct{})
+	if len(passthroughRules) > 0 {
 		if c == nil || c.Request == nil {
 			return nil, types.NewError(fmt.Errorf("missing request context for header passthrough"), types.ErrorCodeChannelHeaderOverrideInvalid)
 		}
 		for name := range c.Request.Header {
-			if shouldSkipPassthroughHeader(name) {
+			if shouldSkipPassthroughHeader(info, name) {
 				continue
 			}
-			if !passAll {
-				matched := false
-				for _, re := range passthroughRegex {
-					if re.MatchString(name) {
-						matched = true
-						break
-					}
-				}
-				if !matched {
+			matched := false
+			clientWins := false
+			for _, rule := range passthroughRules {
+				if !rule.matches(name) {
 					continue
 				}
+				matched = true
+				if rule.runtime && !rule.keepOrigin {
+					clientWins = true
+				}
+			}
+			if !matched {
+				continue
 			}
 			value := strings.TrimSpace(c.Request.Header.Get(name))
 			if value == "" {
 				continue
 			}
-			headerOverride[strings.ToLower(strings.TrimSpace(name))] = value
+			key := strings.ToLower(strings.TrimSpace(name))
+			headerOverride[key] = value
+			if clientWins {
+				clientPassthroughHeaders[key] = struct{}{}
+			}
 		}
 	}
 
@@ -263,6 +310,9 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		}
 		key := strings.TrimSpace(strings.ToLower(k))
 		if key == "" {
+			continue
+		}
+		if _, clientWins := clientPassthroughHeaders[key]; clientWins {
 			continue
 		}
 

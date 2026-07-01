@@ -1391,6 +1391,102 @@ func TestApplyParamOverridePassHeadersSkipsMissingHeaders(t *testing.T) {
 	}
 }
 
+func TestApplyParamOverrideWithRelayInfoPassHeadersWildcardSetsRuntimePassthrough(t *testing.T) {
+	info := &RelayInfo{
+		RequestHeaders: map[string]string{
+			"Originator":   "Codex Desktop",
+			"Session-Id":   "sess-123",
+			"X-Trace-Id":   "trace-123",
+			"Content-Type": "application/json",
+		},
+		ChannelMeta: &ChannelMeta{
+			ParamOverride: map[string]interface{}{
+				"operations": []interface{}{
+					map[string]interface{}{
+						"mode":        "pass_headers",
+						"value":       "*",
+						"keep_origin": true,
+					},
+				},
+			},
+			HeadersOverride: map[string]interface{}{
+				"X-Static": "legacy-static",
+			},
+		},
+	}
+
+	out, err := ApplyParamOverrideWithRelayInfo([]byte(`{"temperature":0.7}`), info)
+	if err != nil {
+		t.Fatalf("ApplyParamOverrideWithRelayInfo returned error: %v", err)
+	}
+	assertJSONEqual(t, `{"temperature":0.7}`, string(out))
+
+	if !info.UseRuntimeHeadersOverride {
+		t.Fatalf("expected runtime header override to be enabled")
+	}
+	if info.RuntimeHeadersOverride["*"] != "" {
+		t.Fatalf("expected wildcard passthrough marker, got: %v", info.RuntimeHeadersOverride["*"])
+	}
+	if info.RuntimeHeadersOverride["x-static"] != "legacy-static" {
+		t.Fatalf("expected x-static to be preserved, got: %v", info.RuntimeHeadersOverride["x-static"])
+	}
+	if _, exists := info.RuntimeHeadersOverride["originator"]; exists {
+		t.Fatalf("expected wildcard passthrough to defer header enumeration to request processing")
+	}
+	require.Equal(t, map[string]bool{"*": true}, info.RuntimeHeaderPassthroughKeepOrigins)
+}
+
+func TestApplyParamOverrideWithRelayInfoPassHeadersNamedRespectsKeepOrigin(t *testing.T) {
+	tests := []struct {
+		name       string
+		keepOrigin bool
+		expected   string
+	}{
+		{
+			name:       "client header wins",
+			keepOrigin: false,
+			expected:   "client-trace",
+		},
+		{
+			name:       "existing override wins",
+			keepOrigin: true,
+			expected:   "static-trace",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &RelayInfo{
+				RequestHeaders: map[string]string{
+					"X-Trace-Id": "client-trace",
+				},
+				ChannelMeta: &ChannelMeta{
+					ParamOverride: map[string]interface{}{
+						"operations": []interface{}{
+							map[string]interface{}{
+								"mode":        "pass_headers",
+								"value":       []interface{}{"X-Trace-Id"},
+								"keep_origin": tt.keepOrigin,
+							},
+						},
+					},
+					HeadersOverride: map[string]interface{}{
+						"X-Trace-Id": "static-trace",
+					},
+				},
+			}
+
+			out, err := ApplyParamOverrideWithRelayInfo([]byte(`{"temperature":0.7}`), info)
+			require.NoError(t, err)
+			assertJSONEqual(t, `{"temperature":0.7}`, string(out))
+
+			require.True(t, info.UseRuntimeHeadersOverride)
+			require.Equal(t, tt.expected, info.RuntimeHeadersOverride["x-trace-id"])
+			require.Empty(t, info.RuntimeHeaderPassthroughKeepOrigins)
+		})
+	}
+}
+
 func TestApplyParamOverrideCopyHeaderSkipsMissingSource(t *testing.T) {
 	input := []byte(`{"temperature":0.7}`)
 	override := map[string]interface{}{

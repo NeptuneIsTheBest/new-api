@@ -290,15 +290,6 @@ const GEMINI_IMAGE_4K_TEMPLATE = {
   ],
 }
 
-const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
-  'Originator',
-  'Session_id',
-  'User-Agent',
-  'X-Codex-Installation-Id',
-  'X-Codex-Window-Id',
-  'X-Codex-Parent-Thread-Id',
-]
-
 const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'X-Stainless-Arch',
   'X-Stainless-Lang',
@@ -321,9 +312,9 @@ const buildPassHeadersTemplate = (headers: string[]) => ({
   ],
 })
 
-const CODEX_CLI_HEADER_PASSTHROUGH_TEMPLATE = buildPassHeadersTemplate(
-  CODEX_CLI_HEADER_PASSTHROUGH_HEADERS
-)
+const CODEX_CLI_HEADER_PASSTHROUGH_TEMPLATE = {
+  operations: [{ mode: 'pass_headers', value: '*', keep_origin: true }],
+}
 const CLAUDE_CLI_HEADER_PASSTHROUGH_TEMPLATE = buildPassHeadersTemplate(
   CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS
 )
@@ -610,7 +601,7 @@ const getModeValueLabel = (mode: string): string => {
   if (mode === 'set_header')
     return 'Header Value (supports string or JSON mapping)'
   if (mode === 'pass_headers')
-    return 'Pass-through Headers (comma-separated or JSON array)'
+    return 'Pass-through Headers (* for all safe headers, comma-separated, or JSON array)'
   if (
     mode === 'trim_prefix' ||
     mode === 'trim_suffix' ||
@@ -624,7 +615,7 @@ const getModeValueLabel = (mode: string): string => {
 
 const getModeValuePlaceholder = (mode: string): string => {
   if (mode === 'set_header') return 'Bearer sk-xxx'
-  if (mode === 'pass_headers') return 'Authorization, X-Request-Id'
+  if (mode === 'pass_headers') return '* or Authorization, X-Request-Id'
   if (
     mode === 'trim_prefix' ||
     mode === 'trim_suffix' ||
@@ -2284,7 +2275,11 @@ function RuleEditor(ruleEditorProps: RuleEditorProps) {
                     value_text: e.target.value,
                   })
                 }
-                placeholder={getModeValuePlaceholder(mode)}
+                placeholder={
+                  mode === 'pass_headers'
+                    ? t(getModeValuePlaceholder(mode))
+                    : getModeValuePlaceholder(mode)
+                }
                 rows={3}
                 className='max-h-[200px] resize-y overflow-y-auto font-mono text-xs'
               />

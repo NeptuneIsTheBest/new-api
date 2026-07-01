@@ -314,6 +314,8 @@ export const STATIC_I18N_KEYS = [
   'Copy Header',
   'Delete Header',
   'Move Header',
+  'Pass-through Headers (* for all safe headers, comma-separated, or JSON array)',
+  '* or Authorization, X-Request-Id',
   'Prepend',
   'Append',
   'Ensure Prefix',

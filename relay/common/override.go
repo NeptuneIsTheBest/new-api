@@ -19,9 +19,10 @@ import (
 var negativeIndexRegexp = regexp.MustCompile(`\.(-\d+)`)
 
 const (
-	paramOverrideContextRequestHeaders = "request_headers"
-	paramOverrideContextHeaderOverride = "header_override"
-	paramOverrideContextAuditRecorder  = "__param_override_audit_recorder"
+	paramOverrideContextRequestHeaders              = "request_headers"
+	paramOverrideContextHeaderOverride              = "header_override"
+	paramOverrideContextHeaderPassthroughKeepOrigin = "__header_passthrough_keep_origin"
+	paramOverrideContextAuditRecorder               = "__param_override_audit_recorder"
 )
 
 var errSourceHeaderNotFound = errors.New("source header does not exist")
@@ -944,7 +945,11 @@ func applyOperations(jsonData []byte, operations []ParamOperation, conditionCont
 				return nil, parseErr
 			}
 			for _, headerName := range headerNames {
-				if err = copyHeaderInContext(context, headerName, headerName, op.KeepOrigin); err != nil {
+				if isHeaderPassthroughRuleKeyForOverride(headerName) {
+					setHeaderPassthroughRuleInContext(context, headerName, op.KeepOrigin)
+					continue
+				}
+				if err = passRequestHeaderInContext(context, headerName, op.KeepOrigin); err != nil {
 					if errors.Is(err, errSourceHeaderNotFound) {
 						err = nil
 						continue
@@ -1246,6 +1251,18 @@ func copyHeaderInContext(context map[string]interface{}, fromHeader, toHeader st
 	return setHeaderOverrideInContext(context, toHeader, value, keepOrigin)
 }
 
+func passRequestHeaderInContext(context map[string]interface{}, headerName string, keepOrigin bool) error {
+	headerName = normalizeHeaderContextKey(headerName)
+	if headerName == "" {
+		return fmt.Errorf("pass_headers header name is required")
+	}
+	value, exists := getRequestHeaderValueFromContext(context, headerName)
+	if !exists {
+		return fmt.Errorf("%w: %s", errSourceHeaderNotFound, headerName)
+	}
+	return setHeaderOverrideInContext(context, headerName, value, keepOrigin)
+}
+
 func moveHeaderInContext(context map[string]interface{}, fromHeader, toHeader string, keepOrigin bool) error {
 	fromHeader = normalizeHeaderContextKey(fromHeader)
 	toHeader = normalizeHeaderContextKey(toHeader)
@@ -1269,6 +1286,18 @@ func deleteHeaderOverrideInContext(context map[string]interface{}, headerName st
 	rawHeaders := ensureMapKeyInContext(context, paramOverrideContextHeaderOverride)
 	delete(rawHeaders, headerName)
 	return nil
+}
+
+func setHeaderPassthroughRuleInContext(context map[string]interface{}, ruleKey string, keepOrigin bool) {
+	ruleKey = normalizeHeaderContextKey(ruleKey)
+	if ruleKey == "" {
+		return
+	}
+	rawHeaders := ensureMapKeyInContext(context, paramOverrideContextHeaderOverride)
+	rawHeaders[ruleKey] = ""
+
+	rawKeepOrigins := ensureMapKeyInContext(context, paramOverrideContextHeaderPassthroughKeepOrigin)
+	rawKeepOrigins[ruleKey] = keepOrigin
 }
 
 func parseHeaderPassThroughNames(value interface{}) ([]string, error) {
@@ -1504,6 +1533,23 @@ func getHeaderValueFromContext(context map[string]interface{}, headerName string
 	return "", false
 }
 
+func getRequestHeaderValueFromContext(context map[string]interface{}, headerName string) (string, bool) {
+	headerName = normalizeHeaderContextKey(headerName)
+	if headerName == "" {
+		return "", false
+	}
+	source := ensureMapKeyInContext(context, paramOverrideContextRequestHeaders)
+	raw, ok := source[headerName]
+	if !ok {
+		return "", false
+	}
+	value := strings.TrimSpace(fmt.Sprintf("%v", raw))
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
 func normalizeHeaderContextKey(key string) string {
 	return strings.TrimSpace(strings.ToLower(key))
 }
@@ -1540,6 +1586,33 @@ func syncRuntimeHeaderOverrideFromContext(info *RelayInfo, context map[string]in
 	}
 	info.RuntimeHeadersOverride = sanitizeHeaderOverrideMap(rawMap)
 	info.UseRuntimeHeadersOverride = true
+	info.RuntimeHeaderPassthroughKeepOrigins = sanitizeHeaderPassthroughKeepOriginMap(context[paramOverrideContextHeaderPassthroughKeepOrigin])
+}
+
+func sanitizeHeaderPassthroughKeepOriginMap(source interface{}) map[string]bool {
+	if source == nil {
+		return nil
+	}
+	rawMap, ok := source.(map[string]interface{})
+	if !ok || len(rawMap) == 0 {
+		return nil
+	}
+	target := make(map[string]bool, len(rawMap))
+	for key, value := range rawMap {
+		normalizedKey := normalizeHeaderContextKey(key)
+		if normalizedKey == "" || !isHeaderPassthroughRuleKeyForOverride(normalizedKey) {
+			continue
+		}
+		keepOrigin, ok := value.(bool)
+		if !ok {
+			continue
+		}
+		target[normalizedKey] = keepOrigin
+	}
+	if len(target) == 0 {
+		return nil
+	}
+	return target
 }
 
 func moveValue(data []byte, fromPath, toPath string) ([]byte, error) {

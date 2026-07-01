@@ -152,6 +152,7 @@ type RelayInfo struct {
 	LastError                             *types.NewAPIError
 	RuntimeHeadersOverride                map[string]interface{}
 	UseRuntimeHeadersOverride             bool
+	RuntimeHeaderPassthroughKeepOrigins   map[string]bool
 	ParamOverrideAudit                    []string
 
 	// UpstreamRequestBodySize is the byte size of the marshaled upstream request
