@@ -95,9 +95,14 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 }
 
 var codexPassthroughSkipHeaderNamesLower = map[string]struct{}{
-	"accept":             {},
-	"chatgpt-account-id": {},
-	"content-type":       {},
+	// These are managed by the Codex adapter or upstream protocol checks.
+	// Explicit header overrides can still set them when an admin opts in.
+	"accept":                                {},
+	"chatgpt-account-id":                    {},
+	"content-type":                          {},
+	"openai-beta":                           {},
+	"x-oai-attestation":                     {},
+	"x-responsesapi-include-timing-metrics": {},
 }
 
 var headerPassthroughRegexCache sync.Map // map[string]*regexp.Regexp

@@ -179,7 +179,9 @@ func TestProcessHeaderOverride_CodexPassthroughPassesContextHeaders(t *testing.T
 			ctx.Request.Header.Set("X-Codex-Window-Id", "thread-123:0")
 			ctx.Request.Header.Set("X-Codex-Parent-Thread-Id", "parent-123")
 			ctx.Request.Header.Set("X-OpenAI-Subagent", "guardian")
-			ctx.Request.Header.Set("OpenAI-Beta", "responses=experimental")
+			ctx.Request.Header.Set("OpenAI-Beta", "client-beta")
+			ctx.Request.Header.Set("X-OAI-Attestation", "client-attestation")
+			ctx.Request.Header.Set("X-ResponsesAPI-Include-Timing-Metrics", "1")
 			ctx.Request.Header.Set("Authorization", "Bearer client-token")
 			ctx.Request.Header.Set("chatgpt-account-id", "client-account")
 			ctx.Request.Header.Set("Content-Type", "application/json")
@@ -207,13 +209,15 @@ func TestProcessHeaderOverride_CodexPassthroughPassesContextHeaders(t *testing.T
 			require.Equal(t, "thread-123:0", headers["x-codex-window-id"])
 			require.Equal(t, "parent-123", headers["x-codex-parent-thread-id"])
 			require.Equal(t, "guardian", headers["x-openai-subagent"])
-			require.Equal(t, "responses=experimental", headers["openai-beta"])
 
 			for _, headerName := range []string{
 				"authorization",
 				"chatgpt-account-id",
 				"content-type",
 				"accept",
+				"openai-beta",
+				"x-oai-attestation",
+				"x-responsesapi-include-timing-metrics",
 				"host",
 				"content-length",
 			} {
@@ -222,6 +226,31 @@ func TestProcessHeaderOverride_CodexPassthroughPassesContextHeaders(t *testing.T
 			}
 		})
 	}
+}
+
+func TestProcessHeaderOverride_CodexExplicitOverrideCanSetProtocolHeaders(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ctx.Request.Header.Set("OpenAI-Beta", "client-beta")
+
+	info := &relaycommon.RelayInfo{
+		IsChannelTest: false,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType: channelconstant.ChannelTypeCodex,
+			HeadersOverride: map[string]any{
+				"*":           "",
+				"OpenAI-Beta": "admin-beta",
+			},
+		},
+	}
+
+	headers, err := processHeaderOverride(info, ctx)
+	require.NoError(t, err)
+	require.Equal(t, "admin-beta", headers["openai-beta"])
 }
 
 func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.T) {

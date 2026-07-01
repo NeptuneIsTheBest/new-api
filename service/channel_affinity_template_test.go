@@ -311,7 +311,19 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	firstOp, ok := ops[0].(map[string]interface{})
 	require.True(t, ok)
 	require.Equal(t, "pass_headers", firstOp["mode"])
-	require.Equal(t, "*", firstOp["value"])
+	expectedCodexHeaders := []string{
+		"User-Agent",
+		"Originator",
+		"Thread-Id",
+		"Session-Id",
+		"X-Client-Request-Id",
+		"X-Codex-Turn-Metadata",
+		"X-OpenAI-Subagent",
+		"X-Codex-Parent-Thread-Id",
+		"X-Codex-Window-Id",
+		"X-Codex-Beta-Features",
+	}
+	require.Equal(t, expectedCodexHeaders, firstOp["value"])
 
 	info := &relaycommon.RelayInfo{
 		RequestHeaders: map[string]string{
@@ -341,22 +353,22 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.True(t, info.UseRuntimeHeadersOverride)
 
 	require.Equal(t, "legacy-static", info.RuntimeHeadersOverride["x-static"])
-	require.Equal(t, "", info.RuntimeHeadersOverride["*"])
+	require.Equal(t, "Codex CLI", info.RuntimeHeadersOverride["originator"])
+	require.Equal(t, "sess-123", info.RuntimeHeadersOverride["session-id"])
+	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["thread-id"])
+	require.Equal(t, "codex-cli-test", info.RuntimeHeadersOverride["user-agent"])
+	require.Equal(t, "window-123", info.RuntimeHeadersOverride["x-codex-window-id"])
+	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["x-codex-parent-thread-id"])
+	require.Equal(t, "beta-feature", info.RuntimeHeadersOverride["x-codex-beta-features"])
+	require.Equal(t, "turn-metadata", info.RuntimeHeadersOverride["x-codex-turn-metadata"])
+	require.Equal(t, "request-123", info.RuntimeHeadersOverride["x-client-request-id"])
+	require.Equal(t, "guardian", info.RuntimeHeadersOverride["x-openai-subagent"])
 	for _, headerName := range []string{
-		"originator",
-		"session-id",
-		"thread-id",
-		"user-agent",
-		"x-codex-window-id",
-		"x-codex-parent-thread-id",
-		"x-codex-beta-features",
-		"x-codex-turn-metadata",
-		"x-client-request-id",
-		"x-openai-subagent",
+		"*",
 		"x-oai-attestation",
 		"x-responsesapi-include-timing-metrics",
 	} {
 		_, exists := info.RuntimeHeadersOverride[headerName]
-		require.False(t, exists, "wildcard passthrough should defer %s to request processing", headerName)
+		require.False(t, exists, "codex template should not pass %s", headerName)
 	}
 }

@@ -306,15 +306,28 @@ const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'Anthropic-Version',
 ]
 
+const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
+  'User-Agent',
+  'Originator',
+  'Thread-Id',
+  'Session-Id',
+  'X-Client-Request-Id',
+  'X-Codex-Turn-Metadata',
+  'X-OpenAI-Subagent',
+  'X-Codex-Parent-Thread-Id',
+  'X-Codex-Window-Id',
+  'X-Codex-Beta-Features',
+]
+
 const buildPassHeadersTemplate = (headers: string[]) => ({
   operations: [
     { mode: 'pass_headers', value: [...headers], keep_origin: true },
   ],
 })
 
-const CODEX_CLI_HEADER_PASSTHROUGH_TEMPLATE = {
-  operations: [{ mode: 'pass_headers', value: '*', keep_origin: true }],
-}
+const CODEX_CLI_HEADER_PASSTHROUGH_TEMPLATE = buildPassHeadersTemplate(
+  CODEX_CLI_HEADER_PASSTHROUGH_HEADERS
+)
 const CLAUDE_CLI_HEADER_PASSTHROUGH_TEMPLATE = buildPassHeadersTemplate(
   CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS
 )

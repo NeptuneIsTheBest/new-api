@@ -27,16 +27,6 @@ const buildPassHeadersTemplate = (headers) => ({
   ],
 });
 
-const buildPassAllHeadersTemplate = () => ({
-  operations: [
-    {
-      mode: 'pass_headers',
-      value: '*',
-      keep_origin: true,
-    },
-  ],
-});
-
 export const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'X-Stainless-Arch',
   'X-Stainless-Lang',
@@ -53,8 +43,21 @@ export const CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'Anthropic-Version',
 ];
 
+export const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
+  'User-Agent',
+  'Originator',
+  'Thread-Id',
+  'Session-Id',
+  'X-Client-Request-Id',
+  'X-Codex-Turn-Metadata',
+  'X-OpenAI-Subagent',
+  'X-Codex-Parent-Thread-Id',
+  'X-Codex-Window-Id',
+  'X-Codex-Beta-Features',
+];
+
 export const CODEX_CLI_HEADER_PASSTHROUGH_TEMPLATE =
-  buildPassAllHeadersTemplate();
+  buildPassHeadersTemplate(CODEX_CLI_HEADER_PASSTHROUGH_HEADERS);
 
 export const CLAUDE_CLI_HEADER_PASSTHROUGH_TEMPLATE = buildPassHeadersTemplate(
   CLAUDE_CLI_HEADER_PASSTHROUGH_HEADERS,

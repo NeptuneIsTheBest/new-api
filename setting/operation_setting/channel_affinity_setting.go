@@ -36,6 +36,19 @@ type ChannelAffinitySetting struct {
 	Rules                 []ChannelAffinityRule `json:"rules"`
 }
 
+var codexCliPassThroughHeaders = []string{
+	"User-Agent",
+	"Originator",
+	"Thread-Id",
+	"Session-Id",
+	"X-Client-Request-Id",
+	"X-Codex-Turn-Metadata",
+	"X-OpenAI-Subagent",
+	"X-Codex-Parent-Thread-Id",
+	"X-Codex-Window-Id",
+	"X-Codex-Beta-Features",
+}
+
 var claudeCliPassThroughHeaders = []string{
 	"X-Stainless-Arch",
 	"X-Stainless-Lang",
@@ -50,18 +63,6 @@ var claudeCliPassThroughHeaders = []string{
 	"Anthropic-Beta",
 	"Anthropic-Dangerous-Direct-Browser-Access",
 	"Anthropic-Version",
-}
-
-func buildPassAllHeadersTemplate() map[string]interface{} {
-	return map[string]interface{}{
-		"operations": []map[string]interface{}{
-			{
-				"mode":        "pass_headers",
-				"value":       "*",
-				"keep_origin": true,
-			},
-		},
-	}
 }
 
 func buildPassHeaderTemplate(headers []string) map[string]interface{} {
@@ -94,7 +95,7 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			},
 			ValueRegex:            "",
 			TTLSeconds:            0,
-			ParamOverrideTemplate: buildPassAllHeadersTemplate(),
+			ParamOverrideTemplate: buildPassHeaderTemplate(codexCliPassThroughHeaders),
 			SkipRetryOnFailure:    true,
 			IncludeUsingGroup:     true,
 			IncludeRuleName:       true,
