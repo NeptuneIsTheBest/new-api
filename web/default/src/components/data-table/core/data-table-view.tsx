@@ -45,6 +45,7 @@ export type {
   DataTableViewProps,
 } from './types'
 export { DataTableRow } from './data-table-row'
+export { DataTableRowActionMenu } from './row-action-menu'
 
 export function DataTableView<TData>(props: DataTableViewProps<TData>) {
   const rows = props.rows ?? props.table.getRowModel().rows
