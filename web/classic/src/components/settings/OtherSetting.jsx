@@ -33,37 +33,10 @@ import { marked } from 'marked';
 import { useTranslation } from 'react-i18next';
 import { StatusContext } from '../../context/Status';
 import Text from '@douyinfe/semi-ui/lib/es/typography/text';
+import { isUpToDateWithUpstream } from '../../helpers/releaseVersion';
 
 const LEGAL_USER_AGREEMENT_KEY = 'legal.user_agreement';
 const LEGAL_PRIVACY_POLICY_KEY = 'legal.privacy_policy';
-
-const normalizeVersionForUpstreamCompare = (version) => {
-  return String(version || '')
-    .trim()
-    .replace(/^v/i, '')
-    .replace(/-fork(?:\..*)?$/i, '');
-};
-
-const compareReleaseVersions = (currentVersion, latestVersion) => {
-  const currentParts = normalizeVersionForUpstreamCompare(currentVersion)
-    .split('.')
-    .map((part) => Number.parseInt(part, 10));
-  const latestParts = normalizeVersionForUpstreamCompare(latestVersion)
-    .split('.')
-    .map((part) => Number.parseInt(part, 10));
-
-  for (let i = 0; i < Math.max(currentParts.length, latestParts.length); i++) {
-    const currentPart = Number.isNaN(currentParts[i]) ? 0 : currentParts[i] || 0;
-    const latestPart = Number.isNaN(latestParts[i]) ? 0 : latestParts[i] || 0;
-    if (currentPart > latestPart) return 1;
-    if (currentPart < latestPart) return -1;
-  }
-  return 0;
-};
-
-const isUpToDateWithUpstream = (currentVersion, latestVersion) => {
-  return compareReleaseVersions(currentVersion, latestVersion) >= 0;
-};
 
 const OtherSetting = () => {
   const { t } = useTranslation();
