@@ -56,6 +56,7 @@ const OtherSetting = () => {
   const [updateData, setUpdateData] = useState({
     tag_name: '',
     content: '',
+    html_url: '',
   });
 
   const updateOption = async (key, value) => {
@@ -236,44 +237,50 @@ const OtherSetting = () => {
         ...loadingInput,
         CheckUpdate: true,
       }));
-      // Use a CORS proxy to avoid direct cross-origin requests to GitHub API
-      // Option 1: Use a public CORS proxy service
-      // const proxyUrl = 'https://cors-anywhere.herokuapp.com/';
-      // const res = await API.get(
-      //   `${proxyUrl}https://api.github.com/repos/Calcium-Ion/new-api/releases/latest`,
-      // );
-
-      // Option 2: Use the JSON proxy approach which often works better with GitHub API
-      const res = await fetch(
+      const response = await fetch(
         'https://api.github.com/repos/Calcium-Ion/new-api/releases/latest',
         {
           headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-            // Adding User-Agent which is often required by GitHub API
-            'User-Agent': 'new-api-update-checker',
+            Accept: 'application/vnd.github+json',
           },
         },
-      ).then((response) => response.json());
+      );
 
-      // Option 3: Use a local proxy endpoint
-      // Create a cached version of the response to avoid frequent GitHub API calls
-      // const res = await API.get('/api/status/github-latest-release');
+      if (!response.ok) {
+        const updateError = new Error('Failed to contact GitHub releases API');
+        updateError.userMessage = t('无法连接 GitHub 发布接口');
+        throw updateError;
+      }
 
-      const { tag_name, body } = res;
+      const res = await response.json();
+
+      if (!res?.tag_name) {
+        const updateError = new Error('Unexpected GitHub release payload');
+        updateError.userMessage = t('GitHub 发布信息格式异常');
+        throw updateError;
+      }
+
+      const { tag_name, body, html_url } = res;
       const currentVersion = statusState?.status?.version;
       if (isUpToDateWithUpstream(currentVersion, tag_name)) {
-        showSuccess(`已是最新版本：${currentVersion || tag_name}`);
+        showSuccess(
+          t('已是最新版本：{{version}}', {
+            version: currentVersion || tag_name,
+          }),
+        );
       } else {
+        const releaseBody =
+          typeof body === 'string' && body.trim() ? body : t('暂无发布说明');
         setUpdateData({
           tag_name: tag_name,
-          content: marked.parse(body),
+          content: marked.parse(releaseBody),
+          html_url: html_url,
         });
         setShowUpdateModal(true);
       }
     } catch (error) {
       console.error('Failed to check for updates:', error);
-      showError('检查更新失败，请稍后再试');
+      showError(error?.userMessage || t('检查更新失败，请稍后再试'));
     } finally {
       setLoadingInput((loadingInput) => ({
         ...loadingInput,
@@ -348,8 +355,10 @@ const OtherSetting = () => {
   // Function to open GitHub release page
   const openGitHubRelease = () => {
     window.open(
-      `https://github.com/Calcium-Ion/new-api/releases/tag/${updateData.tag_name}`,
+      updateData.html_url ||
+        `https://github.com/Calcium-Ion/new-api/releases/tag/${updateData.tag_name}`,
       '_blank',
+      'noopener,noreferrer',
     );
   };
 

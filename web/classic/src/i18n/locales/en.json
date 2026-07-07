@@ -3847,6 +3847,11 @@
     "重置 Codex 额度": "Reset Codex quota",
     "重置 Codex 额度失败": "Failed to reset Codex quota",
     "重置额度": "Reset credit",
-    "重置额度 ID：": "Reset credit ID:"
+    "重置额度 ID：": "Reset credit ID:",
+    "GitHub 发布信息格式异常": "Unexpected GitHub release payload",
+    "已是最新版本：{{version}}": "You are running the latest version: {{version}}",
+    "暂无发布说明": "No release notes available",
+    "检查更新失败，请稍后再试": "Failed to check for updates. Please try again later",
+    "无法连接 GitHub 发布接口": "Failed to contact the GitHub releases API"
   }
 }

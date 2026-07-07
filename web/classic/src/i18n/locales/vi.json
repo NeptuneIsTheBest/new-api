@@ -4235,6 +4235,11 @@
     "重置 Codex 额度": "Đặt lại hạn mức Codex",
     "重置 Codex 额度失败": "Không thể đặt lại hạn mức Codex",
     "重置额度": "Tín dụng đặt lại",
-    "重置额度 ID：": "ID tín dụng đặt lại:"
+    "重置额度 ID：": "ID tín dụng đặt lại:",
+    "GitHub 发布信息格式异常": "Định dạng thông tin bản phát hành GitHub không hợp lệ",
+    "已是最新版本：{{version}}": "Bạn đang dùng phiên bản mới nhất: {{version}}",
+    "暂无发布说明": "Chưa có ghi chú phát hành",
+    "检查更新失败，请稍后再试": "Không thể kiểm tra cập nhật, vui lòng thử lại sau",
+    "无法连接 GitHub 发布接口": "Không thể kết nối API bản phát hành GitHub"
   }
 }

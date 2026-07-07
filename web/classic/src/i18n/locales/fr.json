@@ -3701,6 +3701,11 @@
     "重置 Codex 额度": "Réinitialiser le quota Codex",
     "重置 Codex 额度失败": "Échec de la réinitialisation du quota Codex",
     "重置额度": "Crédit de réinitialisation",
-    "重置额度 ID：": "ID du crédit de réinitialisation :"
+    "重置额度 ID：": "ID du crédit de réinitialisation :",
+    "GitHub 发布信息格式异常": "Format de publication GitHub inattendu",
+    "已是最新版本：{{version}}": "Vous utilisez déjà la dernière version : {{version}}",
+    "暂无发布说明": "Aucune note de version disponible",
+    "检查更新失败，请稍后再试": "Échec de la recherche de mises à jour, veuillez réessayer plus tard",
+    "无法连接 GitHub 发布接口": "Impossible de contacter l'API des versions GitHub"
   }
 }
