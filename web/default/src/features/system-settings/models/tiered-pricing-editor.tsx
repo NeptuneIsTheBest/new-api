@@ -109,6 +109,52 @@ const MEDIA_PRICE_VARS = BILLING_EXTRA_VARS.filter(
   (variable) => variable.group === 'media'
 )
 
+function getTierConditionKey(condition: TierConditionInput): string {
+  return `${condition.var}:${condition.op}:${String(condition.value)}`
+}
+
+function getVisualTierKey(tier: VisualTier): string {
+  return [
+    tier.label,
+    tier.conditions.map(getTierConditionKey).join('|'),
+    tier.input_unit_cost,
+    tier.output_unit_cost,
+    tier.cache_mode,
+    tier.cache_read_unit_cost ?? '',
+    tier.cache_create_unit_cost ?? '',
+    tier.cache_create_1h_unit_cost ?? '',
+    tier.image_unit_cost ?? '',
+  ].join(':')
+}
+
+function getRequestConditionKey(condition: RequestCondition): string {
+  if (condition.source === SOURCE_TIME) {
+    return [
+      condition.source,
+      condition.timeFunc,
+      condition.timezone,
+      condition.mode,
+      condition.value,
+      condition.rangeStart,
+      condition.rangeEnd,
+    ].join(':')
+  }
+
+  return [
+    condition.source,
+    condition.path,
+    condition.mode,
+    condition.value,
+  ].join(':')
+}
+
+function getRuleGroupKey(group: RequestRuleGroup): string {
+  return [
+    group.multiplier,
+    group.conditions.map(getRequestConditionKey).join('|'),
+  ].join(':')
+}
+
 const CONDITION_INPUT_OPTIONS: {
   value: TierConditionInput['var']
   labelKey: string
@@ -333,7 +379,7 @@ function formatTokenHint(n: number | string | null | undefined): string {
 function formatNumberDraft(value: number | string): string {
   if (value === '') return ''
   if (typeof value === 'number')
-    return Number.isFinite(value) ? String(value) : '0'
+    {return Number.isFinite(value) ? String(value) : '0'}
   return value
 }
 
@@ -436,12 +482,10 @@ function ConditionRow({ condition, onChange, onRemove }: ConditionRowProps) {
   return (
     <div className='flex items-center gap-2'>
       <Select
-        items={[
-          ...CONDITION_INPUT_OPTIONS.map((option) => ({
+        items={CONDITION_INPUT_OPTIONS.map((option) => ({
             value: option.value,
             label: t(option.labelKey),
-          })),
-        ]}
+          }))}
         value={condition.var}
         onValueChange={(value) =>
           onChange({ ...condition, var: value as TierConditionInput['var'] })
@@ -667,7 +711,7 @@ function VisualTierCard({
         ) : (
           tier.conditions.map((condition, conditionIndex) => (
             <ConditionRow
-              key={conditionIndex}
+              key={getTierConditionKey(condition)}
               condition={condition}
               onChange={(next) => handleConditionChange(conditionIndex, next)}
               onRemove={() => handleConditionRemove(conditionIndex)}
@@ -792,7 +836,7 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
     const lastIndex = tiers.length - 1
     // When adding a new fallback, give the previous catch-all tier a default
     // upper-bound condition so the expression compiles into a sane two-tier
-    // shape. Mirrors the classic editor's UX for adding tiers.
+    // shape while preserving the established tier editor UX.
     if (lastIndex >= 0 && tiers[lastIndex].conditions.length === 0) {
       tiers[lastIndex] = normalizeVisualTier({
         ...tiers[lastIndex],
@@ -849,7 +893,7 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
       </p>
       {config.tiers.map((tier, index) => (
         <VisualTierCard
-          key={index}
+          key={getVisualTierKey(tier)}
           tier={tier}
           index={index}
           total={config.tiers.length}
@@ -967,12 +1011,12 @@ function RuleConditionRow({
         return timeFunc
     }
   }
-  const sourceLabel =
-    condition.source === SOURCE_PARAM
-      ? t('Body param')
-      : condition.source === SOURCE_HEADER
-        ? t('Header')
-        : t('Time')
+  let sourceLabel = t('Time')
+  if (condition.source === SOURCE_PARAM) {
+    sourceLabel = t('Body param')
+  } else if (condition.source === SOURCE_HEADER) {
+    sourceLabel = t('Header')
+  }
 
   const handleSourceChange = (source: string) => {
     if (source === SOURCE_TIME) {
@@ -992,12 +1036,10 @@ function RuleConditionRow({
   const renderTimeCondition = (timeCond: TimeCondition) => (
     <>
       <Select
-        items={[
-          ...TIME_FUNCS.map((fn) => ({
+        items={TIME_FUNCS.map((fn) => ({
             value: fn,
             label: getTimeFuncLabel(fn),
-          })),
-        ]}
+          }))}
         value={timeCond.timeFunc}
         onValueChange={(value) =>
           onChange({ ...timeCond, timeFunc: value as TimeFunc })
@@ -1017,12 +1059,10 @@ function RuleConditionRow({
         </SelectContent>
       </Select>
       <Select
-        items={[
-          ...COMMON_TIMEZONES.map((tz) => ({
+        items={COMMON_TIMEZONES.map((tz) => ({
             value: tz.value,
             label: tz.label,
-          })),
-        ]}
+          }))}
         value={timeCond.timezone}
         onValueChange={(value) =>
           value !== null && onChange({ ...timeCond, timezone: value })
@@ -1045,12 +1085,10 @@ function RuleConditionRow({
         </SelectContent>
       </Select>
       <Select
-        items={[
-          ...matchOptions.map((option) => ({
+        items={matchOptions.map((option) => ({
             value: option.value,
             label: getMatchLabel(option.value),
-          })),
-        ]}
+          }))}
         value={timeCond.mode}
         onValueChange={(v) => v !== null && handleModeChange(v)}
       >
@@ -1111,12 +1149,10 @@ function RuleConditionRow({
         className='w-44'
       />
       <Select
-        items={[
-          ...matchOptions.map((option) => ({
+        items={matchOptions.map((option) => ({
             value: option.value,
             label: getMatchLabel(option.value),
-          })),
-        ]}
+          }))}
         value={phCond.mode}
         onValueChange={(v) => v !== null && handleModeChange(v)}
       >
@@ -1241,7 +1277,7 @@ function RuleGroupCard({
       <div className='space-y-2'>
         {group.conditions.map((condition, conditionIndex) => (
           <RuleConditionRow
-            key={conditionIndex}
+            key={getRequestConditionKey(condition)}
             condition={condition}
             onChange={(next) => handleConditionChange(conditionIndex, next)}
             onRemove={() =>
@@ -1562,7 +1598,7 @@ function LlmPromptHelper({ modelName }: LlmPromptHelperProps) {
 
   const prompt = useMemo(() => {
     if (modelName) {
-      return LLM_PROMPT_TEMPLATE + `\n\nCurrent model: ${modelName}`
+      return `${LLM_PROMPT_TEMPLATE  }\n\nCurrent model: ${modelName}`
     }
     return LLM_PROMPT_TEMPLATE
   }, [modelName])
@@ -1837,7 +1873,7 @@ export const TieredPricingEditor = memo(function TieredPricingEditor({
               <>
                 {requestRuleGroups.map((group, groupIndex) => (
                   <RuleGroupCard
-                    key={groupIndex}
+                    key={getRuleGroupKey(group)}
                     group={group}
                     index={groupIndex}
                     onChange={(next) => {

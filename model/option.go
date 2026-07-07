@@ -189,6 +189,12 @@ func InitOptionMap() {
 func loadOptionsFromDatabase() {
 	options, _ := AllOption()
 	for _, option := range options {
+		if option.Key == "theme.frontend" {
+			if err := DB.Delete(&Option{Key: option.Key}).Error; err != nil {
+				common.SysLog("failed to delete retired option: " + option.Key + ", error: " + err.Error())
+			}
+			continue
+		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
 			common.SysLog("failed to update option map: " + err.Error())
@@ -606,8 +612,6 @@ func handleConfigUpdate(key, value string) bool {
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()
-	} else if configName == "theme" {
-		system_setting.UpdateAndSyncTheme()
 	}
 
 	return true // 已处理

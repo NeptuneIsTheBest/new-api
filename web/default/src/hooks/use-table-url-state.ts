@@ -25,13 +25,13 @@ import { useEffect, useMemo, useState } from 'react'
 
 type SearchRecord = Record<string, unknown>
 
-// Page size persists globally under the classic theme's key (raw number
-// string), so the choice is remembered and carries over from classic.
+// Page size persists globally under the legacy key so existing preferences
+// survive frontend upgrades.
 const PAGE_SIZE_STORAGE_KEY = 'page-size'
 
 function getStoredPageSize(): number | undefined {
   try {
-    const n = parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY) ?? '', 10)
+    const n = Number.parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY) ?? '', 10)
     return n > 0 ? n : undefined // n > 0 also rejects NaN
   } catch {
     return undefined
@@ -221,9 +221,10 @@ export function useTableUrlState(
         patch[cfg.searchKey] =
           value.trim() !== '' ? serialize(value) : undefined
       } else {
-        const value = Array.isArray(found?.value)
-          ? (found!.value as unknown[])
-          : []
+        const value =
+          found && Array.isArray(found.value)
+            ? (found.value as unknown[])
+            : []
         patch[cfg.searchKey] = value.length > 0 ? serialize(value) : undefined
       }
     }

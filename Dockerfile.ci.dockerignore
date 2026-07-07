@@ -43,6 +43,3 @@
 !web/default/
 !web/default/dist/
 !web/default/dist/**
-!web/classic/
-!web/classic/dist/
-!web/classic/dist/**
