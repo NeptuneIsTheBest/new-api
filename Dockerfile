@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder
+FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS web-deps
 
 WORKDIR /build/web
 COPY web/package.json web/bun.lock ./
@@ -8,18 +8,15 @@ COPY web/default/package.json ./default/package.json
 COPY web/classic/package.json ./classic/package.json
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
+
+FROM web-deps AS builder
+
 COPY ./web/default ./default
 COPY ./VERSION /build/VERSION
 RUN cd default && DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
 
-FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder-classic
+FROM web-deps AS builder-classic
 
-WORKDIR /build/web
-COPY web/package.json web/bun.lock ./
-COPY web/default/package.json ./default/package.json
-COPY web/classic/package.json ./classic/package.json
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --filter ./classic --frozen-lockfile
 COPY ./web/classic ./classic
 COPY ./VERSION /build/VERSION
 RUN cd classic && VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build

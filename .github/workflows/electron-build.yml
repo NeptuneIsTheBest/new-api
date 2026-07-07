@@ -9,7 +9,52 @@ on:
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
+  prepare_web:
+    name: Build Web Assets
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          VERSION=$(git describe --tags)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build frontend assets
+        env:
+          CI: ""
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          cd default
+          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION="$VERSION" bun run build
+          cd ../classic
+          VITE_REACT_APP_VERSION="$VERSION" bun run build
+          cd ../..
+          tar -cf web-dist.tar web/default/dist web/classic/dist
+
+      - name: Upload Web Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist.tar
+          retention-days: 1
+
   build:
+    needs: prepare_web
     strategy:
       matrix:
         # os: [macos-latest, windows-latest]
@@ -19,76 +64,78 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      VERSION: ${{ needs.prepare_web.outputs.version }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Download Web Assets
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
+          name: web-dist
+          path: .
+
+      - name: Unpack Web Assets
+        run: tar -xf web-dist.tar
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      - name: Cache Electron downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/electron
+            .cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('electron/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '>=1.25.1'
-
-      - name: Build frontend
-        env:
-          CI: ""
-          NODE_OPTIONS: "--max-old-space-size=4096"
-        run: |
-          cd web
-          bun install
-          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(git describe --tags) bun run build
-          cd ..
-
-      # - name: Build Go binary (macos/Linux)
-      #   if: runner.os != 'Windows'
-      #   run: |
-      #     go mod download
-      #     go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(git describe --tags)' -extldflags '-static'" -o new-api
+          cache-dependency-path: go.sum
 
       - name: Build Go binary (Windows)
         if: runner.os == 'Windows'
         run: |
           go mod download
-          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(git describe --tags)'" -o new-api.exe
+          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'" -o new-api.exe
 
       - name: Update Electron version
         run: |
           cd electron
-          VERSION=$(git describe --tags)
-          VERSION=${VERSION#v}  # Remove 'v' prefix if present
+          ELECTRON_VERSION=${VERSION#v}  # Remove 'v' prefix if present
           # Convert to valid semver: take first 3 components and convert rest to prerelease format
           # e.g., 0.9.3-patch.1 -> 0.9.3-patch.1
-          if [[ $VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$ ]]; then
+          if [[ $ELECTRON_VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$ ]]; then
             MAJOR=${BASH_REMATCH[1]}
             MINOR=${BASH_REMATCH[2]}
             PATCH=${BASH_REMATCH[3]}
             REST=${BASH_REMATCH[4]}
-          
-            VERSION="$MAJOR.$MINOR.$PATCH"
-          
+
+            ELECTRON_VERSION="$MAJOR.$MINOR.$PATCH"
+
             # If there's extra content, append it without adding -dev
             if [[ -n "$REST" ]]; then
-              VERSION="$VERSION$REST"
+              ELECTRON_VERSION="$ELECTRON_VERSION$REST"
             fi
           fi
-          npm version $VERSION --no-git-tag-version --allow-same-version
+          npm version "$ELECTRON_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install Electron dependencies
         run: |
           cd electron
-          npm install
+          npm ci
 
       # - name: Build Electron app (macOS)
       #   if: runner.os == 'macOS'
