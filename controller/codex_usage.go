@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,7 +30,6 @@ type codexWhamFetchFunc func(
 var (
 	codexWhamUsageFetcher              = service.FetchCodexWhamUsage
 	codexWhamResetCreditsFetcher       = service.FetchCodexWhamRateLimitResetCredits
-	codexWhamResetCreditConsumer       = service.ConsumeCodexWhamRateLimitResetCredit
 	codexWhamUsageResetter             = service.ResetCodexWhamUsage
 	codexOAuthTokenRefresher           = service.RefreshCodexOAuthTokenWithProxy
 	codexRedeemRequestIDGenerator      = uuid.NewString
@@ -167,37 +167,44 @@ func GetCodexChannelRateLimitResetCredits(c *gin.Context) {
 	})
 }
 
-func ResetCodexChannelUsage(c *gin.Context) {
-	redeemRequestID := codexRedeemRequestIDGenerator()
-	handleCodexWhamProxyRequest(c, "reset codex usage", "重置用量失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
-		return codexWhamUsageResetter(ctx, client, baseURL, accessToken, accountID, redeemRequestID)
-	})
-}
-
-type consumeCodexRateLimitResetCreditRequest struct {
-	CreditID        string `json:"credit_id"`
+type resetCodexUsageRequest struct {
+	CreditID        string `json:"credit_id,omitempty"`
 	RedeemRequestID string `json:"redeem_request_id,omitempty"`
 }
 
+func resetCodexChannelUsage(c *gin.Context, actionName string, failureMessage string, creditID string, redeemRequestID string, requireCreditID bool) {
+	creditID = strings.TrimSpace(creditID)
+	if requireCreditID && creditID == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "credit_id is required"})
+		return
+	}
+
+	redeemRequestID = strings.TrimSpace(redeemRequestID)
+	if redeemRequestID == "" {
+		redeemRequestID = codexRedeemRequestIDGenerator()
+	}
+
+	handleCodexWhamProxyRequest(c, actionName, failureMessage, func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
+		return codexWhamUsageResetter(ctx, client, baseURL, accessToken, accountID, creditID, redeemRequestID)
+	})
+}
+
+func ResetCodexChannelUsage(c *gin.Context) {
+	var req resetCodexUsageRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil && err != io.EOF {
+		common.ApiError(c, err)
+		return
+	}
+
+	resetCodexChannelUsage(c, "reset codex usage", "重置用量失败，请稍后重试", req.CreditID, req.RedeemRequestID, false)
+}
+
 func ConsumeCodexChannelRateLimitResetCredit(c *gin.Context) {
-	var req consumeCodexRateLimitResetCreditRequest
+	var req resetCodexUsageRequest
 	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	creditID := strings.TrimSpace(req.CreditID)
-	if creditID == "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "credit_id is required"})
-		return
-	}
-
-	redeemRequestID := strings.TrimSpace(req.RedeemRequestID)
-	if redeemRequestID == "" {
-		redeemRequestID = codexRedeemRequestIDGenerator()
-	}
-
-	handleCodexWhamProxyRequest(c, "consume codex rate limit reset credit", "重置额度失败，请稍后重试", func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string) (int, []byte, error) {
-		return codexWhamResetCreditConsumer(ctx, client, baseURL, accessToken, accountID, creditID, redeemRequestID)
-	})
+	resetCodexChannelUsage(c, "consume codex rate limit reset credit", "重置额度失败，请稍后重试", req.CreditID, req.RedeemRequestID, true)
 }

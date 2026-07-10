@@ -67,14 +67,14 @@ func resetCodexWhamControllerStubs(t *testing.T) {
 
 	originalUsageFetcher := codexWhamUsageFetcher
 	originalResetCreditsFetcher := codexWhamResetCreditsFetcher
-	originalResetCreditConsumer := codexWhamResetCreditConsumer
+	originalUsageResetter := codexWhamUsageResetter
 	originalTokenRefresher := codexOAuthTokenRefresher
 	originalRequestIDGenerator := codexRedeemRequestIDGenerator
 
 	t.Cleanup(func() {
 		codexWhamUsageFetcher = originalUsageFetcher
 		codexWhamResetCreditsFetcher = originalResetCreditsFetcher
-		codexWhamResetCreditConsumer = originalResetCreditConsumer
+		codexWhamUsageResetter = originalUsageResetter
 		codexOAuthTokenRefresher = originalTokenRefresher
 		codexRedeemRequestIDGenerator = originalRequestIDGenerator
 	})
@@ -128,7 +128,7 @@ func TestConsumeCodexRateLimitResetCreditRejectsEmptyCreditIDBeforeUpstream(t *t
 	resetCodexWhamControllerStubs(t)
 
 	called := false
-	codexWhamResetCreditConsumer = func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string, creditID string, redeemRequestID string) (int, []byte, error) {
+	codexWhamUsageResetter = func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string, creditID string, redeemRequestID string) (int, []byte, error) {
 		called = true
 		return http.StatusOK, []byte(`{"code":"reset"}`), nil
 	}
@@ -139,6 +139,63 @@ func TestConsumeCodexRateLimitResetCreditRejectsEmptyCreditIDBeforeUpstream(t *t
 	require.False(t, response.Success)
 	require.Equal(t, "credit_id is required", response.Message)
 	require.False(t, called)
+}
+
+func TestResetCodexUsageAllowsEmptyBodyForAutomaticCredit(t *testing.T) {
+	setupCodexUsageControllerTestDB(t)
+	resetCodexWhamControllerStubs(t)
+
+	createCodexTestChannel(t, "https://unused.example", codex.OAuthKey{
+		AccessToken: "access-token",
+		AccountID:   "account-123",
+	})
+
+	codexRedeemRequestIDGenerator = func() string {
+		return "redeem-auto"
+	}
+
+	var called bool
+	codexWhamUsageResetter = func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string, creditID string, redeemRequestID string) (int, []byte, error) {
+		called = true
+		require.Equal(t, "https://unused.example", baseURL)
+		require.Equal(t, "access-token", accessToken)
+		require.Equal(t, "account-123", accountID)
+		require.Empty(t, creditID)
+		require.Equal(t, "redeem-auto", redeemRequestID)
+		return http.StatusOK, []byte(`{"code":"reset","windows_reset":2}`), nil
+	}
+
+	recorder := performCodexWhamControllerRequest(http.MethodPost, "/api/channel/:id/codex/usage/reset", "", ResetCodexChannelUsage)
+	response := decodeCodexWhamControllerResponse(t, recorder)
+
+	require.True(t, response.Success)
+	require.Equal(t, http.StatusOK, response.UpstreamStatus)
+	require.True(t, called)
+}
+
+func TestResetCodexUsageCanUseSelectedCreditID(t *testing.T) {
+	setupCodexUsageControllerTestDB(t)
+	resetCodexWhamControllerStubs(t)
+
+	createCodexTestChannel(t, "https://unused.example", codex.OAuthKey{
+		AccessToken: "access-token",
+		AccountID:   "account-123",
+	})
+
+	var called bool
+	codexWhamUsageResetter = func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string, creditID string, redeemRequestID string) (int, []byte, error) {
+		called = true
+		require.Equal(t, "credit-1", creditID)
+		require.Equal(t, "redeem-manual", redeemRequestID)
+		return http.StatusOK, []byte(`{"code":"reset","windows_reset":1}`), nil
+	}
+
+	recorder := performCodexWhamControllerRequest(http.MethodPost, "/api/channel/:id/codex/usage/reset", `{"credit_id":" credit-1 ","redeem_request_id":" redeem-manual "}`, ResetCodexChannelUsage)
+	response := decodeCodexWhamControllerResponse(t, recorder)
+
+	require.True(t, response.Success)
+	require.Equal(t, http.StatusOK, response.UpstreamStatus)
+	require.True(t, called)
 }
 
 func TestGetCodexRateLimitResetCreditsRetriesAfterCredentialRefresh(t *testing.T) {
@@ -190,6 +247,50 @@ func TestGetCodexRateLimitResetCreditsRetriesAfterCredentialRefresh(t *testing.T
 	require.NoError(t, common.Unmarshal([]byte(channel.Key), &savedKey))
 	require.Equal(t, "new-access", savedKey.AccessToken)
 	require.Equal(t, "new-refresh", savedKey.RefreshToken)
+}
+
+func TestResetCodexUsageRetriesAfterCredentialRefresh(t *testing.T) {
+	setupCodexUsageControllerTestDB(t)
+	resetCodexWhamControllerStubs(t)
+
+	createCodexTestChannel(t, "https://unused.example", codex.OAuthKey{
+		AccessToken:  "old-access",
+		RefreshToken: "refresh-token",
+		AccountID:    "account-123",
+	})
+
+	var resetCount int
+	codexWhamUsageResetter = func(ctx context.Context, client *http.Client, baseURL string, accessToken string, accountID string, creditID string, redeemRequestID string) (int, []byte, error) {
+		resetCount++
+		require.Equal(t, "credit-1", creditID)
+		require.Equal(t, "redeem-1", redeemRequestID)
+		if resetCount == 1 {
+			require.Equal(t, "old-access", accessToken)
+			return http.StatusForbidden, []byte(`{"error":"expired"}`), nil
+		}
+		require.Equal(t, "new-access", accessToken)
+		return http.StatusOK, []byte(`{"code":"reset"}`), nil
+	}
+
+	var refreshCount int
+	codexOAuthTokenRefresher = func(ctx context.Context, refreshToken string, proxyURL string) (*service.CodexOAuthTokenResult, error) {
+		refreshCount++
+		require.Equal(t, "refresh-token", refreshToken)
+		require.Empty(t, proxyURL)
+		return &service.CodexOAuthTokenResult{
+			AccessToken:  "new-access",
+			RefreshToken: "new-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		}, nil
+	}
+
+	recorder := performCodexWhamControllerRequest(http.MethodPost, "/api/channel/:id/codex/usage/reset", `{"credit_id":"credit-1","redeem_request_id":"redeem-1"}`, ResetCodexChannelUsage)
+	response := decodeCodexWhamControllerResponse(t, recorder)
+
+	require.True(t, response.Success)
+	require.Equal(t, http.StatusOK, response.UpstreamStatus)
+	require.Equal(t, 2, resetCount)
+	require.Equal(t, 1, refreshCount)
 }
 
 func TestGetCodexRateLimitResetCreditsReturnsNonJSONBodyAsString(t *testing.T) {

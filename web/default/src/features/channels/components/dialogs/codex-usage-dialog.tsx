@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import CodexIcon from '@lobehub/icons/es/Codex/components/Inner.js'
 import {
   Copy,
   Check,
@@ -39,6 +40,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -60,28 +62,23 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty'
 import { Progress } from '@/components/ui/progress'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import dayjs from '@/lib/dayjs'
 import { formatDateTimeStr, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import {
-  consumeCodexRateLimitResetCredit,
   getCodexRateLimitResetCredits,
+  resetCodexUsage,
   type CodexRateLimitResetCredit,
   type CodexRateLimitResetCreditsResponse,
-  type ConsumeCodexRateLimitResetCreditResponse,
+  type CodexUsageResetResponse,
 } from '../../api'
 
 type CodexRateLimitWindow = {
@@ -115,6 +112,8 @@ type CodexResetCreditsPayload = {
   available_count?: number
   total_earned_count?: number
 }
+
+type CodexUsageResetMode = 'auto' | 'manual'
 
 type CodexUsagePayload = {
   plan_type?: string
@@ -300,6 +299,10 @@ function canRedeemResetCredit(credit: CodexResetCredit | null): boolean {
   if (trimDisplayValue(credit.redeemed_at) !== '') {
     return false
   }
+  const expiresAt = parseTimeValue(credit.expires_at)
+  if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+    return false
+  }
   const status = normalizeResetCreditStatus(credit.status)
   return status === '' || status === 'available'
 }
@@ -314,9 +317,7 @@ function createRedeemRequestID(): string | undefined {
   return undefined
 }
 
-function getConsumeResponseData(
-  response: ConsumeCodexRateLimitResetCreditResponse
-) {
+function getResetResponseData(response: CodexUsageResetResponse) {
   const raw = response.data
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return null
@@ -324,11 +325,11 @@ function getConsumeResponseData(
   return raw
 }
 
-function formatConsumeFailureMessage(
-  response: ConsumeCodexRateLimitResetCreditResponse,
+function formatResetFailureMessage(
+  response: CodexUsageResetResponse,
   t: (key: string) => string
 ): string {
-  const data = getConsumeResponseData(response)
+  const data = getResetResponseData(response)
   const code = trimDisplayValue(data?.code)
   const message =
     trimDisplayValue(data?.message) || trimDisplayValue(response.message)
@@ -414,7 +415,11 @@ const PLAN_TYPE_BADGE: Record<
 > = {
   enterprise: { label: 'Enterprise', variant: 'success' },
   team: { label: 'Team', variant: 'info' },
-  pro: { label: 'Pro', variant: 'blue' },
+  pro: { label: 'Pro 20x', variant: 'blue' },
+  prolite: { label: 'Pro 5x', variant: 'blue' },
+  pro_lite: { label: 'Pro 5x', variant: 'blue' },
+  'pro-lite': { label: 'Pro 5x', variant: 'blue' },
+  'pro lite': { label: 'Pro 5x', variant: 'blue' },
   plus: { label: 'Plus', variant: 'purple' },
   free: { label: 'Free', variant: 'warning' },
 }
@@ -439,6 +444,11 @@ function getAccountTypeBadge(
       variant: 'neutral' as const,
     }
   )
+}
+
+function getCodexPlanLabel(value: unknown): string {
+  const normalized = normalizePlanType(value)
+  return PLAN_TYPE_BADGE[normalized]?.label ?? ''
 }
 
 function getResetCreditStatusBadge(
@@ -736,19 +746,61 @@ function ResetCreditTimeField(props: {
   )
 }
 
-function ResetCreditItem(props: { credit: CodexResetCredit; index: number }) {
+function ResetCreditItem(props: {
+  credit: CodexResetCredit
+  index: number
+  selectable?: boolean
+  selected?: boolean
+  disabled?: boolean
+}) {
   const { t } = useTranslation()
   const statusBadge = getResetCreditStatusBadge(props.credit.status, t)
   const title =
     props.credit.title?.trim() || `${t('Reset Credit')} ${props.index + 1}`
   const expiresIn = formatTimeLeftUntil(props.credit.expires_at, t)
-  const isAvailable =
-    normalizeResetCreditStatus(props.credit.status) === 'available'
+  const creditId = getResetCreditID(props.credit)
+  const isRedeemable = canRedeemResetCredit(props.credit) && creditId !== ''
+  const isSelectDisabled = Boolean(props.disabled)
+  const radioId = `codex-reset-credit-${props.index}`
+  const rawProfileName = trimDisplayValue(props.credit.profile_user_id)
+  const profileImageUrl = trimDisplayValue(props.credit.profile_image_url)
+  let profileName = t('Codex')
+  if (rawProfileName) {
+    profileName = rawProfileName.startsWith('@')
+      ? rawProfileName
+      : `@${rawProfileName}`
+  }
+  const avatarFallback =
+    rawProfileName.replace(/^@/, '').slice(0, 2).toUpperCase() || 'C'
+  const body = (
+    <div className='min-w-0 flex-1'>
+      <div className='flex min-w-0 items-center justify-between gap-3'>
+        <div className='flex min-w-0 flex-1 items-center gap-2'>
+          <Avatar size='sm' className='ring-border/60 ring-1'>
+            {profileImageUrl ? (
+              <AvatarImage
+                src={profileImageUrl}
+                alt=''
+                draggable={false}
+                referrerPolicy='no-referrer'
+              />
+            ) : null}
+            <AvatarFallback className='font-semibold'>
+              {avatarFallback}
+            </AvatarFallback>
+          </Avatar>
+          <span className='truncate text-xs font-medium'>{profileName}</span>
+        </div>
+        <div className='text-muted-foreground flex shrink-0 items-center gap-1.5 text-[11px]'>
+          <span>{t('Codex')}</span>
+          <CodexIcon size={16} aria-hidden='true' />
+        </div>
+      </div>
 
-  return (
-    <div className='bg-background rounded-lg border p-3'>
-      <div className='flex flex-wrap items-start justify-between gap-3'>
-        <div className='min-w-0'>
+      <Separator className='my-3' />
+
+      <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+        <div className='min-w-0 flex-1'>
           <div className='flex flex-wrap items-center gap-2'>
             <div className='min-w-0 text-sm font-medium break-words'>
               {title}
@@ -764,20 +816,20 @@ function ResetCreditItem(props: { credit: CodexResetCredit; index: number }) {
               {props.credit.description}
             </div>
           ) : null}
-          {props.credit.id ? (
+          {creditId ? (
             <div className='text-muted-foreground mt-1 font-mono text-[11px] break-all'>
-              {props.credit.id}
+              {creditId}
             </div>
           ) : null}
         </div>
-        <div className='shrink-0 text-right'>
+        <div className='shrink-0 sm:text-right'>
           <div className='text-muted-foreground text-[11px] font-medium'>
             {t('Expires in')}
           </div>
           <div
             className={cn(
               'mt-1 text-sm font-semibold tabular-nums',
-              isAvailable ? 'text-success' : 'text-muted-foreground'
+              isRedeemable ? 'text-success' : 'text-muted-foreground'
             )}
           >
             {expiresIn}
@@ -801,6 +853,40 @@ function ResetCreditItem(props: { credit: CodexResetCredit; index: number }) {
       </div>
     </div>
   )
+
+  if (!props.selectable) {
+    return <div className='bg-background rounded-lg border p-3'>{body}</div>
+  }
+
+  if (!isRedeemable) {
+    return (
+      <div className='bg-background rounded-lg border p-3 opacity-70'>
+        {body}
+      </div>
+    )
+  }
+
+  return (
+    <label
+      htmlFor={radioId}
+      className={cn(
+        'bg-background flex gap-3 rounded-lg border p-3 transition-colors',
+        isSelectDisabled
+          ? 'cursor-not-allowed opacity-70'
+          : 'hover:border-primary/40 cursor-pointer',
+        props.selected && 'border-primary ring-primary/20 ring-2'
+      )}
+    >
+      <RadioGroupItem
+        id={radioId}
+        value={creditId}
+        disabled={isSelectDisabled}
+        className='mt-1'
+        aria-label={title}
+      />
+      {body}
+    </label>
+  )
 }
 
 function ResetCreditsPanel(props: {
@@ -809,13 +895,16 @@ function ResetCreditsPanel(props: {
   usageAvailableCount: string
   isLoading: boolean
   isResetting: boolean
+  inFlightResetMode: CodexUsageResetMode | null
   errorMessage: string
   resetErrorMessage: string
   resetSuccessMessage: string
+  resetMode: CodexUsageResetMode
   selectedResetCreditId: string
+  onResetModeChange: (mode: CodexUsageResetMode) => void
   onSelectedResetCreditIdChange: (creditId: string) => void
   onRefresh: () => void
-  onRequestReset: (creditId: string) => void
+  onRequestReset: (creditId: string, mode: CodexUsageResetMode) => void
 }) {
   const { t } = useTranslation()
   const credits = useMemo(
@@ -823,7 +912,10 @@ function ResetCreditsPanel(props: {
     [props.payload?.credits]
   )
   const redeemableCredits = useMemo(
-    () => credits.filter((credit) => canRedeemResetCredit(credit)),
+    () =>
+      credits.filter(
+        (credit) => canRedeemResetCredit(credit) && getResetCreditID(credit)
+      ),
     [credits]
   )
   const activeSelectedResetCreditId = useMemo(() => {
@@ -837,6 +929,13 @@ function ResetCreditsPanel(props: {
       ? props.selectedResetCreditId
       : getResetCreditID(redeemableCredits[0])
   }, [props.selectedResetCreditId, redeemableCredits])
+  const selectedResetCredit = useMemo(
+    () =>
+      redeemableCredits.find(
+        (credit) => getResetCreditID(credit) === activeSelectedResetCreditId
+      ) ?? null,
+    [activeSelectedResetCreditId, redeemableCredits]
+  )
   const detailAvailableCount = props.payload?.available_count
   const availableCount = Number.isFinite(Number(detailAvailableCount))
     ? String(detailAvailableCount)
@@ -846,13 +945,28 @@ function ResetCreditsPanel(props: {
   )
     ? String(props.payload?.total_earned_count)
     : '-'
-  const canReset = Number(availableCount) > 0 && activeSelectedResetCreditId !== ''
+  const availableCountNumber = Number(availableCount)
+  const hasAvailableResetCredit =
+    (Number.isFinite(availableCountNumber) && availableCountNumber > 0) ||
+    redeemableCredits.length > 0
+  const canAutoReset = hasAvailableResetCredit
+  const canManualReset = hasAvailableResetCredit && selectedResetCredit != null
+  const isAutoResetting =
+    props.isResetting && props.inFlightResetMode === 'auto'
+  const isManualResetting =
+    props.isResetting && props.inFlightResetMode === 'manual'
+  const isManualMode = props.resetMode === 'manual'
+  const selectedResetCreditTitle = selectedResetCredit
+    ? getResetCreditTitle(selectedResetCredit, t)
+    : '-'
   let creditsContent: ReactNode
   if (props.errorMessage) {
     creditsContent = (
-      <div className='border-destructive/40 bg-destructive/10 text-destructive rounded-lg border px-3 py-2 text-sm'>
-        {props.errorMessage}
-      </div>
+      <Alert variant='destructive'>
+        <AlertTriangle />
+        <AlertTitle>{t('Failed to fetch reset credit details')}</AlertTitle>
+        <AlertDescription>{props.errorMessage}</AlertDescription>
+      </Alert>
     )
   } else if (props.isLoading) {
     creditsContent = (
@@ -862,23 +976,41 @@ function ResetCreditsPanel(props: {
       </div>
     )
   } else if (credits.length > 0) {
-    creditsContent = (
-      <div className='flex flex-col gap-2'>
-        {credits.map((credit, index) => (
-          <ResetCreditItem
-            key={
-              credit.id ??
-              credit.expires_at ??
-              credit.granted_at ??
-              credit.title ??
-              credit.reset_type ??
-              ''
-            }
-            credit={credit}
-            index={index}
-          />
-        ))}
-      </div>
+    const creditItems = credits.map((credit, index) => (
+      <ResetCreditItem
+        key={
+          credit.id ??
+          credit.expires_at ??
+          credit.granted_at ??
+          credit.title ??
+          credit.reset_type ??
+          ''
+        }
+        credit={credit}
+        index={index}
+        selectable={isManualMode}
+        selected={
+          isManualMode &&
+          getResetCreditID(credit) === activeSelectedResetCreditId
+        }
+        disabled={props.isResetting}
+      />
+    ))
+    creditsContent = isManualMode ? (
+      <RadioGroup
+        value={activeSelectedResetCreditId}
+        onValueChange={(value) => {
+          if (!props.isResetting && value) {
+            props.onSelectedResetCreditIdChange(value)
+          }
+        }}
+        className='flex flex-col gap-2'
+        aria-label={t('Select a reset credit')}
+      >
+        {creditItems}
+      </RadioGroup>
+    ) : (
+      <div className='flex flex-col gap-2'>{creditItems}</div>
     )
   } else {
     creditsContent = (
@@ -893,6 +1025,34 @@ function ResetCreditsPanel(props: {
     )
   }
 
+  let resetAvailabilityAlert: ReactNode = null
+  if (!props.isLoading && !props.errorMessage && !hasAvailableResetCredit) {
+    resetAvailabilityAlert = (
+      <Alert>
+        <AlertTriangle />
+        <AlertTitle>{t('No reset credits available')}</AlertTitle>
+        <AlertDescription>
+          {t('The reset request stays disabled until a credit is available.')}
+        </AlertDescription>
+      </Alert>
+    )
+  } else if (
+    !props.isLoading &&
+    !props.errorMessage &&
+    isManualMode &&
+    !canManualReset
+  ) {
+    resetAvailabilityAlert = (
+      <Alert>
+        <AlertTriangle />
+        <AlertTitle>{t('No selectable reset credits')}</AlertTitle>
+        <AlertDescription>
+          {t('Expired reset credits and redeemed credits cannot be selected.')}
+        </AlertDescription>
+      </Alert>
+    )
+  }
+
   return (
     <div className='flex flex-col gap-3 p-3'>
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-3'>
@@ -901,6 +1061,7 @@ function ResetCreditsPanel(props: {
           value={availableCount}
           mono
           copyable={false}
+          className='bg-primary/5 ring-primary/30'
         />
         <InfoField
           label={t('Total earned')}
@@ -932,71 +1093,113 @@ function ResetCreditsPanel(props: {
         </Button>
       </div>
 
-      <div className='bg-muted/30 flex flex-col gap-3 rounded-lg border p-3 lg:flex-row lg:items-center lg:justify-between'>
-        <div className='min-w-0'>
-          <div className='text-sm font-semibold'>{t('Reset usage window')}</div>
-          <div className='text-muted-foreground mt-1 text-xs leading-5'>
-            {t(
-              'Use one available reset credit to refresh the current Codex usage windows.'
-            )}
-          </div>
-        </div>
-        <div className='flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center'>
-          <Select
-            items={redeemableCredits.map((credit) => ({
-              value: getResetCreditID(credit),
-              label: getResetCreditTitle(credit, t),
-            }))}
-            value={activeSelectedResetCreditId}
-            onValueChange={(value) => {
-              if (value) {
-                props.onSelectedResetCreditIdChange(value)
-              }
-            }}
+      <Tabs
+        value={props.resetMode}
+        onValueChange={(value) =>
+          props.onResetModeChange(value as CodexUsageResetMode)
+        }
+      >
+        <TabsList className='grid w-full grid-cols-2 sm:w-[420px]'>
+          <TabsTrigger
+            value='auto'
+            disabled={props.isResetting}
+            className='min-w-0'
           >
-            <SelectTrigger className='w-full sm:w-[260px]'>
-              <SelectValue placeholder={t('Select a reset credit')} />
-            </SelectTrigger>
-            <SelectContent alignItemWithTrigger={false}>
-              <SelectGroup>
-                {redeemableCredits.map((credit) => {
-                  const creditId = getResetCreditID(credit)
-                  return (
-                    <SelectItem key={creditId} value={creditId}>
-                      {getResetCreditTitle(credit, t)}
-                    </SelectItem>
-                  )
-                })}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <Button
-            type='button'
-            variant={canReset ? 'destructive' : 'outline'}
-            size='sm'
-            onClick={() => props.onRequestReset(activeSelectedResetCreditId)}
-            disabled={!canReset || props.isLoading || props.isResetting}
-            className='shrink-0'
+            <span className='truncate'>{t('Automatic selection')}</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value='manual'
+            disabled={props.isResetting}
+            className='min-w-0'
           >
-            {props.isResetting ? (
-              <Spinner data-icon='inline-start' />
-            ) : (
-              <RotateCcw data-icon='inline-start' />
-            )}
-            {props.isResetting ? t('Resetting...') : t('Apply reset')}
-          </Button>
-        </div>
-      </div>
+            <span className='truncate'>{t('Manual selection')}</span>
+          </TabsTrigger>
+        </TabsList>
 
-      {!canReset ? (
-        <Alert>
-          <AlertTriangle />
-          <AlertTitle>{t('No reset credits available')}</AlertTitle>
-          <AlertDescription>
-            {t('The reset request stays disabled until a credit is available.')}
-          </AlertDescription>
-        </Alert>
-      ) : null}
+        <TabsContent value='auto' className='mt-3'>
+          <div className='bg-muted/30 flex flex-col gap-3 rounded-lg border p-3 lg:flex-row lg:items-center lg:justify-between'>
+            <div className='min-w-0'>
+              <div className='flex flex-wrap items-center gap-2'>
+                <div className='text-sm font-semibold'>
+                  {t('Reset usage window')}
+                </div>
+                <StatusBadge
+                  label={t('Recommended')}
+                  variant='blue'
+                  copyable={false}
+                />
+              </div>
+              <div className='text-muted-foreground mt-1 text-xs leading-5'>
+                {t(
+                  'Use one available reset credit to refresh the current Codex usage windows.'
+                )}
+              </div>
+            </div>
+            <Button
+              type='button'
+              variant={canAutoReset ? 'destructive' : 'outline'}
+              size='sm'
+              onClick={() => props.onRequestReset('', 'auto')}
+              disabled={!canAutoReset || props.isLoading || props.isResetting}
+              className='shrink-0'
+            >
+              {isAutoResetting ? (
+                <Spinner data-icon='inline-start' />
+              ) : (
+                <RotateCcw data-icon='inline-start' />
+              )}
+              {isAutoResetting ? t('Resetting...') : t('Reset now')}
+            </Button>
+          </div>
+        </TabsContent>
+
+        <TabsContent value='manual' className='mt-3'>
+          <div className='bg-muted/20 flex flex-col gap-3 rounded-lg border p-3 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between'>
+            <div className='min-w-0'>
+              <div className='text-sm font-medium'>
+                {t('Select a reset credit')}
+              </div>
+              <div className='text-muted-foreground mt-1 text-xs leading-5'>
+                {t(
+                  'Choose a specific reset credit instead of automatic selection.'
+                )}
+              </div>
+              <div className='text-muted-foreground mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs leading-5'>
+                <span>{t('Selected reset credit')}:</span>
+                <span className='text-foreground min-w-0 font-mono break-all'>
+                  {selectedResetCreditTitle}
+                </span>
+              </div>
+            </div>
+            <Button
+              type='button'
+              variant={canManualReset ? 'destructive' : 'outline'}
+              size='sm'
+              onClick={() =>
+                props.onRequestReset(activeSelectedResetCreditId, 'manual')
+              }
+              disabled={!canManualReset || props.isLoading || props.isResetting}
+              className='shrink-0'
+            >
+              {isManualResetting ? (
+                <Spinner data-icon='inline-start' />
+              ) : (
+                <RotateCcw data-icon='inline-start' />
+              )}
+              {isManualResetting
+                ? t('Resetting...')
+                : t('Apply selected reset')}
+            </Button>
+            <div className='text-muted-foreground text-xs leading-5 lg:basis-full'>
+              {t(
+                'Expired reset credits and redeemed credits cannot be selected.'
+              )}
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      {resetAvailabilityAlert}
 
       {props.resetSuccessMessage ? (
         <Alert className='border-success/40 bg-success/10 text-success'>
@@ -1038,9 +1241,14 @@ export function CodexUsageDialog({
     useState<CodexRateLimitResetCreditsResponse | null>(null)
   const [isLoadingResetCredits, setIsLoadingResetCredits] = useState(false)
   const [resetCreditsError, setResetCreditsError] = useState('')
+  const [resetMode, setResetMode] = useState<CodexUsageResetMode>('auto')
   const [selectedResetCreditId, setSelectedResetCreditId] = useState('')
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
+  const [pendingResetMode, setPendingResetMode] =
+    useState<CodexUsageResetMode>('auto')
   const [pendingResetCreditId, setPendingResetCreditId] = useState('')
+  const [inFlightResetMode, setInFlightResetMode] =
+    useState<CodexUsageResetMode | null>(null)
   const [isResetting, setIsResetting] = useState(false)
   const [resetActionError, setResetActionError] = useState('')
   const [resetActionMessage, setResetActionMessage] = useState('')
@@ -1137,10 +1345,13 @@ export function CodexUsageDialog({
     setShowResetCredits(false)
     setResetCreditsResponse(null)
     setResetCreditsError('')
+    setResetMode('auto')
     setSelectedResetCreditId('')
     setIsLoadingResetCredits(false)
     setResetConfirmOpen(false)
+    setPendingResetMode('auto')
     setPendingResetCreditId('')
+    setInFlightResetMode(null)
     setIsResetting(false)
     setResetActionError('')
     setResetActionMessage('')
@@ -1160,10 +1371,13 @@ export function CodexUsageDialog({
       setShowResetCredits(false)
       setResetCreditsResponse(null)
       setResetCreditsError('')
+      setResetMode('auto')
       setSelectedResetCreditId('')
       setIsLoadingResetCredits(false)
       setResetConfirmOpen(false)
+      setPendingResetMode('auto')
       setPendingResetCreditId('')
+      setInFlightResetMode(null)
       setIsResetting(false)
       setResetActionError('')
       setResetActionMessage('')
@@ -1171,10 +1385,11 @@ export function CodexUsageDialog({
     onOpenChange(nextOpen)
   }
 
-  const handleRequestReset = (creditId: string) => {
-    if (!creditId || isResetting) {
+  const handleRequestReset = (creditId: string, mode: CodexUsageResetMode) => {
+    if (isResetting || (mode === 'manual' && !creditId)) {
       return
     }
+    setPendingResetMode(mode)
     setPendingResetCreditId(creditId)
     setResetActionError('')
     setResetActionMessage('')
@@ -1182,25 +1397,31 @@ export function CodexUsageDialog({
   }
 
   const handleConfirmReset = async () => {
-    if (!channelId || isResetting || !pendingResetCreditId) {
+    if (
+      !channelId ||
+      isResetting ||
+      (pendingResetMode === 'manual' && !pendingResetCreditId)
+    ) {
       return
     }
 
+    setInFlightResetMode(pendingResetMode)
     setIsResetting(true)
     setResetActionError('')
     setResetActionMessage('')
     try {
-      const res = await consumeCodexRateLimitResetCredit(channelId, {
-        credit_id: pendingResetCreditId,
+      const res = await resetCodexUsage(channelId, {
+        credit_id:
+          pendingResetMode === 'manual' ? pendingResetCreditId : undefined,
         redeem_request_id: createRedeemRequestID(),
       })
-      const resetPayload = getConsumeResponseData(res)
+      const resetPayload = getResetResponseData(res)
       const code = trimDisplayValue(resetPayload?.code)
       if (!res.success) {
-        throw new Error(formatConsumeFailureMessage(res, t))
+        throw new Error(formatResetFailureMessage(res, t))
       }
       if (code !== 'reset') {
-        throw new Error(formatConsumeFailureMessage(res, t))
+        throw new Error(formatResetFailureMessage(res, t))
       }
 
       const windowsReset = Number(resetPayload?.windows_reset)
@@ -1222,6 +1443,7 @@ export function CodexUsageDialog({
       )
     } finally {
       setIsResetting(false)
+      setInFlightResetMode(null)
     }
   }
 
@@ -1355,19 +1577,27 @@ export function CodexUsageDialog({
               />
             }
           >
-            <div className='min-w-0'>
-              <div className='flex flex-wrap items-center gap-2'>
-                <div className='text-sm font-semibold'>
-                  {t('Reset Credits')}
+            <div className='flex min-w-0 items-start gap-3'>
+              <span
+                className='bg-muted/60 ring-border/60 flex size-9 shrink-0 items-center justify-center rounded-lg ring-1'
+                aria-hidden='true'
+              >
+                <CodexIcon size={24} />
+              </span>
+              <div className='min-w-0'>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <div className='text-sm font-semibold'>
+                    {t('Reset Credits')}
+                  </div>
+                  <StatusBadge
+                    label={`${t('Available')} ${resetCreditsText}`}
+                    variant={Number(resetCredits) > 0 ? 'blue' : 'neutral'}
+                    copyable={false}
+                  />
                 </div>
-                <StatusBadge
-                  label={`${t('Available')} ${resetCreditsText}`}
-                  variant={Number(resetCredits) > 0 ? 'blue' : 'neutral'}
-                  copyable={false}
-                />
-              </div>
-              <div className='text-muted-foreground mt-1 text-xs leading-5'>
-                {t('View issued reset credits, grant dates, and expiration.')}
+                <div className='text-muted-foreground mt-1 text-xs leading-5'>
+                  {t('View issued reset credits, grant dates, and expiration.')}
+                </div>
               </div>
             </div>
             {showResetCredits ? (
@@ -1383,10 +1613,13 @@ export function CodexUsageDialog({
               usageAvailableCount={resetCreditsText}
               isLoading={isLoadingResetCredits}
               isResetting={isResetting}
+              inFlightResetMode={inFlightResetMode}
               errorMessage={resetCreditsError}
               resetErrorMessage={resetActionError}
               resetSuccessMessage={resetActionMessage}
+              resetMode={resetMode}
               selectedResetCreditId={selectedResetCreditId}
+              onResetModeChange={setResetMode}
               onSelectedResetCreditIdChange={setSelectedResetCreditId}
               onRefresh={() => void loadResetCredits(true)}
               onRequestReset={handleRequestReset}
@@ -1417,17 +1650,23 @@ export function CodexUsageDialog({
             />
             <div className='flex flex-col gap-3'>
               {additionalRateLimits.map((item) => {
-                const limitName =
+                const rawLimitName =
                   item.limit_name ||
                   item.metered_feature ||
+                  item.plan_type ||
                   t('Additional Limit')
+                const limitName =
+                  getCodexPlanLabel(rawLimitName) || rawLimitName
+                const meteredFeature =
+                  getCodexPlanLabel(item.metered_feature) ||
+                  item.metered_feature
                 return (
                   <RateLimitGroupSection
                     key={`${limitName}-${item.metered_feature ?? ''}-${item.plan_type ?? ''}`}
                     title={limitName}
                     description={t('Additional metered capability')}
                     source={item}
-                    meteredFeature={item.metered_feature}
+                    meteredFeature={meteredFeature}
                   />
                 )
               })}
@@ -1497,11 +1736,19 @@ export function CodexUsageDialog({
             <div className='bg-muted/50 rounded-lg border px-3 py-2 text-xs'>
               <div className='font-medium'>{channelLabel}</div>
               <div className='text-muted-foreground mt-1'>
+                {t('Reset mode')}:{' '}
+                {pendingResetMode === 'manual'
+                  ? t('Manual selection')
+                  : t('Automatic selection')}
+              </div>
+              <div className='text-muted-foreground mt-1'>
                 {t('Available reset credits')}: {resetCreditsText}
               </div>
-              <div className='text-muted-foreground mt-1 break-all'>
-                {t('Selected reset credit')}: {pendingResetCreditId || '-'}
-              </div>
+              {pendingResetMode === 'manual' ? (
+                <div className='text-muted-foreground mt-1 break-all'>
+                  {t('Selected reset credit')}: {pendingResetCreditId || '-'}
+                </div>
+              ) : null}
             </div>
             <p className='text-destructive'>
               {t('Used reset credits cannot be restored.')}
@@ -1509,7 +1756,7 @@ export function CodexUsageDialog({
           </div>
         }
         destructive
-        disabled={!pendingResetCreditId}
+        disabled={pendingResetMode === 'manual' && !pendingResetCreditId}
         isLoading={isResetting}
         cancelBtnText={t('Cancel')}
         confirmText={isResetting ? t('Resetting...') : t('Apply reset')}

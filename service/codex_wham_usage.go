@@ -40,27 +40,7 @@ func ConsumeCodexWhamRateLimitResetCredit(
 	creditID string,
 	redeemRequestID string,
 ) (statusCode int, body []byte, err error) {
-	cid := strings.TrimSpace(creditID)
-	if cid == "" {
-		return 0, nil, fmt.Errorf("empty creditID")
-	}
-	rrid := strings.TrimSpace(redeemRequestID)
-	if rrid == "" {
-		return 0, nil, fmt.Errorf("empty redeemRequestID")
-	}
-
-	payload, err := common.Marshal(struct {
-		CreditID        string `json:"credit_id"`
-		RedeemRequestID string `json:"redeem_request_id"`
-	}{
-		CreditID:        cid,
-		RedeemRequestID: rrid,
-	})
-	if err != nil {
-		return 0, nil, err
-	}
-
-	return doCodexWhamRequest(ctx, client, http.MethodPost, baseURL, "/backend-api/wham/rate-limit-reset-credits/consume", accessToken, accountID, payload)
+	return consumeCodexWhamRateLimitResetCredit(ctx, client, baseURL, accessToken, accountID, creditID, redeemRequestID, true)
 }
 
 func ResetCodexWhamUsage(
@@ -69,18 +49,40 @@ func ResetCodexWhamUsage(
 	baseURL string,
 	accessToken string,
 	accountID string,
+	creditID string,
 	redeemRequestID string,
 ) (statusCode int, body []byte, err error) {
+	return consumeCodexWhamRateLimitResetCredit(ctx, client, baseURL, accessToken, accountID, creditID, redeemRequestID, false)
+}
+
+func consumeCodexWhamRateLimitResetCredit(
+	ctx context.Context,
+	client *http.Client,
+	baseURL string,
+	accessToken string,
+	accountID string,
+	creditID string,
+	redeemRequestID string,
+	requireCreditID bool,
+) (statusCode int, body []byte, err error) {
+	cid := strings.TrimSpace(creditID)
+	if requireCreditID && cid == "" {
+		return 0, nil, fmt.Errorf("empty creditID")
+	}
 	rrid := strings.TrimSpace(redeemRequestID)
 	if rrid == "" {
 		return 0, nil, fmt.Errorf("empty redeemRequestID")
 	}
 
-	payload, err := common.Marshal(struct {
+	payloadData := struct {
+		CreditID        string `json:"credit_id,omitempty"`
 		RedeemRequestID string `json:"redeem_request_id"`
 	}{
+		CreditID:        cid,
 		RedeemRequestID: rrid,
-	})
+	}
+
+	payload, err := common.Marshal(payloadData)
 	if err != nil {
 		return 0, nil, err
 	}
