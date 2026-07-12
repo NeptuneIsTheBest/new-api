@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -157,7 +158,7 @@ func insertAdvancedCustomRetryChannel(t *testing.T, channelID int, modelName str
 				{
 					IncomingPath: "/v1/chat/completions",
 					UpstreamPath: upstreamPath,
-					Converter:    dto.AdvancedCustomConverterNone,
+					Converter:    relayconvert.ConverterNone,
 				},
 			},
 		},

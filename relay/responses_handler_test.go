@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -30,7 +31,7 @@ func TestResponsesHelperAllowsAdvancedCustomResponsesCompact(t *testing.T) {
 				{
 					IncomingPath: "/v1/responses/compact",
 					UpstreamPath: "/v1/responses/compact",
-					Converter:    dto.AdvancedCustomConverterNone,
+					Converter:    relayconvert.ConverterNone,
 				},
 			},
 		},

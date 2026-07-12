@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,12 +21,15 @@ func TestChannelSupportsRequestPathMatchesNormalizedPlaygroundPath(t *testing.T)
 				{
 					IncomingPath: "/v1/chat/completions",
 					UpstreamPath: "https://upstream.example/v1/chat/completions",
-					Converter:    dto.AdvancedCustomConverterNone,
+					Converter:    relayconvert.ConverterNone,
+					Models:       []string{"gpt-test"},
 				},
 			},
 		},
 	})
 
-	require.False(t, channelSupportsRequestPath(channel, "/pg/chat/completions"))
-	require.True(t, channelSupportsRequestPath(channel, relaycommon.NormalizeRequestURLPath("/pg/chat/completions")))
+	normalizedPath := relaycommon.NormalizeRequestURLPath("/pg/chat/completions")
+	require.False(t, channelSupportsRequestPath(channel, "/pg/chat/completions", "gpt-test"))
+	require.True(t, channelSupportsRequestPath(channel, normalizedPath, "gpt-test"))
+	require.False(t, channelSupportsRequestPath(channel, normalizedPath, "gpt-other"))
 }

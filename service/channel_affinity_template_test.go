@@ -312,33 +312,44 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "pass_headers", firstOp["mode"])
 	expectedCodexHeaders := []string{
-		"User-Agent",
 		"Originator",
-		"Thread-Id",
+		"Session_id",
+		"Thread_id",
 		"Session-Id",
+		"Thread-Id",
 		"X-Client-Request-Id",
-		"X-Codex-Turn-Metadata",
-		"X-OpenAI-Subagent",
-		"X-Codex-Parent-Thread-Id",
-		"X-Codex-Window-Id",
+		"User-Agent",
 		"X-Codex-Beta-Features",
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Codex-Window-Id",
+		"X-Codex-Parent-Thread-Id",
+		"X-OpenAI-Subagent",
+		"X-OpenAI-Memgen-Request",
+		"X-ResponsesAPI-Include-Timing-Metrics",
+		"X-OpenAI-Internal-Codex-Responses-Lite",
 	}
 	require.Equal(t, expectedCodexHeaders, firstOp["value"])
 
 	info := &relaycommon.RelayInfo{
 		RequestHeaders: map[string]string{
-			"Originator":                            "Codex CLI",
-			"Session-Id":                            "sess-123",
-			"Thread-Id":                             "thread-123",
-			"User-Agent":                            "codex-cli-test",
-			"X-Codex-Window-Id":                     "window-123",
-			"X-Codex-Parent-Thread-Id":              "thread-123",
-			"X-Codex-Beta-Features":                 "beta-feature",
-			"X-Codex-Turn-Metadata":                 "turn-metadata",
-			"X-Client-Request-Id":                   "request-123",
-			"X-OpenAI-Subagent":                     "guardian",
-			"X-OAI-Attestation":                     "attestation-123",
-			"X-ResponsesAPI-Include-Timing-Metrics": "1",
+			"Originator":                             "Codex CLI",
+			"Session_id":                             "sess-underscore",
+			"Thread_id":                              "thread-underscore",
+			"Session-Id":                             "sess-123",
+			"Thread-Id":                              "thread-123",
+			"User-Agent":                             "codex-cli-test",
+			"X-Codex-Window-Id":                      "window-123",
+			"X-Codex-Parent-Thread-Id":               "thread-123",
+			"X-Codex-Beta-Features":                  "beta-feature",
+			"X-Codex-Turn-State":                     "turn-state",
+			"X-Codex-Turn-Metadata":                  "turn-metadata",
+			"X-Client-Request-Id":                    "request-123",
+			"X-OpenAI-Subagent":                      "guardian",
+			"X-OpenAI-Memgen-Request":                "memgen",
+			"X-OpenAI-Internal-Codex-Responses-Lite": "lite",
+			"X-OAI-Attestation":                      "attestation-123",
+			"X-ResponsesAPI-Include-Timing-Metrics":  "1",
 		},
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ParamOverride: mergedOverride,
@@ -354,19 +365,24 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 
 	require.Equal(t, "legacy-static", info.RuntimeHeadersOverride["x-static"])
 	require.Equal(t, "Codex CLI", info.RuntimeHeadersOverride["originator"])
+	require.Equal(t, "sess-underscore", info.RuntimeHeadersOverride["session_id"])
+	require.Equal(t, "thread-underscore", info.RuntimeHeadersOverride["thread_id"])
 	require.Equal(t, "sess-123", info.RuntimeHeadersOverride["session-id"])
 	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["thread-id"])
 	require.Equal(t, "codex-cli-test", info.RuntimeHeadersOverride["user-agent"])
 	require.Equal(t, "window-123", info.RuntimeHeadersOverride["x-codex-window-id"])
 	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["x-codex-parent-thread-id"])
 	require.Equal(t, "beta-feature", info.RuntimeHeadersOverride["x-codex-beta-features"])
+	require.Equal(t, "turn-state", info.RuntimeHeadersOverride["x-codex-turn-state"])
 	require.Equal(t, "turn-metadata", info.RuntimeHeadersOverride["x-codex-turn-metadata"])
 	require.Equal(t, "request-123", info.RuntimeHeadersOverride["x-client-request-id"])
 	require.Equal(t, "guardian", info.RuntimeHeadersOverride["x-openai-subagent"])
+	require.Equal(t, "memgen", info.RuntimeHeadersOverride["x-openai-memgen-request"])
+	require.Equal(t, "1", info.RuntimeHeadersOverride["x-responsesapi-include-timing-metrics"])
+	require.Equal(t, "lite", info.RuntimeHeadersOverride["x-openai-internal-codex-responses-lite"])
 	for _, headerName := range []string{
 		"*",
 		"x-oai-attestation",
-		"x-responsesapi-include-timing-metrics",
 	} {
 		_, exists := info.RuntimeHeadersOverride[headerName]
 		require.False(t, exists, "codex template should not pass %s", headerName)
