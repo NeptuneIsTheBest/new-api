@@ -22,6 +22,12 @@ import { z } from 'zod'
 // API Key Schema & Types
 // ============================================================================
 
+export const apiKeyUsageSchema = z.object({
+  total_tokens: z.number().nullable(),
+  total_quota: z.number(),
+  reset_at: z.number(),
+})
+
 export const apiKeySchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -45,9 +51,11 @@ export const apiKeySchema = z.object({
   model_limits_enabled: z.boolean(),
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
+  usage: apiKeyUsageSchema.optional(),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
+export type ApiKeyUsage = z.infer<typeof apiKeyUsageSchema>
 
 // ============================================================================
 // API Request/Response Types
@@ -104,3 +112,4 @@ export type ApiKeysDialogType =
   | 'delete'
   | 'batch-delete'
   | 'cc-switch'
+  | 'reset-usage'

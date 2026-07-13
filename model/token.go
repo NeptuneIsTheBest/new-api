@@ -26,6 +26,8 @@ type Token struct {
 	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
 	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
 	UsedQuota          int            `json:"used_quota" gorm:"default:0"` // used quota
+	UsageResetTime     int64          `json:"-" gorm:"bigint;default:0"`
+	UsageResetTimeNano int64          `json:"-" gorm:"bigint"`
 	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	DeletedAt          gorm.DeletedAt `gorm:"index"`

@@ -400,6 +400,9 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
+	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS written_at_nano Int64 DEFAULT 0").Error; err != nil {
+		return err
+	}
 	return syncClickHouseLogTTL(ttlDays)
 }
 
@@ -432,6 +435,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	id Int64 DEFAULT 0,
 	user_id Int32 DEFAULT 0,
 	created_at Int64 DEFAULT 0,
+	written_at_nano Int64 DEFAULT 0,
 	type Int32 DEFAULT 0,
 	content String DEFAULT '',
 	username String DEFAULT '',

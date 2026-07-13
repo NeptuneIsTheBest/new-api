@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -14,19 +15,57 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func buildMaskedTokenResponse(token *model.Token) *model.Token {
+type tokenUsageResponse struct {
+	TotalTokens *int64 `json:"total_tokens"`
+	TotalQuota  int64  `json:"total_quota"`
+	ResetAt     int64  `json:"reset_at"`
+}
+
+type tokenResponse struct {
+	*model.Token
+	Usage *tokenUsageResponse `json:"usage,omitempty"`
+}
+
+func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	if token == nil {
 		return nil
 	}
 	maskedToken := *token
 	maskedToken.Key = token.GetMaskedKey()
-	return &maskedToken
+	return &tokenResponse{Token: &maskedToken}
 }
 
-func buildMaskedTokenResponses(tokens []*model.Token) []*model.Token {
-	maskedTokens := make([]*model.Token, 0, len(tokens))
+func buildMaskedTokenResponses(userId int, tokens []*model.Token) []*tokenResponse {
+	usageAvailable := common.LogConsumeEnabled
+	var usageTotals map[int]model.TokenUsageTotals
+	if usageAvailable {
+		var err error
+		usageTotals, err = model.GetTokenUsageTotals(userId, tokens)
+		if err != nil {
+			usageAvailable = false
+			common.SysError("failed to query token usage totals: " + err.Error())
+		}
+	}
+
+	maskedTokens := make([]*tokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		maskedTokens = append(maskedTokens, buildMaskedTokenResponse(token))
+		response := buildMaskedTokenResponse(token)
+		if response == nil {
+			continue
+		}
+
+		if usageAvailable {
+			totals := usageTotals[token.Id]
+			if totals.TotalQuota < 0 {
+				totals.TotalQuota = 0
+			}
+			response.Usage = &tokenUsageResponse{
+				TotalTokens: &totals.TotalTokens,
+				TotalQuota:  totals.TotalQuota,
+				ResetAt:     token.UsageResetTime,
+			}
+		}
+		maskedTokens = append(maskedTokens, response)
 	}
 	return maskedTokens
 }
@@ -41,7 +80,7 @@ func GetAllTokens(c *gin.Context) {
 	}
 	total, _ := model.CountUserTokens(userId)
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(buildMaskedTokenResponses(userId, tokens))
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -58,7 +97,7 @@ func SearchTokens(c *gin.Context) {
 		return
 	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(buildMaskedTokenResponses(userId, tokens))
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -91,6 +130,30 @@ func GetTokenKey(c *gin.Context) {
 	}
 	common.ApiSuccess(c, gin.H{
 		"key": token.GetFullKey(),
+	})
+}
+
+func ResetTokenUsage(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	now := time.Now()
+	resetAt := now.Unix()
+	if err := model.ResetTokenUsage(id, c.GetInt("id"), resetAt, now.UnixNano()); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	zero := int64(0)
+	common.ApiSuccess(c, gin.H{
+		"usage": tokenUsageResponse{
+			TotalTokens: &zero,
+			TotalQuota:  0,
+			ResetAt:     resetAt,
+		},
 	})
 }
 

@@ -27,6 +27,7 @@ import {
   Copy,
   Link,
   Loader2,
+  RotateCcw,
 } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -35,6 +36,7 @@ import { toast } from 'sonner'
 import { DataTableRowActionMenu } from '@/components/data-table/core/row-action-menu'
 import { Button } from '@/components/ui/button'
 import {
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -238,84 +240,103 @@ export function DataTableRowActions<TData>({
         modal={false}
         onOpenChange={handleMenuOpenChange}
       >
-        <DropdownMenuItem
-          onClick={async () => {
-            const realKey = getCachedRealKey()
-            if (!realKey) return
-            const ok = await copyToClipboard(realKey)
-            if (ok) toast.success(t('Copied'))
-          }}
-        >
-          {t('Copy Key')}
-          <DropdownMenuShortcut>
-            <Copy size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={async () => {
-            const realKey = getCachedRealKey()
-            if (!realKey) return
-            const connStr = encodeChannelConnectionInfo(
-              realKey,
-              getServerAddress()
-            )
-            const ok = await copyToClipboard(connStr)
-            if (ok) toast.success(t('Copied'))
-          }}
-        >
-          {t('Copy Connection Info')}
-          <DropdownMenuShortcut>
-            <Link size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+        <DropdownMenuGroup>
+          <DropdownMenuItem
+            onClick={async () => {
+              const realKey = getCachedRealKey()
+              if (!realKey) return
+              const ok = await copyToClipboard(realKey)
+              if (ok) toast.success(t('Copied'))
+            }}
+          >
+            {t('Copy Key')}
+            <DropdownMenuShortcut>
+              <Copy size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={async () => {
+              const realKey = getCachedRealKey()
+              if (!realKey) return
+              const connStr = encodeChannelConnectionInfo(
+                realKey,
+                getServerAddress()
+              )
+              const ok = await copyToClipboard(connStr)
+              if (ok) toast.success(t('Copied'))
+            }}
+          >
+            {t('Copy Connection Info')}
+            <DropdownMenuShortcut>
+              <Link size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onClick={async () => {
-            const realKey = await resolveRealKey(apiKey.id)
-            if (!realKey) return
-            setResolvedKey(realKey)
-            setCurrentRow(apiKey)
-            setOpen('cc-switch')
-          }}
-        >
-          {t('CC Switch')}
-          <DropdownMenuShortcut>
-            <ArrowRightLeft size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
-        {hasChatPresets && (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>{t('Chat')}</DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              {chatPresets.map((preset) => (
-                <DropdownMenuItem
-                  key={preset.id}
-                  onClick={() => handleOpenChatPreset(preset)}
-                >
-                  {preset.name}
-                  {preset.type !== 'web' && (
-                    <DropdownMenuShortcut>
-                      <ExternalLink size={16} />
-                    </DropdownMenuShortcut>
-                  )}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        )}
+        <DropdownMenuGroup>
+          <DropdownMenuItem
+            onClick={async () => {
+              const realKey = await resolveRealKey(apiKey.id)
+              if (!realKey) return
+              setResolvedKey(realKey)
+              setCurrentRow(apiKey)
+              setOpen('cc-switch')
+            }}
+          >
+            {t('CC Switch')}
+            <DropdownMenuShortcut>
+              <ArrowRightLeft size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+          {hasChatPresets && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>{t('Chat')}</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuGroup>
+                  {chatPresets.map((preset) => (
+                    <DropdownMenuItem
+                      key={preset.id}
+                      onClick={() => handleOpenChatPreset(preset)}
+                    >
+                      {preset.name}
+                      {preset.type !== 'web' && (
+                        <DropdownMenuShortcut>
+                          <ExternalLink size={16} />
+                        </DropdownMenuShortcut>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onClick={() => {
-            setCurrentRow(apiKey)
-            setOpen('delete')
-          }}
-          className='text-destructive focus:text-destructive'
-        >
-          {t('Delete')}
-          <DropdownMenuShortcut>
-            <Trash2 size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+        <DropdownMenuGroup>
+          <DropdownMenuItem
+            onClick={() => {
+              setCurrentRow(apiKey)
+              setOpen('reset-usage')
+            }}
+          >
+            {t('Reset usage')}
+            <DropdownMenuShortcut>
+              <RotateCcw size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => {
+              setCurrentRow(apiKey)
+              setOpen('delete')
+            }}
+            variant='destructive'
+          >
+            {t('Delete')}
+            <DropdownMenuShortcut>
+              <Trash2 size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
       </DataTableRowActionMenu>
     </div>
   )

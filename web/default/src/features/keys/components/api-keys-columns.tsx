@@ -41,6 +41,7 @@ import type { ApiKey } from '../types'
 import { ApiKeyTimestampCell } from './api-key-timestamp-cell'
 import {
   ApiKeyCell,
+  ApiKeyUsageCell,
   ModelLimitsCell,
   IpRestrictionsCell,
 } from './api-keys-cells'
@@ -194,6 +195,13 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         )
       },
       size: 170,
+    },
+    {
+      id: 'usage',
+      header: t('Usage'),
+      cell: ({ row }) => <ApiKeyUsageCell apiKey={row.original} />,
+      enableSorting: false,
+      size: 190,
     },
     {
       accessorKey: 'group',

@@ -34,6 +34,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
+import { formatBillingQuota, formatNumber } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 import type { ApiKey } from '../types'
 import { useApiKeys } from './api-keys-provider'
@@ -137,6 +139,33 @@ export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
         </TooltipTrigger>
         <TooltipContent>{copyTooltip}</TooltipContent>
       </Tooltip>
+    </div>
+  )
+}
+
+type ApiKeyUsageCellProps = {
+  apiKey: ApiKey
+  className?: string
+}
+
+export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
+  const { t } = useTranslation()
+  const usage = props.apiKey.usage
+
+  return (
+    <div className={cn('w-[170px] space-y-0.5 text-xs', props.className)}>
+      <div className='flex items-center justify-between gap-3'>
+        <span className='text-muted-foreground'>{t('Tokens')}</span>
+        <span className='font-medium tabular-nums'>
+          {formatNumber(usage?.total_tokens)}
+        </span>
+      </div>
+      <div className='flex items-center justify-between gap-3'>
+        <span className='text-muted-foreground'>{t('Cost')}</span>
+        <span className='font-medium tabular-nums'>
+          {usage ? formatBillingQuota(usage.total_quota) : '-'}
+        </span>
+      </div>
     </div>
   )
 }

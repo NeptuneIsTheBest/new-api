@@ -99,9 +99,11 @@ export const STATIC_I18N_KEYS = [
   'Failed to delete API key',
   'Failed to delete API keys',
   'Failed to update API key status',
+  'Failed to reset usage',
   'Expected a JSON array of group identifiers',
   'Successfully created {{count}} API Key(s)',
   'Successfully deleted {{count}} API key(s)',
+  'API Key usage reset successfully',
   'Enter API key for this channel',
 
   // Users

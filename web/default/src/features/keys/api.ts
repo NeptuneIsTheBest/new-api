@@ -25,6 +25,7 @@ import type {
   GetApiKeysResponse,
   SearchApiKeysParams,
   ApiKeyFormData,
+  ApiKeyUsage,
 } from './types'
 
 // ============================================================================
@@ -96,6 +97,14 @@ export async function updateApiKeyStatus(
   status: number
 ): Promise<ApiResponse<ApiKey>> {
   const res = await api.put('/api/token/?status_only=true', { id, status })
+  return res.data
+}
+
+// Reset the display-only usage window for an API key
+export async function resetApiKeyUsage(
+  id: number
+): Promise<ApiResponse<{ usage: ApiKeyUsage }>> {
+  const res = await api.post(`/api/token/${id}/usage/reset`)
   return res.data
 }
 
