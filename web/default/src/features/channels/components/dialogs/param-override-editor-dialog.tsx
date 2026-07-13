@@ -297,8 +297,6 @@ const GEMINI_IMAGE_4K_TEMPLATE = {
 // https://github.com/openai/codex/commit/ebdd8795e924a8149b616e46ca2ed7848c207a4b
 const CODEX_CLI_HEADER_PASSTHROUGH_HEADERS = [
   'Originator',
-  'Session_id',
-  'Thread_id',
   'Session-Id',
   'Thread-Id',
   'X-Client-Request-Id',

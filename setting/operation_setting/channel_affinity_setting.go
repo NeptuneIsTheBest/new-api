@@ -46,8 +46,6 @@ type ChannelAffinitySetting struct {
 // https://github.com/openai/codex/commit/ebdd8795e924a8149b616e46ca2ed7848c207a4b
 var codexCliPassThroughHeaders = []string{
 	"Originator",
-	"Session_id",
-	"Thread_id",
 	"Session-Id",
 	"Thread-Id",
 	"X-Client-Request-Id",

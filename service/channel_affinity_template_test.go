@@ -313,8 +313,6 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.Equal(t, "pass_headers", firstOp["mode"])
 	expectedCodexHeaders := []string{
 		"Originator",
-		"Session_id",
-		"Thread_id",
 		"Session-Id",
 		"Thread-Id",
 		"X-Client-Request-Id",
@@ -365,8 +363,6 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 
 	require.Equal(t, "legacy-static", info.RuntimeHeadersOverride["x-static"])
 	require.Equal(t, "Codex CLI", info.RuntimeHeadersOverride["originator"])
-	require.Equal(t, "sess-underscore", info.RuntimeHeadersOverride["session_id"])
-	require.Equal(t, "thread-underscore", info.RuntimeHeadersOverride["thread_id"])
 	require.Equal(t, "sess-123", info.RuntimeHeadersOverride["session-id"])
 	require.Equal(t, "thread-123", info.RuntimeHeadersOverride["thread-id"])
 	require.Equal(t, "codex-cli-test", info.RuntimeHeadersOverride["user-agent"])
@@ -382,6 +378,8 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.Equal(t, "lite", info.RuntimeHeadersOverride["x-openai-internal-codex-responses-lite"])
 	for _, headerName := range []string{
 		"*",
+		"session_id",
+		"thread_id",
 		"x-oai-attestation",
 	} {
 		_, exists := info.RuntimeHeadersOverride[headerName]
