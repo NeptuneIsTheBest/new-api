@@ -88,27 +88,45 @@ func GetTokenUsageTotals(userId int, tokens []*Token) (map[int]TokenUsageTotals,
 // ResetTokenUsage moves a token's display-only usage baseline without
 // changing its quota, billing total, status, or historical logs.
 func ResetTokenUsage(id int, userId int, resetTime int64, resetTimeNano int64) error {
-	if id <= 0 || userId <= 0 || resetTime <= 0 || resetTimeNano <= 0 {
-		return errors.New("invalid token usage reset parameters")
+	count, err := ResetTokenUsages([]int{id}, userId, resetTime, resetTimeNano)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// ResetTokenUsages moves the display-only usage baseline for user-owned
+// tokens and returns the number of matching tokens.
+func ResetTokenUsages(ids []int, userId int, resetTime int64, resetTimeNano int64) (int64, error) {
+	if len(ids) == 0 || userId <= 0 || resetTime <= 0 || resetTimeNano <= 0 {
+		return 0, errors.New("invalid token usage reset parameters")
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			return 0, errors.New("invalid token usage reset parameters")
+		}
 	}
 
-	result := DB.Model(&Token{}).
-		Where("id = ? AND user_id = ?", id, userId).
+	var count int64
+	if err := DB.Model(&Token{}).
+		Where("id IN ? AND user_id = ?", ids, userId).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, nil
+	}
+
+	if err := DB.Model(&Token{}).
+		Where("id IN ? AND user_id = ?", ids, userId).
 		Updates(map[string]interface{}{
 			"usage_reset_time":      resetTime,
 			"usage_reset_time_nano": resetTimeNano,
-		})
-	if result.Error != nil {
-		return result.Error
+		}).Error; err != nil {
+		return 0, err
 	}
-	if result.RowsAffected == 0 {
-		var count int64
-		if err := DB.Model(&Token{}).Where("id = ? AND user_id = ?", id, userId).Count(&count).Error; err != nil {
-			return err
-		}
-		if count == 0 {
-			return gorm.ErrRecordNotFound
-		}
-	}
-	return nil
+	return count, nil
 }

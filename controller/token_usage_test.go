@@ -156,6 +156,97 @@ func TestResetTokenUsageRequiresOwnershipAndStartsNewUsageWindow(t *testing.T) {
 	assert.Equal(t, int64(100), postSettlePage.Items[0].Usage.TotalQuota)
 }
 
+func TestResetTokenUsageBatchResetsOwnedKeysOnly(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	firstToken := seedToken(t, db, 1, "usage-batch-first", "batch1234first5678")
+	secondToken := seedToken(t, db, 1, "usage-batch-second", "batch1234second5678")
+	otherUserToken := seedToken(t, db, 2, "usage-batch-other", "batch1234other5678")
+	require.NoError(t, db.Model(&model.Token{}).
+		Where("id IN ?", []int{firstToken.Id, secondToken.Id}).
+		Updates(map[string]interface{}{
+			"remain_quota": 400,
+			"used_quota":   600,
+		}).Error)
+	require.NoError(t, db.Create(&[]model.Log{
+		{UserId: 1, TokenId: firstToken.Id, CreatedAt: 1, Type: model.LogTypeConsume, Quota: 300, PromptTokens: 20, CompletionTokens: 10},
+		{UserId: 1, TokenId: secondToken.Id, CreatedAt: 1, Type: model.LogTypeConsume, Quota: 300, PromptTokens: 15, CompletionTokens: 5},
+	}).Error)
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/batch/usage/reset", TokenBatch{
+		Ids: []int{firstToken.Id, secondToken.Id, otherUserToken.Id},
+	}, 1)
+	ResetTokenUsageBatch(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var resetCount int64
+	require.NoError(t, common.Unmarshal(response.Data, &resetCount))
+	assert.Equal(t, int64(2), resetCount)
+
+	var resetTokens []model.Token
+	require.NoError(t, db.Where("id IN ?", []int{firstToken.Id, secondToken.Id}).Order("id").Find(&resetTokens).Error)
+	require.Len(t, resetTokens, 2)
+	assert.Positive(t, resetTokens[0].UsageResetTime)
+	assert.Positive(t, resetTokens[0].UsageResetTimeNano)
+	assert.Equal(t, resetTokens[0].UsageResetTime, resetTokens[1].UsageResetTime)
+	assert.Equal(t, resetTokens[0].UsageResetTimeNano, resetTokens[1].UsageResetTimeNano)
+	for _, token := range resetTokens {
+		assert.Equal(t, 600, token.UsedQuota)
+		assert.Equal(t, 400, token.RemainQuota)
+		assert.Equal(t, common.TokenStatusEnabled, token.Status)
+	}
+
+	listCtx, listRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/?p=1&size=10", nil, 1)
+	GetAllTokens(listCtx)
+	listResponse := decodeAPIResponse(t, listRecorder)
+	require.True(t, listResponse.Success, listResponse.Message)
+	var page tokenUsageTestPage
+	require.NoError(t, common.Unmarshal(listResponse.Data, &page))
+	require.Len(t, page.Items, 2)
+	for _, item := range page.Items {
+		require.NotNil(t, item.Usage)
+		require.NotNil(t, item.Usage.TotalTokens)
+		assert.Zero(t, *item.Usage.TotalTokens)
+		assert.Zero(t, item.Usage.TotalQuota)
+	}
+
+	var unchangedOtherUserToken model.Token
+	require.NoError(t, db.First(&unchangedOtherUserToken, otherUserToken.Id).Error)
+	assert.Zero(t, unchangedOtherUserToken.UsageResetTime)
+	assert.Zero(t, unchangedOtherUserToken.UsageResetTimeNano)
+
+	var logCount int64
+	require.NoError(t, db.Model(&model.Log{}).Where("user_id = ?", 1).Count(&logCount).Error)
+	assert.Equal(t, int64(2), logCount)
+}
+
+func TestResetTokenUsageBatchValidatesRequest(t *testing.T) {
+	tooManyIds := make([]int, 101)
+	for index := range tooManyIds {
+		tooManyIds[index] = index + 1
+	}
+
+	tests := []struct {
+		name string
+		body TokenBatch
+	}{
+		{name: "empty", body: TokenBatch{}},
+		{name: "too many", body: TokenBatch{Ids: tooManyIds}},
+		{name: "non-positive id", body: TokenBatch{Ids: []int{0}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/batch/usage/reset", test.body, 1)
+			ResetTokenUsageBatch(ctx)
+
+			response := decodeAPIResponse(t, recorder)
+			assert.False(t, response.Success)
+		})
+	}
+}
+
 func TestTokenUsageCountsFullSettlementAfterResetDuringPreConsume(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Log{}))

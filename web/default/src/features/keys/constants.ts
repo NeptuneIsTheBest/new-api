@@ -99,4 +99,6 @@ export const SUCCESS_MESSAGES = {
   API_KEY_ENABLED: 'API Key enabled successfully',
   API_KEY_DISABLED: 'API Key disabled successfully',
   API_KEY_USAGE_RESET: 'API Key usage reset successfully',
+  API_KEY_USAGE_BATCH_RESET:
+    'Successfully reset usage for {{count}} API key(s)',
 } as const

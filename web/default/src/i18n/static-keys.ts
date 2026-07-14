@@ -103,6 +103,7 @@ export const STATIC_I18N_KEYS = [
   'Expected a JSON array of group identifiers',
   'Successfully created {{count}} API Key(s)',
   'Successfully deleted {{count}} API key(s)',
+  'Successfully reset usage for {{count}} API key(s)',
   'API Key usage reset successfully',
   'Enter API key for this channel',
 

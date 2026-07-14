@@ -108,6 +108,14 @@ export async function resetApiKeyUsage(
   return res.data
 }
 
+// Reset the display-only usage window for multiple API keys
+export async function batchResetApiKeyUsage(
+  ids: number[]
+): Promise<ApiResponse<number>> {
+  const res = await api.post('/api/token/batch/usage/reset', { ids })
+  return res.data
+}
+
 // Fetch the real (unmasked) key for a token by ID
 export async function fetchTokenKey(
   id: number
