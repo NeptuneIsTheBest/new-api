@@ -53,6 +53,9 @@ export function ApiKeysBatchUsageResetDialog<TData>(
       props.table.resetRowSelection()
       props.onOpenChange(false)
       void queryClient.invalidateQueries({ queryKey: ['keys'] })
+      void queryClient.invalidateQueries({
+        queryKey: ['api-key-usage-details'],
+      })
     },
     onError: () => {
       toast.error(t(ERROR_MESSAGES.RESET_USAGE_FAILED))

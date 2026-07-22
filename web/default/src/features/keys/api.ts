@@ -26,6 +26,7 @@ import type {
   SearchApiKeysParams,
   ApiKeyFormData,
   ApiKeyUsage,
+  ApiKeyUsageDetails,
 } from './types'
 
 // ============================================================================
@@ -105,6 +106,18 @@ export async function resetApiKeyUsage(
   id: number
 ): Promise<ApiResponse<{ usage: ApiKeyUsage }>> {
   const res = await api.post(`/api/token/${id}/usage/reset`)
+  return res.data
+}
+
+// Get detailed usage for one user-owned API key
+export async function getApiKeyUsageDetails(
+  id: number,
+  timezone: string
+): Promise<ApiResponse<ApiKeyUsageDetails>> {
+  const queryParams = new URLSearchParams({
+    timezone,
+  })
+  const res = await api.get(`/api/token/${id}/usage?${queryParams.toString()}`)
   return res.data
 }
 

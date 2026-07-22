@@ -52,6 +52,16 @@ export function buildSearchParams(
         ...baseParams,
         ...(commonFilters.model && { model: commonFilters.model }),
         ...(commonFilters.token && { token: commonFilters.token }),
+        ...(commonFilters.tokenId && { tokenId: commonFilters.tokenId }),
+        ...(commonFilters.startWrittenAtNano && {
+          startWrittenAtNano: commonFilters.startWrittenAtNano,
+        }),
+        ...(commonFilters.endWrittenAtNano && {
+          endWrittenAtNano: commonFilters.endWrittenAtNano,
+        }),
+        ...(commonFilters.startTimeExclusive && {
+          startTimeExclusive: true,
+        }),
         ...(commonFilters.group && { group: commonFilters.group }),
         ...(commonFilters.username && { username: commonFilters.username }),
         ...(commonFilters.requestId && { requestId: commonFilters.requestId }),

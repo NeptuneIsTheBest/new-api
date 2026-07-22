@@ -33,6 +33,7 @@ export {
 
 // Filter utilities
 export { buildSearchParams, getLogCategoryLabel } from './filter'
+export { buildQueryParams } from './query'
 
 // General utilities
 export {
@@ -41,7 +42,6 @@ export {
   getLogTypeConfig,
   isPerCallBilling,
   getDefaultTimeRange,
-  buildQueryParams,
   buildBaseParams,
   buildApiParams,
   fetchLogsByCategory,

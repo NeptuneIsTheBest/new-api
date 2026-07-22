@@ -40,6 +40,7 @@ const usageLogsSearchSchema = z.object({
   filter: z.string().optional().catch(''),
   model: z.string().optional().catch(''),
   token: z.string().optional().catch(''),
+  tokenId: z.number().int().positive().optional().catch(undefined),
   channel: z.string().optional().catch(''),
   group: z.string().optional().catch(''),
   username: z.string().optional().catch(''),
@@ -47,6 +48,17 @@ const usageLogsSearchSchema = z.object({
   upstreamRequestId: z.string().optional().catch(''),
   startTime: z.number().optional(),
   endTime: z.number().optional(),
+  startWrittenAtNano: z
+    .string()
+    .regex(/^[1-9]\d*$/)
+    .optional()
+    .catch(undefined),
+  endWrittenAtNano: z
+    .string()
+    .regex(/^[1-9]\d*$/)
+    .optional()
+    .catch(undefined),
+  startTimeExclusive: z.boolean().optional().catch(undefined),
 })
 
 export const Route = createFileRoute('/_authenticated/usage-logs/$section')({

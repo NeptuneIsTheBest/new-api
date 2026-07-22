@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -114,6 +115,28 @@ func GetToken(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, buildMaskedTokenResponse(token))
+}
+
+func GetTokenUsageDetails(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, fmt.Errorf("invalid token id"))
+		return
+	}
+
+	userId := c.GetInt("id")
+	token, err := model.GetTokenByIds(id, userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	snapshotAt := time.Now()
+	details, err := service.GetTokenUsageDetails(userId, token, snapshotAt, c.Query("timezone"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, details)
 }
 
 func GetTokenKey(c *gin.Context) {

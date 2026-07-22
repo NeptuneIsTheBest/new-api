@@ -92,24 +92,6 @@ function timestampToSeconds(ms: number): number {
 }
 
 /**
- * Build query parameters from filters
- */
-export function buildQueryParams(
-  params: Record<string, unknown>
-): URLSearchParams {
-  const queryParams = new URLSearchParams()
-
-  Object.entries(params).forEach(([key, value]) => {
-    // Keep 0 as a valid value, only filter out undefined, null, and empty string
-    if (value !== undefined && value !== null && value !== '') {
-      queryParams.append(key, String(value))
-    }
-  })
-
-  return queryParams
-}
-
-/**
  * Build time range parameters with default values
  * Shared logic for all log types
  */
@@ -202,6 +184,18 @@ export function buildApiParams(config: {
     ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
     ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
+    ...(Number(searchParams.tokenId) > 0
+      ? { token_id: Number(searchParams.tokenId) }
+      : {}),
+    ...(searchParams.startWrittenAtNano
+      ? { start_written_at_nano: String(searchParams.startWrittenAtNano) }
+      : {}),
+    ...(searchParams.endWrittenAtNano
+      ? { end_written_at_nano: String(searchParams.endWrittenAtNano) }
+      : {}),
+    ...(searchParams.startTimeExclusive === true
+      ? { start_timestamp_exclusive: true }
+      : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
     ...(isAdmin && searchParams.channel
       ? { channel: Number(searchParams.channel) || 0 }

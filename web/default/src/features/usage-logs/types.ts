@@ -49,6 +49,10 @@ export interface CommonFilters {
 export interface CommonLogFilters extends CommonFilters {
   model?: string
   token?: string
+  tokenId?: number
+  startWrittenAtNano?: string
+  endWrittenAtNano?: string
+  startTimeExclusive?: boolean
   group?: string
   username?: string
   requestId?: string
@@ -310,9 +314,13 @@ export interface GetLogsParams {
   type?: number
   username?: string
   token_name?: string
+  token_id?: number
   model_name?: string
   start_timestamp?: number
   end_timestamp?: number
+  start_written_at_nano?: string
+  end_written_at_nano?: string
+  start_timestamp_exclusive?: boolean
   channel?: number
   group?: string
   request_id?: string
@@ -334,9 +342,13 @@ export interface GetLogStatsParams {
   type?: number
   username?: string
   token_name?: string
+  token_id?: number
   model_name?: string
   start_timestamp?: number
   end_timestamp?: number
+  start_written_at_nano?: string
+  end_written_at_nano?: string
+  start_timestamp_exclusive?: boolean
   channel?: number
   group?: string
   request_id?: string

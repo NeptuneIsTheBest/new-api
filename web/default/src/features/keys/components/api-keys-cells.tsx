@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Analytics01Icon } from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
 import { Check, Copy, Loader2 } from 'lucide-react'
 import { useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -150,12 +152,35 @@ type ApiKeyUsageCellProps = {
 
 export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
   const { t } = useTranslation()
+  const { setCurrentRow, setOpen } = useApiKeys()
   const usage = props.apiKey.usage
 
   return (
-    <div className={cn('w-[170px] space-y-0.5 text-xs', props.className)}>
+    <Button
+      type='button'
+      variant='ghost'
+      onClick={() => {
+        setCurrentRow(props.apiKey)
+        setOpen('usage-details')
+      }}
+      aria-label={t('View usage details for {{name}}', {
+        name: props.apiKey.name,
+      })}
+      className={cn(
+        'group/usage h-auto w-[170px] flex-col items-stretch gap-0.5 px-2 py-1 text-xs',
+        props.className
+      )}
+    >
       <div className='flex items-center justify-between gap-3'>
-        <span className='text-muted-foreground'>{t('Tokens')}</span>
+        <span className='text-muted-foreground flex items-center gap-1'>
+          <HugeiconsIcon
+            icon={Analytics01Icon}
+            strokeWidth={2}
+            className='size-3 opacity-0 transition-opacity group-hover/usage:opacity-100 group-focus-visible/usage:opacity-100'
+            aria-hidden='true'
+          />
+          {t('Tokens')}
+        </span>
         <span className='font-medium tabular-nums'>
           {formatNumber(usage?.total_tokens)}
         </span>
@@ -166,7 +191,7 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
           {usage ? formatBillingQuota(usage.total_quota) : '-'}
         </span>
       </div>
-    </div>
+    </Button>
   )
 }
 

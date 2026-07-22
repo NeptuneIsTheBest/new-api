@@ -83,6 +83,10 @@ function buildSearchSourceKey(values: {
   channel?: unknown
   model?: unknown
   token?: unknown
+  tokenId?: unknown
+  startWrittenAtNano?: unknown
+  endWrittenAtNano?: unknown
+  startTimeExclusive?: unknown
   group?: unknown
   username?: unknown
   requestId?: unknown
@@ -95,6 +99,10 @@ function buildSearchSourceKey(values: {
     values.channel,
     values.model,
     values.token,
+    values.tokenId,
+    values.startWrittenAtNano,
+    values.endWrittenAtNano,
+    values.startTimeExclusive,
     values.group,
     values.username,
     values.requestId,
@@ -128,6 +136,10 @@ export function CommonLogsFilterBar<TData>(
       channel: searchParams.channel,
       model: searchParams.model,
       token: searchParams.token,
+      tokenId: searchParams.tokenId,
+      startWrittenAtNano: searchParams.startWrittenAtNano,
+      endWrittenAtNano: searchParams.endWrittenAtNano,
+      startTimeExclusive: searchParams.startTimeExclusive,
       group: searchParams.group,
       username: searchParams.username,
       requestId: searchParams.requestId,
@@ -142,6 +154,10 @@ export function CommonLogsFilterBar<TData>(
       channel: searchParams.channel || undefined,
       model: searchParams.model || undefined,
       token: searchParams.token || undefined,
+      tokenId: searchParams.tokenId,
+      startWrittenAtNano: searchParams.startWrittenAtNano,
+      endWrittenAtNano: searchParams.endWrittenAtNano,
+      startTimeExclusive: searchParams.startTimeExclusive,
       group: searchParams.group || undefined,
       username: searchParams.username || undefined,
       requestId: searchParams.requestId || undefined,
@@ -158,6 +174,10 @@ export function CommonLogsFilterBar<TData>(
     searchParams.channel,
     searchParams.model,
     searchParams.token,
+    searchParams.tokenId,
+    searchParams.startWrittenAtNano,
+    searchParams.endWrittenAtNano,
+    searchParams.startTimeExclusive,
     searchParams.group,
     searchParams.username,
     searchParams.requestId,
@@ -175,9 +195,23 @@ export function CommonLogsFilterBar<TData>(
       setDraft((current) => {
         const base =
           current.sourceKey === searchState.sourceKey ? current : searchState
+        const nextFilters = { ...base.filters, [field]: value }
+        if (field === 'token' && value !== base.filters.token) {
+          nextFilters.tokenId = undefined
+          nextFilters.startWrittenAtNano = undefined
+          nextFilters.endWrittenAtNano = undefined
+          nextFilters.startTimeExclusive = undefined
+        }
+        if (field === 'startTime') {
+          nextFilters.startWrittenAtNano = undefined
+          nextFilters.startTimeExclusive = undefined
+        }
+        if (field === 'endTime') {
+          nextFilters.endWrittenAtNano = undefined
+        }
         return {
           sourceKey: searchState.sourceKey,
-          filters: { ...base.filters, [field]: value },
+          filters: nextFilters,
           logType: base.logType,
         }
       })
@@ -233,8 +267,9 @@ export function CommonLogsFilterBar<TData>(
     [handleApply]
   )
 
+  const tokenFilterActive = Boolean(filters.token || filters.tokenId)
   const hasExpandedFilters =
-    !!filters.token ||
+    tokenFilterActive ||
     !!filters.username ||
     !!filters.channel ||
     !!filters.requestId ||
@@ -245,7 +280,7 @@ export function CommonLogsFilterBar<TData>(
     !!filters.model || !!filters.group || hasTypeFilter || hasExpandedFilters
 
   const expandedFilterCount = [
-    filters.token,
+    tokenFilterActive,
     isAdmin ? filters.username : undefined,
     isAdmin ? filters.channel : undefined,
     filters.requestId,

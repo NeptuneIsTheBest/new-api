@@ -59,11 +59,11 @@ func TestSumUsedQuotaIncludesTokenTotal(t *testing.T) {
 
 	stat, err := SumUsedQuota(
 		LogTypeUnknown,
-		now-60,
-		now+60,
+		LogTimeRange{StartTimestamp: now - 60, EndTimestamp: now + 60},
 		"gpt-4o",
 		"alice",
 		"primary",
+		0,
 		1,
 		"default",
 	)
@@ -83,11 +83,11 @@ func TestSumUsedQuotaEmptyResultReturnsZeroToken(t *testing.T) {
 
 	stat, err := SumUsedQuota(
 		LogTypeUnknown,
-		time.Now().Unix()-60,
-		time.Now().Unix()+60,
+		LogTimeRange{StartTimestamp: time.Now().Unix() - 60, EndTimestamp: time.Now().Unix() + 60},
 		"missing-model",
 		"missing-user",
 		"missing-token",
+		0,
 		1,
 		"default",
 	)
@@ -135,11 +135,11 @@ func TestSumUsedQuotaCacheHitStatsHandlesInvalidOtherAndFallback(t *testing.T) {
 
 	stat, err := SumUsedQuota(
 		LogTypeUnknown,
-		now-60,
-		now+60,
+		LogTimeRange{StartTimestamp: now - 60, EndTimestamp: now + 60},
 		"gpt-4o",
 		"alice",
 		"primary",
+		0,
 		1,
 		"default",
 	)

@@ -82,6 +82,39 @@ type Log struct {
 	Other             string `json:"other"`
 }
 
+type LogTimeRange struct {
+	StartTimestamp          int64
+	StartWrittenAtNano      int64
+	StartTimestampExclusive bool
+	EndTimestamp            int64
+	EndWrittenAtNano        int64
+}
+
+func applyLogTimeRange(tx *gorm.DB, columnPrefix string, timeRange LogTimeRange) *gorm.DB {
+	createdAtColumn := columnPrefix + "created_at"
+	writtenAtNanoColumn := columnPrefix + "written_at_nano"
+
+	if timeRange.StartWrittenAtNano > 0 {
+		tx = tx.Where(writtenAtNanoColumn+" > ?", timeRange.StartWrittenAtNano)
+	} else if timeRange.StartTimestamp != 0 {
+		operator := ">="
+		if timeRange.StartTimestampExclusive {
+			operator = ">"
+		}
+		tx = tx.Where(createdAtColumn+" "+operator+" ?", timeRange.StartTimestamp)
+	}
+	if timeRange.EndTimestamp != 0 {
+		tx = tx.Where(createdAtColumn+" <= ?", timeRange.EndTimestamp)
+	}
+	if timeRange.EndWrittenAtNano > 0 {
+		tx = tx.Where(
+			"("+writtenAtNanoColumn+" IS NULL OR "+writtenAtNanoColumn+" = 0 OR "+writtenAtNanoColumn+" <= ?)",
+			timeRange.EndWrittenAtNano,
+		)
+	}
+	return tx
+}
+
 // don't use iota, avoid change log type value
 const (
 	LogTypeUnknown = 0
@@ -470,7 +503,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func GetAllLogs(logType int, timeRange LogTimeRange, modelName string, username string, tokenName string, tokenId int, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -484,7 +517,9 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", username); err != nil {
 		return nil, 0, err
 	}
-	if tokenName != "" {
+	if tokenId > 0 {
+		tx = tx.Where("logs.token_id = ?", tokenId)
+	} else if tokenName != "" {
 		tx = tx.Where("logs.token_name = ?", tokenName)
 	}
 	if requestId != "" {
@@ -493,12 +528,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if upstreamRequestId != "" {
 		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
-	}
+	tx = applyLogTimeRange(tx, "logs.", timeRange)
 	if channel != 0 {
 		tx = tx.Where("logs.channel_id = ?", channel)
 	}
@@ -566,7 +596,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
-func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func GetUserLogs(userId int, logType int, timeRange LogTimeRange, modelName string, tokenName string, tokenId int, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
@@ -577,7 +607,9 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
 		return nil, 0, err
 	}
-	if tokenName != "" {
+	if tokenId > 0 {
+		tx = tx.Where("logs.token_id = ?", tokenId)
+	} else if tokenName != "" {
 		tx = tx.Where("logs.token_name = ?", tokenName)
 	}
 	if requestId != "" {
@@ -586,12 +618,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if upstreamRequestId != "" {
 		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
-	}
+	tx = applyLogTimeRange(tx, "logs.", timeRange)
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
@@ -624,7 +651,7 @@ type Stat struct {
 	CacheHitRate     float64 `json:"cache_hit_rate"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+func SumUsedQuota(logType int, timeRange LogTimeRange, modelName string, username string, tokenName string, tokenId int, channel int, group string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(SUM(quota), 0) AS quota, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) AS token")
 
 	// 为rpm和tpm创建单独的查询
@@ -640,19 +667,29 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if cacheQuery, err = applyExplicitLogTextFilter(cacheQuery, "username", username); err != nil {
 		return stat, err
 	}
-	if tokenName != "" {
+	if tokenId > 0 {
+		tx = tx.Where("token_id = ?", tokenId)
+		rpmTpmQuery = rpmTpmQuery.Where("token_id = ?", tokenId)
+		cacheQuery = cacheQuery.Where("token_id = ?", tokenId)
+	} else if tokenName != "" {
 		tx = tx.Where("token_name = ?", tokenName)
 		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
 		cacheQuery = cacheQuery.Where("token_name = ?", tokenName)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-		cacheQuery = cacheQuery.Where("created_at >= ?", startTimestamp)
+	tx = applyLogTimeRange(tx, "", timeRange)
+	cacheQuery = applyLogTimeRange(cacheQuery, "", timeRange)
+	usageWindowRange := LogTimeRange{
+		StartWrittenAtNano: timeRange.StartWrittenAtNano,
+		EndWrittenAtNano:   timeRange.EndWrittenAtNano,
 	}
-	if endTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", endTimestamp)
-		cacheQuery = cacheQuery.Where("created_at <= ?", endTimestamp)
+	if timeRange.StartTimestampExclusive && timeRange.StartWrittenAtNano == 0 {
+		usageWindowRange.StartTimestamp = timeRange.StartTimestamp
+		usageWindowRange.StartTimestampExclusive = true
 	}
+	if timeRange.EndWrittenAtNano > 0 {
+		usageWindowRange.EndTimestamp = timeRange.EndTimestamp
+	}
+	rpmTpmQuery = applyLogTimeRange(rpmTpmQuery, "", usageWindowRange)
 	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
 		return stat, err
 	}

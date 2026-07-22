@@ -28,6 +28,57 @@ export const apiKeyUsageSchema = z.object({
   reset_at: z.number(),
 })
 
+export const apiKeyUsageSummarySchema = z.object({
+  settled_requests: z.number(),
+  failed_requests: z.number(),
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+  cache_tokens: z.number(),
+  cache_input_tokens: z.number(),
+  cache_hit_rate: z.number(),
+  charged_quota: z.number(),
+  refunded_quota: z.number(),
+  total_quota: z.number(),
+})
+
+export const apiKeyUsageTrendSchema = z.object({
+  bucket: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  settled_requests: z.number(),
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+  total_quota: z.number(),
+})
+
+export const apiKeyUsageModelSchema = z.object({
+  model_name: z.string(),
+  settled_requests: z.number(),
+  failed_requests: z.number(),
+  prompt_tokens: z.number(),
+  completion_tokens: z.number(),
+  total_tokens: z.number(),
+  total_quota: z.number(),
+})
+
+export const apiKeyUsageDetailsSchema = z.object({
+  available: z.boolean(),
+  reset_at: z.number(),
+  range_start: z.number(),
+  range_start_nano: z
+    .string()
+    .regex(/^[1-9]\d*$/)
+    .optional(),
+  range_start_exclusive: z.boolean(),
+  range_end: z.number(),
+  range_end_nano: z.string().regex(/^[1-9]\d*$/),
+  timezone: z.string(),
+  bucket_unit: z.literal('day'),
+  summary: apiKeyUsageSummarySchema,
+  trend: z.array(apiKeyUsageTrendSchema),
+  models: z.array(apiKeyUsageModelSchema),
+})
+
 export const apiKeySchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -56,6 +107,8 @@ export const apiKeySchema = z.object({
 
 export type ApiKey = z.infer<typeof apiKeySchema>
 export type ApiKeyUsage = z.infer<typeof apiKeyUsageSchema>
+export type ApiKeyUsageDetails = z.infer<typeof apiKeyUsageDetailsSchema>
+export type ApiKeyUsageTrend = z.infer<typeof apiKeyUsageTrendSchema>
 
 // ============================================================================
 // API Request/Response Types
@@ -113,3 +166,4 @@ export type ApiKeysDialogType =
   | 'batch-delete'
   | 'cc-switch'
   | 'reset-usage'
+  | 'usage-details'

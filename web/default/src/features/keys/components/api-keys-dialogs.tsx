@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ApiKeyUsageDetailsDrawer } from './api-key-usage-details-drawer'
 import { ApiKeyUsageResetDialog } from './api-key-usage-reset-dialog'
 import { ApiKeysDeleteDialog } from './api-keys-delete-dialog'
 import { ApiKeysMutateDrawer } from './api-keys-mutate-drawer'
@@ -34,6 +35,11 @@ export function ApiKeysDialogs() {
       />
       <ApiKeysDeleteDialog />
       <ApiKeyUsageResetDialog />
+      <ApiKeyUsageDetailsDrawer
+        open={open === 'usage-details'}
+        onOpenChange={(isOpen) => !isOpen && setOpen(null)}
+        apiKey={currentRow}
+      />
       <CCSwitchDialog
         open={open === 'cc-switch'}
         onOpenChange={(isOpen) => !isOpen && setOpen(null)}

@@ -35,6 +35,26 @@ type tokenUsageResetTestData struct {
 	Usage tokenUsageTestData `json:"usage"`
 }
 
+type tokenUsageDetailsTestData struct {
+	Available           bool                    `json:"available"`
+	RangeStart          int64                   `json:"range_start"`
+	RangeStartNano      string                  `json:"range_start_nano"`
+	RangeStartExclusive bool                    `json:"range_start_exclusive"`
+	RangeEnd            int64                   `json:"range_end"`
+	RangeEndNano        string                  `json:"range_end_nano"`
+	Timezone            string                  `json:"timezone"`
+	BucketUnit          string                  `json:"bucket_unit"`
+	Summary             model.TokenUsageSummary `json:"summary"`
+	Trend               []struct {
+		Bucket string `json:"bucket"`
+	} `json:"trend"`
+}
+
+type tokenLogTestPage struct {
+	Items []model.Log `json:"items"`
+	Total int64       `json:"total"`
+}
+
 func TestTokenListAndSearchIncludeUsageSinceReset(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Log{}))
@@ -78,6 +98,133 @@ func TestTokenListAndSearchIncludeUsageSinceReset(t *testing.T) {
 	require.NotNil(t, searchPage.Items[0].Usage.TotalTokens)
 	assert.Equal(t, int64(30), *searchPage.Items[0].Usage.TotalTokens)
 	assert.Equal(t, int64(600), searchPage.Items[0].Usage.TotalQuota)
+}
+
+func TestGetTokenUsageDetailsRequiresOwnershipAndValidTimezone(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	originalLogConsumeEnabled := common.LogConsumeEnabled
+	common.LogConsumeEnabled = true
+	t.Cleanup(func() {
+		common.LogConsumeEnabled = originalLogConsumeEnabled
+	})
+
+	token := seedToken(t, db, 1, "usage-details", "details1234masked5678")
+	require.NoError(t, db.Create(&model.Log{
+		UserId:           1,
+		TokenId:          token.Id,
+		TokenName:        "usage-details",
+		ModelName:        "gpt-test",
+		CreatedAt:        2,
+		WrittenAtNano:    2_000,
+		Type:             model.LogTypeConsume,
+		Quota:            75,
+		PromptTokens:     12,
+		CompletionTokens: 8,
+	}).Error)
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodGet, fmt.Sprintf("/api/token/%d/usage?timezone=Asia%%2FShanghai", token.Id), nil, 1)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(token.Id)}}
+	GetTokenUsageDetails(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var details tokenUsageDetailsTestData
+	require.NoError(t, common.Unmarshal(response.Data, &details))
+	assert.True(t, details.Available)
+	assert.Equal(t, token.CreatedTime, details.RangeStart)
+	assert.Empty(t, details.RangeStartNano)
+	assert.False(t, details.RangeStartExclusive)
+	assert.GreaterOrEqual(t, details.RangeEnd, int64(2))
+	assert.NotEmpty(t, details.RangeEndNano)
+	assert.Equal(t, "Asia/Shanghai", details.Timezone)
+	assert.Equal(t, "day", details.BucketUnit)
+	assert.Equal(t, int64(1), details.Summary.SettledRequests)
+	assert.Equal(t, int64(20), details.Summary.TotalTokens)
+	assert.Equal(t, int64(75), details.Summary.TotalQuota)
+	require.Len(t, details.Trend, 1)
+	assert.Equal(t, "1970-01-01", details.Trend[0].Bucket)
+
+	unauthorizedCtx, unauthorizedRecorder := newAuthenticatedContext(t, http.MethodGet, fmt.Sprintf("/api/token/%d/usage", token.Id), nil, 2)
+	unauthorizedCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(token.Id)}}
+	GetTokenUsageDetails(unauthorizedCtx)
+	assert.False(t, decodeAPIResponse(t, unauthorizedRecorder).Success)
+
+	invalidTimezoneCtx, invalidTimezoneRecorder := newAuthenticatedContext(t, http.MethodGet, fmt.Sprintf("/api/token/%d/usage?timezone=Mars%%2FOlympus_Mons", token.Id), nil, 1)
+	invalidTimezoneCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(token.Id)}}
+	GetTokenUsageDetails(invalidTimezoneCtx)
+	assert.False(t, decodeAPIResponse(t, invalidTimezoneRecorder).Success)
+}
+
+func TestUserLogsFilterByTokenIdAfterTokenRename(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	token := seedToken(t, db, 1, "renamed-token", "renamed1234masked5678")
+	otherToken := seedToken(t, db, 1, "other-token", "other1234masked5678")
+	require.NoError(t, db.Create(&[]model.Log{
+		{UserId: 1, TokenId: token.Id, TokenName: "original-token", CreatedAt: 10, Type: model.LogTypeConsume},
+		{UserId: 1, TokenId: otherToken.Id, TokenName: "renamed-token", CreatedAt: 11, Type: model.LogTypeConsume},
+	}).Error)
+
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodGet,
+		fmt.Sprintf("/api/log/self?token_id=%d&token_name=renamed-token", token.Id),
+		nil,
+		1,
+	)
+	GetUserLogs(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var page tokenLogTestPage
+	require.NoError(t, common.Unmarshal(response.Data, &page))
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, token.Id, page.Items[0].TokenId)
+	assert.Equal(t, "original-token", page.Items[0].TokenName)
+}
+
+func TestUserLogsRespectExactUsageWindow(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	token := seedToken(t, db, 1, "usage-window", "window1234masked5678")
+	require.NoError(t, db.Create(&[]model.Log{
+		{UserId: 1, TokenId: token.Id, CreatedAt: 100, WrittenAtNano: 100_400, Type: model.LogTypeConsume, Content: "before-reset"},
+		{UserId: 1, TokenId: token.Id, CreatedAt: 100, WrittenAtNano: 100_600, Type: model.LogTypeConsume, Content: "inside-window"},
+		{UserId: 1, TokenId: token.Id, CreatedAt: 100, WrittenAtNano: 100_800, Type: model.LogTypeConsume, Content: "after-snapshot"},
+	}).Error)
+
+	target := fmt.Sprintf(
+		"/api/log/self?token_id=%d&start_timestamp=100&end_timestamp=100&start_written_at_nano=100500&end_written_at_nano=100700&start_timestamp_exclusive=true",
+		token.Id,
+	)
+	ctx, recorder := newAuthenticatedContext(t, http.MethodGet, target, nil, 1)
+	GetUserLogs(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var page tokenLogTestPage
+	require.NoError(t, common.Unmarshal(response.Data, &page))
+	assert.Equal(t, int64(1), page.Total)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "inside-window", page.Items[0].Content)
+}
+
+func TestUserLogsRejectInvalidExactUsageWindow(t *testing.T) {
+	tests := []string{
+		"/api/log/self?start_written_at_nano=invalid",
+		"/api/log/self?start_written_at_nano=9223372036854775808",
+		"/api/log/self?end_written_at_nano=0",
+		"/api/log/self?start_timestamp_exclusive=true",
+	}
+
+	for _, target := range tests {
+		t.Run(target, func(t *testing.T) {
+			ctx, recorder := newAuthenticatedContext(t, http.MethodGet, target, nil, 1)
+			GetUserLogs(ctx)
+			assert.False(t, decodeAPIResponse(t, recorder).Success)
+		})
+	}
 }
 
 func TestResetTokenUsageRequiresOwnershipAndStartsNewUsageWindow(t *testing.T) {

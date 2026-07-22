@@ -43,7 +43,7 @@ export function ApiKeyUsageResetDialog() {
 
   const resetMutation = useMutation({
     mutationFn: resetApiKeyUsage,
-    onSuccess: (result) => {
+    onSuccess: (result, tokenId) => {
       if (!result.success) {
         toast.error(result.message || t(ERROR_MESSAGES.RESET_USAGE_FAILED))
         return
@@ -51,6 +51,9 @@ export function ApiKeyUsageResetDialog() {
       toast.success(t(SUCCESS_MESSAGES.API_KEY_USAGE_RESET))
       setOpen(null)
       void queryClient.invalidateQueries({ queryKey: ['keys'] })
+      void queryClient.invalidateQueries({
+        queryKey: ['api-key-usage-details', tokenId],
+      })
     },
     onError: () => {
       toast.error(t(ERROR_MESSAGES.RESET_USAGE_FAILED))
