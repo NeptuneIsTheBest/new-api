@@ -161,6 +161,10 @@ type RelayInfo struct {
 	// http.Request.ContentLength manually (net/http only auto-detects it for
 	// *bytes.Reader/Buffer/strings.Reader). 0 means "let net/http decide".
 	UpstreamRequestBodySize int64
+	// UpstreamRequestContentEncoding is set only when the relay transforms the
+	// outbound body. The transport applies it after channel header overrides so
+	// the header always describes the bytes actually sent upstream.
+	UpstreamRequestContentEncoding string
 
 	PriceData types.PriceData
 
@@ -195,6 +199,10 @@ type RelayInfo struct {
 }
 
 func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
+	// These fields describe one channel attempt and must not leak into retries.
+	info.UpstreamRequestBodySize = 0
+	info.UpstreamRequestContentEncoding = ""
+
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)

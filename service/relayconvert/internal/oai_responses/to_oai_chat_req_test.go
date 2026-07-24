@@ -17,13 +17,17 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 	topP := 0.9
 	maxOutputTokens := uint(128)
 	parallelToolCalls := true
+	includeObfuscation := false
 
 	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
-		Model:                "gpt-test",
-		Instructions:         mustRawMessage(t, "system rules"),
-		Input:                mustRawMessage(t, "hello"),
-		Stream:               &stream,
-		StreamOptions:        &dto.StreamOptions{IncludeUsage: true},
+		Model:        "gpt-test",
+		Instructions: mustRawMessage(t, "system rules"),
+		Input:        mustRawMessage(t, "hello"),
+		Stream:       &stream,
+		StreamOptions: &dto.StreamOptions{
+			IncludeUsage:       true,
+			IncludeObfuscation: &includeObfuscation,
+		},
 		MaxOutputTokens:      &maxOutputTokens,
 		Temperature:          &temperature,
 		TopP:                 &topP,
@@ -44,6 +48,11 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 	assert.Same(t, &stream, got.Stream)
 	require.NotNil(t, got.StreamOptions)
 	assert.True(t, got.StreamOptions.IncludeUsage)
+	assert.Nil(t, got.StreamOptions.IncludeObfuscation)
+	encoded, err := common.Marshal(got)
+	require.NoError(t, err)
+	assert.True(t, gjson.GetBytes(encoded, "stream_options.include_usage").Bool())
+	assert.False(t, gjson.GetBytes(encoded, "stream_options.include_obfuscation").Exists())
 	assert.Equal(t, maxOutputTokens, lo.FromPtr(got.MaxCompletionTokens))
 	assert.Equal(t, 0.0, lo.FromPtr(got.Temperature))
 	assert.Equal(t, 0.9, lo.FromPtr(got.TopP))

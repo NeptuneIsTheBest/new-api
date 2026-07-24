@@ -1,11 +1,36 @@
 package common
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/types"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRelayInfoInitChannelMetaResetsUpstreamBodyMetadata(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	info := &RelayInfo{
+		UpstreamRequestBodySize:        128,
+		UpstreamRequestContentEncoding: "zstd",
+	}
+	info.InitChannelMeta(ctx)
+	require.NotNil(t, info.ChannelMeta)
+	assert.Zero(t, info.UpstreamRequestBodySize)
+	assert.Empty(t, info.UpstreamRequestContentEncoding)
+
+	info.UpstreamRequestBodySize = 64
+	info.UpstreamRequestContentEncoding = "gzip"
+	info.InitChannelMeta(ctx)
+	assert.Zero(t, info.UpstreamRequestBodySize)
+	assert.Empty(t, info.UpstreamRequestContentEncoding)
+}
 
 func TestRelayInfoGetFinalRequestRelayFormatPrefersExplicitFinal(t *testing.T) {
 	info := &RelayInfo{

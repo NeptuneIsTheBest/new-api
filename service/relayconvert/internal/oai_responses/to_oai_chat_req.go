@@ -55,11 +55,18 @@ func ResponsesRequestToChatCompletionsRequest(req *dto.OpenAIResponsesRequest) (
 		return nil, err
 	}
 
+	var streamOptions *dto.StreamOptions
+	if req.StreamOptions != nil {
+		streamOptions = &dto.StreamOptions{
+			IncludeUsage: req.StreamOptions.IncludeUsage,
+		}
+	}
+
 	out := &dto.GeneralOpenAIRequest{
 		Model:                req.Model,
 		Messages:             messages,
 		Stream:               req.Stream,
-		StreamOptions:        req.StreamOptions,
+		StreamOptions:        streamOptions,
 		MaxCompletionTokens:  req.MaxOutputTokens,
 		Temperature:          req.Temperature,
 		TopP:                 req.TopP,

@@ -8,8 +8,35 @@ import (
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestApplyUpstreamRequestMetadataUsesCompressedBodyValues(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("compressed request body")
+	body, size, closer, err := relaycommon.NewOutboundJSONBody(payload)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, closer.Close())
+	})
+
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", body)
+	require.NoError(t, err)
+	require.Zero(t, req.ContentLength)
+
+	info := &relaycommon.RelayInfo{
+		UpstreamRequestBodySize:        size,
+		UpstreamRequestContentEncoding: "zstd",
+	}
+	applyUpstreamContentLength(req, info)
+	applyHeaderOverrideToRequest(req, map[string]string{"Content-Encoding": "gzip"})
+	applyUpstreamContentEncoding(req, info)
+
+	assert.Equal(t, size, req.ContentLength)
+	assert.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
+}
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 	t.Parallel()
