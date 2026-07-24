@@ -167,29 +167,32 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
         name: props.apiKey.name,
       })}
       className={cn(
-        'group/usage h-auto w-[170px] flex-col items-stretch gap-0.5 px-2 py-1 text-xs',
+        'h-auto w-[170px] flex-col items-stretch px-2 py-1 text-xs',
         props.className
       )}
     >
-      <div className='flex items-center justify-between gap-3'>
-        <span className='text-muted-foreground flex items-center gap-1'>
-          <HugeiconsIcon
-            icon={Analytics01Icon}
-            strokeWidth={2}
-            className='size-3 opacity-0 transition-opacity group-hover/usage:opacity-100 group-focus-visible/usage:opacity-100'
-            aria-hidden='true'
-          />
-          {t('Tokens')}
-        </span>
-        <span className='font-medium tabular-nums'>
-          {formatNumber(usage?.total_tokens)}
-        </span>
-      </div>
-      <div className='flex items-center justify-between gap-3'>
-        <span className='text-muted-foreground'>{t('Cost')}</span>
-        <span className='font-medium tabular-nums'>
-          {usage ? formatBillingQuota(usage.total_quota) : '-'}
-        </span>
+      <div className='grid grid-cols-[auto_minmax(0,1fr)] items-center gap-1.5'>
+        <HugeiconsIcon
+          icon={Analytics01Icon}
+          strokeWidth={2}
+          data-icon='inline-start'
+          className='text-muted-foreground'
+          aria-hidden='true'
+        />
+        <div className='flex min-w-0 flex-col gap-0.5'>
+          <div className='flex items-center justify-between gap-3'>
+            <span className='text-muted-foreground'>{t('Tokens')}</span>
+            <span className='font-medium tabular-nums'>
+              {formatNumber(usage?.total_tokens)}
+            </span>
+          </div>
+          <div className='flex items-center justify-between gap-3'>
+            <span className='text-muted-foreground'>{t('Cost')}</span>
+            <span className='font-medium tabular-nums'>
+              {usage ? formatBillingQuota(usage.total_quota) : '-'}
+            </span>
+          </div>
+        </div>
       </div>
     </Button>
   )
