@@ -3,6 +3,7 @@ package codex
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -16,9 +17,24 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 )
 
 type Adaptor struct {
+}
+
+type zstdResponseBody struct {
+	decoder *zstd.Decoder
+	source  io.ReadCloser
+}
+
+func (b *zstdResponseBody) Read(p []byte) (int, error) {
+	return b.decoder.Read(p)
+}
+
+func (b *zstdResponseBody) Close() error {
+	b.decoder.Close()
+	return b.source.Close()
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
@@ -110,7 +126,30 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
-	return channel.DoApiRequest(a, c, info, requestBody)
+	resp, err := channel.DoApiRequest(a, c, info, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Body == nil || !strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "zstd") {
+		return resp, nil
+	}
+
+	source := resp.Body
+	decoder, err := zstd.NewReader(source, zstd.WithDecoderConcurrency(1))
+	if err != nil {
+		_ = source.Close()
+		return nil, fmt.Errorf("codex channel: create zstd response decoder: %w", err)
+	}
+
+	resp.Body = &zstdResponseBody{
+		decoder: decoder,
+		source:  source,
+	}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Uncompressed = true
+	return resp, nil
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
@@ -190,6 +229,11 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	// Clients may omit it or include parameters like `application/json; charset=utf-8`,
 	// which can be rejected by the upstream. Force the exact media type.
 	req.Set("Content-Type", "application/json")
+	// net/http only negotiates and decodes gzip automatically. Codex responses
+	// are unwrapped explicitly in DoRequest, so zstd stays scoped to these modes.
+	if info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact {
+		req.Set("Accept-Encoding", "zstd")
+	}
 	if info.IsStream {
 		req.Set("Accept", "text/event-stream")
 	} else if req.Get("Accept") == "" {
