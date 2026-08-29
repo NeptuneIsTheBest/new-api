@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type ThinkingContentInfo struct {
@@ -1076,6 +1077,29 @@ func hasRemovableDisabledField(jsonData []byte, channelOtherSettings dto.Channel
 		(channelOtherSettings.DisableStore && values[3].Exists()) ||
 		(!channelOtherSettings.AllowSafetyIdentifier && values[4].Exists()) ||
 		(!channelOtherSettings.AllowIncludeObfuscation && values[5].Exists())
+}
+
+// ApplyForcedResponsesSSEObfuscation applies the channel's final
+// stream_options.include_obfuscation policy to an outbound Responses stream.
+// It runs after request filtering and parameter overrides so the channel policy
+// remains authoritative, including when the original request body is passed through.
+func ApplyForcedResponsesSSEObfuscation(jsonData []byte, info *RelayInfo) ([]byte, error) {
+	if info == nil || info.ChannelMeta == nil {
+		return jsonData, nil
+	}
+	if info.GetFinalRequestRelayFormat() != types.RelayFormatOpenAIResponses {
+		return jsonData, nil
+	}
+	forceIncludeObfuscation := info.ChannelOtherSettings.ForceIncludeObfuscation
+	if forceIncludeObfuscation == nil || !gjson.GetBytes(jsonData, "stream").Bool() {
+		return jsonData, nil
+	}
+
+	updated, err := sjson.SetBytes(jsonData, "stream_options.include_obfuscation", *forceIncludeObfuscation)
+	if err != nil {
+		return nil, fmt.Errorf("force Responses SSE include_obfuscation: %w", err)
+	}
+	return updated, nil
 }
 
 // RemoveGeminiDisabledFields removes disabled fields from Gemini request JSON data

@@ -188,6 +188,7 @@ import {
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
 import { ModelMappingEditor } from '../model-mapping-editor'
+import { ResponsesSSEObfuscationControls } from '../responses-sse-obfuscation-controls'
 import {
   ChannelAdvancedSection,
   ChannelApiAccessSection,
@@ -299,6 +300,7 @@ const SENSITIVE_FORM_FIELDS = [
   'disable_store',
   'allow_safety_identifier',
   'allow_include_obfuscation',
+  'force_include_obfuscation',
   'allow_inference_geo',
   'allow_speed',
   'claude_beta_query',
@@ -347,6 +349,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
     values.system_prompt_override ||
+    values.force_include_obfuscation !== undefined ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
@@ -769,6 +772,7 @@ export function ChannelMutateDrawer({
   const currentDisableStore = form.watch('disable_store')
   const currentAllowSafetyIdentifier = form.watch('allow_safety_identifier')
   const currentAllowIncludeObfuscation = form.watch('allow_include_obfuscation')
+  const currentForceIncludeObfuscation = form.watch('force_include_obfuscation')
   const currentAllowInferenceGeo = form.watch('allow_inference_geo')
   const currentAllowSpeed = form.watch('allow_speed')
   const currentClaudeBetaQuery = form.watch('claude_beta_query')
@@ -1050,6 +1054,7 @@ export function ChannelMutateDrawer({
       currentDisableStore ||
       currentAllowSafetyIdentifier ||
       currentAllowIncludeObfuscation ||
+      currentForceIncludeObfuscation !== undefined ||
       currentAllowInferenceGeo
     )
   }
@@ -4568,31 +4573,8 @@ export function ChannelMutateDrawer({
                                       )}
                                     />
 
-                                    <FormField
+                                    <ResponsesSSEObfuscationControls
                                       control={form.control}
-                                      name='allow_include_obfuscation'
-                                      render={({ field }) => (
-                                        <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
-                                          <div className='space-y-0.5'>
-                                            <FormLabel className='text-sm'>
-                                              {t(
-                                                'Allow include usage obfuscation passthrough'
-                                              )}
-                                            </FormLabel>
-                                            <FormDescription>
-                                              {t(
-                                                'Pass through the include field for usage obfuscation'
-                                              )}
-                                            </FormDescription>
-                                          </div>
-                                          <FormControl>
-                                            <Switch
-                                              checked={field.value}
-                                              onCheckedChange={field.onChange}
-                                            />
-                                          </FormControl>
-                                        </FormItem>
-                                      )}
                                     />
 
                                     <FormField
