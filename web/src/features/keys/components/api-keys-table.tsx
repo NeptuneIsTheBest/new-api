@@ -24,6 +24,7 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
 import {
   DISABLED_ROW_DESKTOP,
   DISABLED_ROW_MOBILE,
@@ -42,6 +43,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import dayjs from '@/lib/dayjs'
 import { formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -53,7 +55,11 @@ import {
   ERROR_MESSAGES,
 } from '../constants'
 import type { ApiKey } from '../types'
-import { ApiKeyCell, UnlimitedQuotaBadge } from './api-keys-cells'
+import {
+  ApiKeyCell,
+  ApiKeyUsageCell,
+  UnlimitedQuotaBadge,
+} from './api-keys-cells'
 import { useApiKeysColumns } from './api-keys-columns'
 import { useApiKeys } from './api-keys-provider'
 import { DataTableBulkActions } from './data-table-bulk-actions'
@@ -87,6 +93,7 @@ function ApiKeysMobileSkeleton() {
             <Skeleton className='h-8 w-16' />
           </div>
           <Skeleton className='h-3 w-28' />
+          <Skeleton className='h-12 w-full' />
         </div>
       ))}
     </div>
@@ -179,6 +186,11 @@ function ApiKeysMobileList({
                 </span>
               )}
             </div>
+
+            <div className='border-border/60 space-y-1 border-t pt-2'>
+              <div className='text-muted-foreground text-xs'>{t('Usage')}</div>
+              <ApiKeyUsageCell stats={apiKey.usage_stats} className='min-w-0' />
+            </div>
           </div>
         )
       })}
@@ -190,6 +202,13 @@ export function ApiKeysTable() {
   const { t } = useTranslation()
   const { refreshTrigger } = useApiKeys()
   const [now, setNow] = useState(() => Date.now())
+  const search = route.useSearch()
+  const navigate = route.useNavigate()
+  const defaultStatsRange = dayjs(now)
+  const statsStartTime =
+    search.statsStartTime ?? defaultStatsRange.startOf('day').valueOf()
+  const statsEndTime =
+    search.statsEndTime ?? defaultStatsRange.endOf('day').valueOf()
   const columns = useApiKeysColumns(now)
 
   useEffect(() => {
@@ -209,8 +228,8 @@ export function ApiKeysTable() {
     onPaginationChange,
     ensurePageInRange,
   } = useTableUrlState({
-    search: route.useSearch(),
-    navigate: route.useNavigate(),
+    search,
+    navigate,
     pagination: { defaultPage: 1, defaultPageSize: 20 },
     globalFilter: { enabled: true, key: 'filter' },
     columnFilters: [
@@ -239,6 +258,8 @@ export function ApiKeysTable() {
       pagination.pageSize,
       globalFilter,
       tokenFilter,
+      statsStartTime,
+      statsEndTime,
       refreshTrigger,
     ],
     queryFn: async () => {
@@ -248,10 +269,16 @@ export function ApiKeysTable() {
             token: tokenFilter,
             p: pagination.pageIndex + 1,
             size: pagination.pageSize,
+            includeStats: true,
+            startTimestamp: Math.floor(statsStartTime / 1000),
+            endTimestamp: Math.floor(statsEndTime / 1000),
           })
         : await getApiKeys({
             p: pagination.pageIndex + 1,
             size: pagination.pageSize,
+            includeStats: true,
+            startTimestamp: Math.floor(statsStartTime / 1000),
+            endTimestamp: Math.floor(statsEndTime / 1000),
           })
 
       if (!result.success) {
@@ -309,13 +336,36 @@ export function ApiKeysTable() {
         searchPlaceholder: t('Filter by name...'),
         searchDebounceMs: 500,
         additionalSearch: (
-          <Input
-            placeholder={t('Filter by API key...')}
-            aria-label={t('Filter by API key...')}
-            value={tokenFilterInput}
-            onChange={(e) => setTokenFilterInput(e.target.value)}
-            className='w-full sm:w-50 lg:w-60'
-          />
+          <>
+            <Input
+              placeholder={t('Filter by API key...')}
+              aria-label={t('Filter by API key...')}
+              value={tokenFilterInput}
+              onChange={(event) => setTokenFilterInput(event.target.value)}
+              className='w-full sm:w-50 lg:w-60'
+            />
+            <CompactDateTimeRangePicker
+              start={new Date(statsStartTime)}
+              end={new Date(statsEndTime)}
+              onChange={({ start, end }) => {
+                const nextStartTime =
+                  start?.getTime() ?? defaultStatsRange.startOf('day').valueOf()
+                const nextEndTime =
+                  end?.getTime() ?? defaultStatsRange.endOf('day').valueOf()
+                if (nextStartTime > nextEndTime) {
+                  return
+                }
+                navigate({
+                  search: (previous) => ({
+                    ...previous,
+                    statsStartTime: nextStartTime,
+                    statsEndTime: nextEndTime,
+                  }),
+                })
+              }}
+              className='sm:w-[21rem]'
+            />
+          </>
         ),
         filters: [
           {

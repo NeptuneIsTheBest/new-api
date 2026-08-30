@@ -634,6 +634,74 @@ type Stat struct {
 	CacheHitRate     *float64 `json:"cache_hit_rate" gorm:"-"`
 }
 
+type TokenUsageStat struct {
+	TokenId          int   `gorm:"column:token_id"`
+	CumulativeTokens int64 `gorm:"column:cumulative_tokens"`
+	CumulativeQuota  int64 `gorm:"column:cumulative_quota"`
+	PeriodTokens     int64 `gorm:"column:period_tokens"`
+	PeriodQuota      int64 `gorm:"column:period_quota"`
+}
+
+// GetTokenUsageStats aggregates retained consume and refund logs for the
+// requested token page. A zero period boundary is treated as unbounded.
+func GetTokenUsageStats(userId int, tokenIds []int, startTimestamp int64, endTimestamp int64) ([]TokenUsageStat, error) {
+	if len(tokenIds) == 0 {
+		return []TokenUsageStat{}, nil
+	}
+
+	periodConditions := make([]string, 0, 2)
+	periodArgs := make([]any, 0, 2)
+	if startTimestamp > 0 {
+		periodConditions = append(periodConditions, "created_at >= ?")
+		periodArgs = append(periodArgs, startTimestamp)
+	}
+	if endTimestamp > 0 {
+		periodConditions = append(periodConditions, "created_at <= ?")
+		periodArgs = append(periodArgs, endTimestamp)
+	}
+	periodCondition := "1 = 1"
+	if len(periodConditions) > 0 {
+		periodCondition = strings.Join(periodConditions, " AND ")
+	}
+
+	selectExpression := fmt.Sprintf(`
+		token_id,
+		COALESCE(SUM(CASE WHEN type = %d THEN prompt_tokens ELSE 0 END), 0) +
+			COALESCE(SUM(CASE WHEN type = %d THEN completion_tokens ELSE 0 END), 0) AS cumulative_tokens,
+		COALESCE(SUM(CASE WHEN type = %d THEN quota WHEN type = %d THEN -quota ELSE 0 END), 0) AS cumulative_quota,
+		COALESCE(SUM(CASE WHEN (%s) AND type = %d THEN prompt_tokens ELSE 0 END), 0) +
+			COALESCE(SUM(CASE WHEN (%s) AND type = %d THEN completion_tokens ELSE 0 END), 0) AS period_tokens,
+		COALESCE(SUM(CASE WHEN (%s) THEN
+			CASE WHEN type = %d THEN quota WHEN type = %d THEN -quota ELSE 0 END
+			ELSE 0 END), 0) AS period_quota`,
+		LogTypeConsume,
+		LogTypeConsume,
+		LogTypeConsume,
+		LogTypeRefund,
+		periodCondition,
+		LogTypeConsume,
+		periodCondition,
+		LogTypeConsume,
+		periodCondition,
+		LogTypeConsume,
+		LogTypeRefund,
+	)
+	selectArgs := make([]any, 0, len(periodArgs)*3)
+	selectArgs = append(selectArgs, periodArgs...)
+	selectArgs = append(selectArgs, periodArgs...)
+	selectArgs = append(selectArgs, periodArgs...)
+
+	stats := make([]TokenUsageStat, 0, len(tokenIds))
+	err := LOG_DB.Table("logs").
+		Select(selectExpression, selectArgs...).
+		Where("user_id = ?", userId).
+		Where("token_id IN ?", tokenIds).
+		Where("type IN ?", []int{LogTypeConsume, LogTypeRefund}).
+		Group("token_id").
+		Scan(&stats).Error
+	return stats, err
+}
+
 // Historical usage logs keep cache details in the JSON-encoded other column.
 // Build guarded extraction expressions per log database so range statistics
 // include both old and new records without a backfill migration.

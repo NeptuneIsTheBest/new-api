@@ -39,7 +39,18 @@ type tokenRequest struct {
 
 type tokenResponse struct {
 	*model.Token
-	AutoGroups []string `json:"auto_groups"`
+	AutoGroups []string                 `json:"auto_groups"`
+	UsageStats *tokenUsageStatsResponse `json:"usage_stats,omitempty"`
+}
+
+type tokenUsageStatResponse struct {
+	TotalTokens int64 `json:"total_tokens"`
+	NetQuota    int64 `json:"net_quota"`
+}
+
+type tokenUsageStatsResponse struct {
+	Cumulative tokenUsageStatResponse `json:"cumulative"`
+	Period     tokenUsageStatResponse `json:"period"`
 }
 
 func maxTokenQuota() int {
@@ -75,6 +86,71 @@ func buildMaskedTokenResponses(tokens []*model.Token) []*tokenResponse {
 		maskedTokens = append(maskedTokens, buildMaskedTokenResponse(token))
 	}
 	return maskedTokens
+}
+
+func getTokenStatsQuery(c *gin.Context) (bool, int64, int64, error) {
+	includeStatsText := c.Query("include_stats")
+	if includeStatsText == "" {
+		return false, 0, 0, nil
+	}
+	includeStats, err := strconv.ParseBool(includeStatsText)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("invalid include_stats: %w", err)
+	}
+	if !includeStats {
+		return false, 0, 0, nil
+	}
+
+	var startTimestamp int64
+	if value := c.Query("start_timestamp"); value != "" {
+		startTimestamp, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || startTimestamp < 0 {
+			return false, 0, 0, fmt.Errorf("invalid start_timestamp")
+		}
+	}
+	var endTimestamp int64
+	if value := c.Query("end_timestamp"); value != "" {
+		endTimestamp, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || endTimestamp < 0 {
+			return false, 0, 0, fmt.Errorf("invalid end_timestamp")
+		}
+	}
+	if startTimestamp > 0 && endTimestamp > 0 && startTimestamp > endTimestamp {
+		return false, 0, 0, fmt.Errorf("start_timestamp cannot be greater than end_timestamp")
+	}
+	return true, startTimestamp, endTimestamp, nil
+}
+
+func attachTokenUsageStats(responses []*tokenResponse, userId int, startTimestamp int64, endTimestamp int64) {
+	if len(responses) == 0 {
+		return
+	}
+	tokenIds := make([]int, 0, len(responses))
+	for _, response := range responses {
+		tokenIds = append(tokenIds, response.Id)
+	}
+	stats, err := model.GetTokenUsageStats(userId, tokenIds, startTimestamp, endTimestamp)
+	if err != nil {
+		common.SysError("failed to query token usage stats: " + err.Error())
+		return
+	}
+	statsByTokenId := make(map[int]model.TokenUsageStat, len(stats))
+	for _, stat := range stats {
+		statsByTokenId[stat.TokenId] = stat
+	}
+	for _, response := range responses {
+		stat := statsByTokenId[response.Id]
+		response.UsageStats = &tokenUsageStatsResponse{
+			Cumulative: tokenUsageStatResponse{
+				TotalTokens: stat.CumulativeTokens,
+				NetQuota:    stat.CumulativeQuota,
+			},
+			Period: tokenUsageStatResponse{
+				TotalTokens: stat.PeriodTokens,
+				NetQuota:    stat.PeriodQuota,
+			},
+		}
+	}
 }
 
 func getTokenRequestUserGroup(c *gin.Context) (string, error) {
@@ -128,6 +204,11 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 }
 
 func GetAllTokens(c *gin.Context) {
+	includeStats, startTimestamp, endTimestamp, err := getTokenStatsQuery(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	userId := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
 	tokens, err := model.GetAllUserTokens(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
@@ -136,12 +217,21 @@ func GetAllTokens(c *gin.Context) {
 		return
 	}
 	total, _ := model.CountUserTokens(userId)
+	responses := buildMaskedTokenResponses(tokens)
+	if includeStats {
+		attachTokenUsageStats(responses, userId, startTimestamp, endTimestamp)
+	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(responses)
 	common.ApiSuccess(c, pageInfo)
 }
 
 func SearchTokens(c *gin.Context) {
+	includeStats, startTimestamp, endTimestamp, err := getTokenStatsQuery(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	userId := c.GetInt("id")
 	keyword := c.Query("keyword")
 	token := c.Query("token")
@@ -153,8 +243,12 @@ func SearchTokens(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	responses := buildMaskedTokenResponses(tokens)
+	if includeStats {
+		attachTokenUsageStats(responses, userId, startTimestamp, endTimestamp)
+	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(responses)
 	common.ApiSuccess(c, pageInfo)
 }
 

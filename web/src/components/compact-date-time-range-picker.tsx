@@ -47,40 +47,44 @@ function fromInputValue(value: string): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date
 }
 
-export function CompactDateTimeRangePicker({
-  start,
-  end,
-  onChange,
-  className,
-}: CompactDateTimeRangePickerProps) {
+export function CompactDateTimeRangePicker(
+  props: CompactDateTimeRangePickerProps
+) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
-  const [draftStart, setDraftStart] = useState(toInputValue(start))
-  const [draftEnd, setDraftEnd] = useState(toInputValue(end))
+  const [draftStart, setDraftStart] = useState(toInputValue(props.start))
+  const [draftEnd, setDraftEnd] = useState(toInputValue(props.end))
 
   const label = useMemo(() => {
-    if (!start && !end) return t('Date Range')
+    if (!props.start && !props.end) return t('Date Range')
     // The popover's <input type="datetime-local"> only supports minute
     // precision, so seconds are always 00 (manual pick) or 59 (preset
     // end-of-day). Hide them in the trigger label to keep the button
     // width compact while still showing the meaningful timestamp.
-    const startText = start ? dayjs(start).format('YYYY-MM-DD HH:mm') : '-'
-    const endText = end ? dayjs(end).format('YYYY-MM-DD HH:mm') : '-'
+    const startText = props.start
+      ? dayjs(props.start).format('YYYY-MM-DD HH:mm')
+      : '-'
+    const endText = props.end
+      ? dayjs(props.end).format('YYYY-MM-DD HH:mm')
+      : '-'
     return `${startText} ~ ${endText}`
-  }, [end, start, t])
+  }, [props.end, props.start, t])
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) {
-      setDraftStart(toInputValue(start))
-      setDraftEnd(toInputValue(end))
+      setDraftStart(toInputValue(props.start))
+      setDraftEnd(toInputValue(props.end))
     }
     setOpen(nextOpen)
   }
 
   const applyDraft = () => {
-    onChange({
-      start: fromInputValue(draftStart),
-      end: fromInputValue(draftEnd),
+    const start = fromInputValue(draftStart)
+    const end = fromInputValue(draftEnd)
+    if (start && end && start > end) return
+    props.onChange({
+      start,
+      end,
     })
     setOpen(false)
   }
@@ -112,7 +116,7 @@ export function CompactDateTimeRangePicker({
     const range = presets[kind]
     setDraftStart(toInputValue(range.start))
     setDraftEnd(toInputValue(range.end))
-    onChange(range)
+    props.onChange(range)
     setOpen(false)
   }
 
@@ -125,8 +129,8 @@ export function CompactDateTimeRangePicker({
             variant='outline'
             className={cn(
               'w-full justify-start gap-2 px-2.5 text-sm leading-5 font-normal tabular-nums',
-              !start && !end && 'text-muted-foreground',
-              className
+              !props.start && !props.end && 'text-muted-foreground',
+              props.className
             )}
           />
         }
@@ -147,7 +151,7 @@ export function CompactDateTimeRangePicker({
               <Input
                 type='datetime-local'
                 value={draftStart}
-                onChange={(e) => setDraftStart(e.target.value)}
+                onChange={(event) => setDraftStart(event.target.value)}
                 className='h-8 text-sm leading-5 tabular-nums'
               />
             </div>
@@ -161,7 +165,7 @@ export function CompactDateTimeRangePicker({
               <Input
                 type='datetime-local'
                 value={draftEnd}
-                onChange={(e) => setDraftEnd(e.target.value)}
+                onChange={(event) => setDraftEnd(event.target.value)}
                 className='h-8 text-sm leading-5 tabular-nums'
               />
             </div>

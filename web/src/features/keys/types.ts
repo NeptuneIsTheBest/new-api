@@ -22,6 +22,16 @@ import { z } from 'zod'
 // API Key Schema & Types
 // ============================================================================
 
+const apiKeyUsageStatSchema = z.object({
+  total_tokens: z.number(),
+  net_quota: z.number(),
+})
+
+const apiKeyUsageStatsSchema = z.object({
+  cumulative: apiKeyUsageStatSchema,
+  period: apiKeyUsageStatSchema,
+})
+
 export const apiKeySchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -46,6 +56,7 @@ export const apiKeySchema = z.object({
   model_limits_enabled: z.boolean(),
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
+  usage_stats: apiKeyUsageStatsSchema.nullish().optional(),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -63,6 +74,9 @@ export interface ApiResponse<T = unknown> {
 export interface GetApiKeysParams {
   p?: number
   size?: number
+  includeStats?: boolean
+  startTimestamp?: number
+  endTimestamp?: number
 }
 
 export interface GetApiKeysResponse {
@@ -81,6 +95,9 @@ export interface SearchApiKeysParams {
   token?: string
   p?: number
   size?: number
+  includeStats?: boolean
+  startTimestamp?: number
+  endTimestamp?: number
 }
 
 export interface ApiKeyFormData {

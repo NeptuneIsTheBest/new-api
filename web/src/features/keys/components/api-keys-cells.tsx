@@ -33,8 +33,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
-import { formatQuota } from '@/lib/format'
+import { formatBillingCurrencyFromUSD } from '@/lib/currency'
+import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import type { ApiKey } from '../types'
 import { useApiKeys } from './api-keys-provider'
@@ -173,6 +177,87 @@ export function UnlimitedQuotaBadge(props: UnlimitedQuotaBadgeProps) {
         </span>
       </PopoverContent>
     </Popover>
+  )
+}
+
+type ApiKeyUsageCellProps = {
+  stats: ApiKey['usage_stats']
+  className?: string
+}
+
+export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
+  const { t, i18n } = useTranslation()
+  const currencyConfig = useSystemConfigStore((state) => state.config.currency)
+
+  if (!props.stats) {
+    return <span className='text-muted-foreground'>—</span>
+  }
+
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const quotaPerUnit = currencyConfig.quotaPerUnit
+  const periodTokens = formatNumber(props.stats.period.total_tokens, locale)
+  const periodTokensDisplay = formatCompactNumber(
+    props.stats.period.total_tokens,
+    locale
+  )
+  const cumulativeTokens = formatNumber(
+    props.stats.cumulative.total_tokens,
+    locale
+  )
+  const cumulativeTokensDisplay = formatCompactNumber(
+    props.stats.cumulative.total_tokens,
+    locale
+  )
+  const periodCost = formatBillingCurrencyFromUSD(
+    props.stats.period.net_quota / quotaPerUnit,
+    {
+      digitsLarge: 4,
+      digitsSmall: 6,
+      abbreviate: false,
+      locale,
+    }
+  )
+  const periodCostDisplay = formatBillingCurrencyFromUSD(
+    props.stats.period.net_quota / quotaPerUnit,
+    { compact: true, locale }
+  )
+  const cumulativeCost = formatBillingCurrencyFromUSD(
+    props.stats.cumulative.net_quota / quotaPerUnit,
+    {
+      digitsLarge: 4,
+      digitsSmall: 6,
+      abbreviate: false,
+      locale,
+    }
+  )
+  const cumulativeCostDisplay = formatBillingCurrencyFromUSD(
+    props.stats.cumulative.net_quota / quotaPerUnit,
+    { compact: true, locale }
+  )
+  const title = `${t('Period')}: ${t('Tokens')} ${periodTokens}, ${t('Cost')} ${periodCost}; ${t('Total:')} ${cumulativeTokens}, ${cumulativeCost}`
+
+  return (
+    <div
+      className={cn('w-full min-w-[180px] space-y-1 text-xs', props.className)}
+      title={title}
+    >
+      <div className='grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2 gap-y-0.5'>
+        <span className='text-muted-foreground'>{t('Tokens')}</span>
+        <span className='truncate text-right font-mono font-medium tabular-nums'>
+          {periodTokensDisplay}
+        </span>
+        <span className='text-muted-foreground'>{t('Cost')}</span>
+        <span className='truncate text-right font-mono font-medium tabular-nums'>
+          {periodCostDisplay}
+        </span>
+      </div>
+      <div className='text-muted-foreground flex min-w-0 items-center justify-between gap-2'>
+        <span className='shrink-0'>{t('Total:')}</span>
+        <span className='truncate text-right font-mono tabular-nums'>
+          {cumulativeTokensDisplay} · {cumulativeCostDisplay}
+        </span>
+      </div>
+    </div>
   )
 }
 
