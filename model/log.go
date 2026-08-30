@@ -625,13 +625,99 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota            int      `json:"quota"`
+	Rpm              int      `json:"rpm"`
+	Tpm              int      `json:"tpm"`
+	TotalTokens      int64    `json:"total_tokens"`
+	CacheTokens      int64    `json:"-"`
+	CacheInputTokens int64    `json:"-"`
+	CacheHitRate     *float64 `json:"cache_hit_rate" gorm:"-"`
+}
+
+// Historical usage logs keep cache details in the JSON-encoded other column.
+// Build guarded extraction expressions per log database so range statistics
+// include both old and new records without a backfill migration.
+func logJSONIntExpression(databaseType common.DatabaseType, key string) string {
+	switch databaseType {
+	case common.DatabaseTypeMySQL:
+		safeOther := "IF(JSON_VALID(other), other, '{}')"
+		return fmt.Sprintf("GREATEST(CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(%s, '$.%s')), '0') AS SIGNED), 0)", safeOther, key)
+	case common.DatabaseTypePostgreSQL:
+		return fmt.Sprintf("COALESCE((substring(other from '\"%s\"[[:space:]]*:[[:space:]]*([0-9]+)'))::bigint, 0)", key)
+	case common.DatabaseTypeClickHouse:
+		return fmt.Sprintf("greatest(JSONExtractInt(other, '%s'), toInt64(0))", key)
+	default:
+		safeOther := "CASE WHEN json_valid(other) THEN other ELSE '{}' END"
+		return fmt.Sprintf("MAX(CAST(COALESCE(json_extract(%s, '$.%s'), 0) AS INTEGER), 0)", safeOther, key)
+	}
+}
+
+func logGreatestExpression(databaseType common.DatabaseType, expressions ...string) string {
+	functionName := "GREATEST"
+	if databaseType == common.DatabaseTypeClickHouse {
+		functionName = "greatest"
+	} else if databaseType != common.DatabaseTypeMySQL && databaseType != common.DatabaseTypePostgreSQL {
+		functionName = "MAX"
+	}
+	return fmt.Sprintf("%s(%s)", functionName, strings.Join(expressions, ", "))
+}
+
+func logAnthropicUsageExpression(databaseType common.DatabaseType) string {
+	switch databaseType {
+	case common.DatabaseTypeMySQL:
+		safeOther := "IF(JSON_VALID(other), other, '{}')"
+		return fmt.Sprintf(
+			"(JSON_UNQUOTE(JSON_EXTRACT(%s, '$.usage_semantic')) = 'anthropic' OR JSON_UNQUOTE(JSON_EXTRACT(%s, '$.claude')) = 'true')",
+			safeOther,
+			safeOther,
+		)
+	case common.DatabaseTypePostgreSQL:
+		return `(other ~ '"usage_semantic"[[:space:]]*:[[:space:]]*"anthropic"' OR other ~ '"claude"[[:space:]]*:[[:space:]]*true')`
+	case common.DatabaseTypeClickHouse:
+		return "(JSONExtractString(other, 'usage_semantic') = 'anthropic' OR JSONExtractBool(other, 'claude'))"
+	default:
+		safeOther := "CASE WHEN json_valid(other) THEN other ELSE '{}' END"
+		return fmt.Sprintf(
+			"(COALESCE(json_extract(%s, '$.usage_semantic'), '') = 'anthropic' OR COALESCE(json_extract(%s, '$.claude'), 0) = 1)",
+			safeOther,
+			safeOther,
+		)
+	}
+}
+
+func logTokenStatExpressions() (cacheTokens string, cacheInputTokens string) {
+	databaseType := common.LogDatabaseType()
+	cacheTokens = logJSONIntExpression(databaseType, "cache_tokens")
+	cacheWriteTokens := logGreatestExpression(
+		databaseType,
+		logJSONIntExpression(databaseType, "cache_write_tokens"),
+		logJSONIntExpression(databaseType, "cache_creation_tokens"),
+		logJSONIntExpression(databaseType, "cache_creation_tokens_5m")+" + "+logJSONIntExpression(databaseType, "cache_creation_tokens_1h"),
+	)
+	explicitInputTokens := logJSONIntExpression(databaseType, "input_tokens_total")
+	promptTokens := logGreatestExpression(databaseType, "prompt_tokens", "0")
+	if databaseType == common.DatabaseTypeClickHouse {
+		promptTokens = "greatest(toInt64(prompt_tokens), toInt64(0))"
+	}
+	cacheInputTokens = fmt.Sprintf(
+		"CASE WHEN %s THEN %s + %s + %s ELSE %s END",
+		logAnthropicUsageExpression(databaseType),
+		promptTokens,
+		cacheTokens,
+		cacheWriteTokens,
+		logGreatestExpression(databaseType, explicitInputTokens, promptTokens, cacheTokens),
+	)
+	return cacheTokens, cacheInputTokens
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
+	cacheTokens, cacheInputTokens := logTokenStatExpressions()
+	rangeStatSelect := fmt.Sprintf(
+		"COALESCE(sum(quota), 0) quota, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) total_tokens, COALESCE(sum(%s), 0) cache_tokens, COALESCE(sum(%s), 0) cache_input_tokens",
+		cacheTokens,
+		cacheInputTokens,
+	)
+	tx := LOG_DB.Table("logs").Select(rangeStatSelect)
 
 	// 为rpm和tpm创建单独的查询
 	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
@@ -681,6 +767,17 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if err := rpmTpmQuery.Scan(&stat).Error; err != nil {
 		common.SysError("failed to query rpm/tpm stat: " + err.Error())
 		return stat, errors.New("查询统计数据失败")
+	}
+	if stat.CacheInputTokens > 0 {
+		cacheTokens := stat.CacheTokens
+		if cacheTokens < 0 {
+			cacheTokens = 0
+		}
+		if cacheTokens > stat.CacheInputTokens {
+			cacheTokens = stat.CacheInputTokens
+		}
+		cacheHitRate := float64(cacheTokens) / float64(stat.CacheInputTokens) * 100
+		stat.CacheHitRate = &cacheHitRate
 	}
 
 	return stat, nil

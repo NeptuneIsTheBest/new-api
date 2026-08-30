@@ -21,7 +21,7 @@ import { getRouteApi } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatLogQuota } from '@/lib/format'
+import { formatLogQuota, formatNumber, formatPercent } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { getLogStats, getUserLogStats } from '../api'
@@ -81,6 +81,8 @@ export function CommonLogsStats() {
         <Skeleton className='h-7 w-[150px] rounded-md' />
         <Skeleton className='h-7 w-[100px] rounded-md' />
         <Skeleton className='h-7 w-[120px] rounded-md' />
+        <Skeleton className='h-7 w-[150px] rounded-md' />
+        <Skeleton className='h-7 w-[140px] rounded-md' />
       </div>
     )
   }
@@ -101,6 +103,16 @@ export function CommonLogsStats() {
         label={t('TPM')}
         value={stats?.tpm || 0}
         accent='bg-slate-400/70'
+      />
+      <StatBadge
+        label={t('Total Tokens')}
+        value={formatNumber(stats?.total_tokens ?? 0)}
+        accent='bg-violet-500/65'
+      />
+      <StatBadge
+        label={t('Cache Hit Rate')}
+        value={formatPercent(stats?.cache_hit_rate)}
+        accent='bg-emerald-500/65'
       />
     </div>
   )
