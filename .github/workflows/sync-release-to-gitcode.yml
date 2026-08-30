@@ -1,7 +1,6 @@
 name: Sync Release to GitCode
 
 permissions:
-  actions: read
   contents: read
 
 on:
@@ -72,17 +71,6 @@ jobs:
               request_url="https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases/$RELEASE_TAG"
               request_action=update
               success_action=updated
-              jq -n \
-                --arg tag_name "$RELEASE_TAG" \
-                --arg name "$RELEASE_TAG" \
-                --arg body "$release_body" \
-                --arg release_status "$release_status" \
-                '{
-                  tag_name: $tag_name,
-                  name: $name,
-                  body: $body,
-                  release_status: $release_status
-                }' > "$request_json"
               ;;
             404)
               if ! git ls-remote --exit-code --tags \
@@ -91,22 +79,10 @@ jobs:
                 echo "::error::Tag $RELEASE_TAG has not been mirrored to GitCode yet. Retry this workflow after the tag appears on GitCode."
                 exit 1
               fi
-
               request_method=POST
               request_url="https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases"
               request_action=create
               success_action=created
-              jq -n \
-                --arg tag_name "$RELEASE_TAG" \
-                --arg name "$RELEASE_TAG" \
-                --arg body "$release_body" \
-                --arg release_status "$release_status" \
-                '{
-                  tag_name: $tag_name,
-                  name: $name,
-                  body: $body,
-                  release_status: $release_status
-                }' > "$request_json"
               ;;
             *)
               echo "::error::Failed to inspect GitCode release. Response code: $gitcode_release_status"
@@ -114,6 +90,18 @@ jobs:
               exit 1
               ;;
           esac
+
+          jq -n \
+            --arg tag_name "$RELEASE_TAG" \
+            --arg name "$RELEASE_TAG" \
+            --arg body "$release_body" \
+            --arg release_status "$release_status" \
+            '{
+              tag_name: $tag_name,
+              name: $name,
+              body: $body,
+              release_status: $release_status
+            }' > "$request_json"
 
           gitcode_response_json="$(mktemp)"
           request_status="$(
@@ -141,55 +129,46 @@ jobs:
             echo "prerelease=$release_prerelease"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Download GitHub release assets
-        if: ${{ inputs.sync_files }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ inputs.tag_name }}
-        run: |
-          set -euo pipefail
-
-          mkdir release-assets
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir release-assets
-
-          if ! find release-assets -maxdepth 1 -type f -print -quit | grep -q .; then
-            echo "::error::GitHub release has no downloadable assets"
-            exit 1
-          fi
-
-          while IFS= read -r -d '' file; do
-            directory="$(dirname "$file")"
-            filename="$(basename "$file")"
-            safe_filename="$(sed 's/[^A-Za-z0-9._+-]/-/g' <<< "$filename")"
-            if [[ "$filename" != "$safe_filename" ]]; then
-              if [[ -e "$directory/$safe_filename" ]]; then
-                echo "::error::Asset filename collision after normalization: $safe_filename"
-                exit 1
-              fi
-              mv -- "$file" "$directory/$safe_filename"
-            fi
-          done < <(find release-assets -maxdepth 1 -type f -print0)
-
-          find release-assets -maxdepth 1 -type f -print | sort
-
-      - name: Prepare GitCode release assets
+      - name: Prepare missing release assets
         id: assets
         if: ${{ inputs.sync_files }}
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag_name }}
         run: |
           set -euo pipefail
 
-          local_assets="$(
-            find release-assets -maxdepth 1 -type f -printf '%s\t%f\n' \
-              | sort -n -k1,1 \
-              | cut -f2- \
-              | jq -Rsc 'split("\n") | map(select(length > 0))'
+          github_release_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.id'
           )"
+          github_assets="$(
+            gh api --paginate --slurp \
+              "/repos/$GITHUB_REPOSITORY/releases/$github_release_id/assets?per_page=100" \
+              | jq -c '[.[][] | {
+                  asset_id: .id,
+                  source_name: .name,
+                  file_name: (.name | gsub("[^A-Za-z0-9._+\\-]"; "-")),
+                  size: .size
+                }]'
+          )"
+          if [[ "$(jq -r 'length' <<< "$github_assets")" == "0" ]]; then
+            echo "::error::GitHub release has no downloadable assets"
+            exit 1
+          fi
+
+          filename_collisions="$(
+            jq -r '
+              group_by(.file_name)
+              | map(select(length > 1) | .[0].file_name)
+              | join(", ")
+            ' <<< "$github_assets"
+          )"
+          if [[ -n "$filename_collisions" ]]; then
+            echo "::error::Asset filename collision after normalization: $filename_collisions"
+            exit 1
+          fi
 
           gitcode_release_json="$(mktemp)"
           gitcode_release_status="$(
@@ -207,44 +186,90 @@ jobs:
           existing_assets="$(jq -c '[.assets[]?.name]' "$gitcode_release_json")"
           missing_assets="$(
             jq -cn \
-              --argjson local_assets "$local_assets" \
+              --argjson github_assets "$github_assets" \
               --argjson existing_assets "$existing_assets" \
-              '$local_assets - $existing_assets'
+              '$github_assets
+                | map(select(.file_name as $name | ($existing_assets | index($name)) == null))
+                | sort_by(-.size)'
           )"
           jq -rn \
-            --argjson local_assets "$local_assets" \
+            --argjson github_assets "$github_assets" \
             --argjson missing_assets "$missing_assets" \
-            '$local_assets - $missing_assets | .[] | "Skipping existing GitCode asset: \(.)"'
+            '$github_assets - $missing_assets | .[] | "Skipping existing GitCode asset: \(.file_name)"'
 
           echo "matrix=$missing_assets" >> "$GITHUB_OUTPUT"
           echo "has_assets=$(jq -r 'length > 0' <<< "$missing_assets")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release assets for GitCode
-        if: ${{ inputs.sync_files && steps.assets.outputs.has_assets == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gitcode-release-assets
-          path: release-assets/*
-          if-no-files-found: error
-          retention-days: 1
-
   gitcode-release-assets:
-    name: Publish GitCode asset (${{ matrix.file_name }})
+    name: Publish GitCode asset (${{ matrix.asset.file_name }})
     needs: prepare-release
     if: ${{ inputs.sync_files && needs.prepare-release.result == 'success' && needs.prepare-release.outputs.has_release_assets == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        file_name: ${{ fromJSON(needs.prepare-release.outputs.release_asset_matrix) }}
-    uses: nvdacn/sync_to_gitcode/.github/workflows/CreateReleaseOnGitCode.yaml@18b70112d0e62260bc54085028e5510bbc6323b2
-    with:
-      artifact_name: gitcode-release-assets
-      gitcode_repository: ${{ vars.GITCODE_REPOSITORY }}
-      default_branch: main
-      tag_name: ${{ needs.prepare-release.outputs.release_tag }}
-      body: ${{ needs.prepare-release.outputs.release_body }}
-      prerelease: ${{ needs.prepare-release.outputs.release_prerelease == 'true' }}
-      file_name: ${{ matrix.file_name }}
-    secrets:
-      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        asset: ${{ fromJSON(needs.prepare-release.outputs.release_asset_matrix) }}
+    steps:
+      - name: Download GitHub release asset
+        env:
+          ASSET_ID: ${{ matrix.asset.asset_id }}
+          EXPECTED_SIZE: ${{ matrix.asset.size }}
+          FILE_NAME: ${{ matrix.asset.file_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          mkdir release-asset
+          gh api \
+            -H "Accept: application/octet-stream" \
+            "/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
+            > "release-asset/$FILE_NAME"
+
+          actual_size="$(stat -c '%s' "release-asset/$FILE_NAME")"
+          if [[ "$actual_size" != "$EXPECTED_SIZE" ]]; then
+            echo "::error::Downloaded asset size mismatch for $FILE_NAME: expected $EXPECTED_SIZE, got $actual_size"
+            exit 1
+          fi
+
+      - name: Upload asset to GitCode
+        env:
+          FILE_NAME: ${{ matrix.asset.file_name }}
+          GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          upload_info="$(
+            curl -L -sS --fail-with-body --get \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "Accept: application/json" \
+              --data-urlencode "file_name=$FILE_NAME" \
+              "https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases/$RELEASE_TAG/upload_url"
+          )"
+          upload_url="$(jq -er '.url' <<< "$upload_info")"
+          curl_headers=()
+          while IFS= read -r header; do
+            if [[ -n "$header" ]]; then
+              curl_headers+=("-H" "$header")
+            fi
+          done < <(jq -r '.headers // {} | to_entries[] | "\(.key): \(.value)"' <<< "$upload_info")
+
+          upload_response="$(mktemp)"
+          upload_status="$(
+            curl -L -sS -o "$upload_response" -w "%{http_code}" \
+              -X PUT \
+              --retry 3 \
+              --retry-all-errors \
+              -T "release-asset/$FILE_NAME" \
+              "${curl_headers[@]}" \
+              "$upload_url"
+          )"
+          if [[ "$upload_status" != "200" ]]; then
+            echo "::error::Failed to upload $FILE_NAME. Response code: $upload_status"
+            cat "$upload_response"
+            exit 1
+          fi
+          echo "Uploaded $FILE_NAME successfully"
