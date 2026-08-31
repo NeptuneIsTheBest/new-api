@@ -187,7 +187,7 @@ function ApiKeysMobileList({
               )}
             </div>
 
-            <div className='border-border/60 space-y-1 border-t pt-2'>
+            <div className='border-border/60 flex flex-col gap-1 border-t pt-2'>
               <div className='text-muted-foreground text-xs'>{t('Usage')}</div>
               <ApiKeyUsageCell stats={apiKey.usage_stats} className='min-w-0' />
             </div>

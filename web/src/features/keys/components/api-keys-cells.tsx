@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Analytics01Icon } from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
 import { Check, Copy, Loader2 } from 'lucide-react'
 import { useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -36,7 +38,7 @@ import {
 import { toIntlLocale } from '@/i18n/languages'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
+import { formatNumber, formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -196,15 +198,7 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const quotaPerUnit = currencyConfig.quotaPerUnit
   const periodTokens = formatNumber(props.stats.period.total_tokens, locale)
-  const periodTokensDisplay = formatCompactNumber(
-    props.stats.period.total_tokens,
-    locale
-  )
   const cumulativeTokens = formatNumber(
-    props.stats.cumulative.total_tokens,
-    locale
-  )
-  const cumulativeTokensDisplay = formatCompactNumber(
     props.stats.cumulative.total_tokens,
     locale
   )
@@ -217,10 +211,6 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
       locale,
     }
   )
-  const periodCostDisplay = formatBillingCurrencyFromUSD(
-    props.stats.period.net_quota / quotaPerUnit,
-    { compact: true, locale }
-  )
   const cumulativeCost = formatBillingCurrencyFromUSD(
     props.stats.cumulative.net_quota / quotaPerUnit,
     {
@@ -230,34 +220,47 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
       locale,
     }
   )
-  const cumulativeCostDisplay = formatBillingCurrencyFromUSD(
-    props.stats.cumulative.net_quota / quotaPerUnit,
-    { compact: true, locale }
-  )
-  const title = `${t('Period')}: ${t('Tokens')} ${periodTokens}, ${t('Cost')} ${periodCost}; ${t('Total:')} ${cumulativeTokens}, ${cumulativeCost}`
+  const summary = `${t('Period')}: ${t('Tokens')} ${periodTokens}, ${t('Cost')} ${periodCost}; ${t('Total:')} ${t('Tokens')} ${cumulativeTokens}, ${t('Cost')} ${cumulativeCost}`
 
   return (
-    <div
-      className={cn('w-full min-w-[180px] space-y-1 text-xs', props.className)}
-      title={title}
-    >
-      <div className='grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2 gap-y-0.5'>
-        <span className='text-muted-foreground'>{t('Tokens')}</span>
-        <span className='truncate text-right font-mono font-medium tabular-nums'>
-          {periodTokensDisplay}
+    <Tooltip>
+      <TooltipTrigger
+        type='button'
+        aria-label={summary}
+        data-api-key-usage-cell=''
+        className={cn(
+          'focus-visible:ring-ring/50 flex w-full min-w-[240px] cursor-help items-center gap-3 rounded-md py-0.5 text-xs focus-visible:ring-[3px] focus-visible:outline-none [&_[data-icon]]:size-5 [&_[data-icon]]:shrink-0',
+          props.className
+        )}
+      >
+        <HugeiconsIcon
+          icon={Analytics01Icon}
+          strokeWidth={2}
+          aria-hidden='true'
+          data-icon='inline-start'
+          className='text-muted-foreground'
+        />
+        <span className='grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1'>
+          <span className='text-muted-foreground'>{t('Tokens')}</span>
+          <span
+            data-api-key-usage-value='tokens'
+            className='min-w-0 truncate text-right font-mono font-medium tabular-nums'
+          >
+            {periodTokens}
+          </span>
+          <span className='text-muted-foreground'>{t('Cost')}</span>
+          <span
+            data-api-key-usage-value='cost'
+            className='min-w-0 truncate text-right font-mono font-medium tabular-nums'
+          >
+            {periodCost}
+          </span>
         </span>
-        <span className='text-muted-foreground'>{t('Cost')}</span>
-        <span className='truncate text-right font-mono font-medium tabular-nums'>
-          {periodCostDisplay}
-        </span>
-      </div>
-      <div className='text-muted-foreground flex min-w-0 items-center justify-between gap-2'>
-        <span className='shrink-0'>{t('Total:')}</span>
-        <span className='truncate text-right font-mono tabular-nums'>
-          {cumulativeTokensDisplay} · {cumulativeCostDisplay}
-        </span>
-      </div>
-    </div>
+      </TooltipTrigger>
+      <TooltipContent role='tooltip' className='max-w-sm'>
+        {summary}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 

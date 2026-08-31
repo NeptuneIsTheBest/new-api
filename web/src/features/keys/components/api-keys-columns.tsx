@@ -196,7 +196,7 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
       header: t('Usage'),
       cell: ({ row }) => <ApiKeyUsageCell stats={row.original.usage_stats} />,
       enableSorting: false,
-      size: 220,
+      size: 280,
     },
     {
       accessorKey: 'group',
