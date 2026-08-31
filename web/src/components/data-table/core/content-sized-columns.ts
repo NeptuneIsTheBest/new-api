@@ -16,6 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-export function isContentSizedColumn(columnId: string): boolean {
-  return columnId === 'actions'
+import type { Column } from '@tanstack/react-table'
+
+export function isContentSizedColumn<TData, TValue>(
+  column: Column<TData, TValue>
+): boolean {
+  return column.id === 'actions' || column.columnDef.meta?.contentSized === true
 }

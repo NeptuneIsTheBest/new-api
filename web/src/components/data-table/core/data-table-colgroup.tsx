@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { Table as TanstackTable } from '@tanstack/react-table'
+import type { Column, Table as TanstackTable } from '@tanstack/react-table'
 
 import { isContentSizedColumn } from './content-sized-columns'
 
@@ -26,20 +26,13 @@ export function DataTableColgroup<TData>({
   table: TanstackTable<TData>
 }) {
   const columns = table.getVisibleLeafColumns()
-  const sizedColumns = columns.filter(
-    (column) => !isContentSizedColumn(column.id)
-  )
+  const sizedColumns = columns.filter((column) => !isContentSizedColumn(column))
   const totalSize = sizedColumns.reduce((sum, col) => sum + col.getSize(), 0)
 
   return (
     <colgroup>
       {columns.map((column) => {
-        const width = getColumnWidth(
-          table,
-          column.id,
-          column.getSize(),
-          totalSize
-        )
+        const width = getColumnWidth(table, column, totalSize)
 
         return <col key={column.id} style={{ width }} />
       })}
@@ -49,21 +42,20 @@ export function DataTableColgroup<TData>({
 
 function getColumnWidth<TData>(
   table: TanstackTable<TData>,
-  columnId: string,
-  columnSize: number,
+  column: Column<TData, unknown>,
   totalSize: number
 ) {
-  if (isContentSizedColumn(columnId)) {
+  if (isContentSizedColumn(column)) {
     return '1%'
   }
 
   if (table.options.enableColumnResizing === true) {
-    return `${columnSize}px`
+    return `${column.getSize()}px`
   }
 
   if (totalSize <= 0) {
     return undefined
   }
 
-  return `${(columnSize / totalSize) * 100}%`
+  return `${(column.getSize() / totalSize) * 100}%`
 }
