@@ -69,6 +69,9 @@ func RefreshCodexChannelCredential(ctx context.Context, channelID int, opts Code
 
 	oauthKey.AccessToken = res.AccessToken
 	oauthKey.RefreshToken = res.RefreshToken
+	if res.IDToken != "" {
+		oauthKey.IDToken = res.IDToken
+	}
 	oauthKey.LastRefresh = time.Now().Format(time.RFC3339)
 	oauthKey.Expired = res.ExpiresAt.Format(time.RFC3339)
 	if strings.TrimSpace(oauthKey.Type) == "" {
@@ -76,12 +79,16 @@ func RefreshCodexChannelCredential(ctx context.Context, channelID int, opts Code
 	}
 
 	if strings.TrimSpace(oauthKey.AccountID) == "" {
-		if accountID, ok := ExtractCodexAccountIDFromJWT(oauthKey.AccessToken); ok {
+		if accountID, ok := ExtractCodexAccountIDFromJWT(oauthKey.IDToken); ok {
+			oauthKey.AccountID = accountID
+		} else if accountID, ok := ExtractCodexAccountIDFromJWT(oauthKey.AccessToken); ok {
 			oauthKey.AccountID = accountID
 		}
 	}
 	if strings.TrimSpace(oauthKey.Email) == "" {
-		if email, ok := ExtractEmailFromJWT(oauthKey.AccessToken); ok {
+		if email, ok := ExtractEmailFromJWT(oauthKey.IDToken); ok {
+			oauthKey.Email = email
+		} else if email, ok := ExtractEmailFromJWT(oauthKey.AccessToken); ok {
 			oauthKey.Email = email
 		}
 	}

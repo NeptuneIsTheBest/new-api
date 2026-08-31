@@ -123,6 +123,9 @@ func fetchCodexChannelWhamData(
 		if refreshErr == nil {
 			oauthKey.AccessToken = res.AccessToken
 			oauthKey.RefreshToken = res.RefreshToken
+			if res.IDToken != "" {
+				oauthKey.IDToken = res.IDToken
+			}
 			oauthKey.LastRefresh = time.Now().Format(time.RFC3339)
 			oauthKey.Expired = res.ExpiresAt.Format(time.RFC3339)
 			if strings.TrimSpace(oauthKey.Type) == "" {

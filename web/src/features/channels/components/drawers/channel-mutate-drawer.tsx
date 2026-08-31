@@ -180,6 +180,7 @@ import {
 import type { Channel } from '../../types'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
+import { CodexOAuthDialog } from '../dialogs/codex-oauth-dialog'
 import { FetchModelsDialog } from '../dialogs/fetch-models-dialog'
 import {
   MissingModelsConfirmationDialog,
@@ -637,6 +638,7 @@ export function ChannelMutateDrawer({
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
   const [isCodexCredentialRefreshing, setIsCodexCredentialRefreshing] =
     useState(false)
+  const [codexOAuthDialogOpen, setCodexOAuthDialogOpen] = useState(false)
   const initialModelsRef = useRef<string[]>([])
   const initialModelMappingRef = useRef<string>('')
   const initialStatusCodeMappingRef = useRef<string>('')
@@ -3191,6 +3193,18 @@ export function ChannelMutateDrawer({
                                       )}
                                     </div>
                                     <div className='flex flex-wrap items-center gap-2'>
+                                      {canEditSensitive && (
+                                        <Button
+                                          type='button'
+                                          variant='outline'
+                                          size='sm'
+                                          onClick={() =>
+                                            setCodexOAuthDialogOpen(true)
+                                          }
+                                        >
+                                          {t('Authorize with ChatGPT')}
+                                        </Button>
+                                      )}
                                       {isEditing && channelId && (
                                         <Button
                                           type='button'
@@ -4866,6 +4880,20 @@ export function ChannelMutateDrawer({
           </SheetFooter>
         </SheetContent>
       </Sheet>
+
+      {canEditSensitive ? (
+        <CodexOAuthDialog
+          open={codexOAuthDialogOpen}
+          onOpenChange={setCodexOAuthDialogOpen}
+          channelId={isEditing && channelId ? channelId : undefined}
+          onCredentialGenerated={(credential) => {
+            form.setValue('key', credential, {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }}
+        />
+      ) : null}
 
       {paramOverrideEditorOpen && !sensitiveLocked && (
         <ParamOverrideEditorDialog
