@@ -27,6 +27,7 @@ import { Markdown } from '@/components/ui/markdown'
 import { formatTimestamp, formatTimestampToDate } from '@/lib/format'
 
 import { SettingsSection } from '../components/settings-section'
+import { isUpdateAvailable } from './version-check'
 
 type ReleaseInfo = {
   tag_name: string
@@ -75,7 +76,7 @@ export function UpdateCheckerSection({
         throw new Error(t('Unexpected release payload'))
       }
 
-      if (currentVersion && data.tag_name === currentVersion) {
+      if (!isUpdateAvailable(currentVersion, data.tag_name)) {
         toast.success(
           t('You are running the latest version ({{version}}).', {
             version: data.tag_name,
