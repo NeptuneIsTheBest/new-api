@@ -229,7 +229,7 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
         aria-label={summary}
         data-api-key-usage-cell=''
         className={cn(
-          'focus-visible:ring-ring/50 flex w-max max-w-60 cursor-help items-center gap-3 rounded-md py-0.5 text-xs focus-visible:ring-[3px] focus-visible:outline-none [&_[data-icon]]:size-5 [&_[data-icon]]:shrink-0',
+          'focus-visible:ring-ring/50 flex w-max min-w-full max-w-60 cursor-help items-center gap-3 rounded-md py-0.5 text-xs focus-visible:ring-[3px] focus-visible:outline-none [&_[data-icon]]:size-5 [&_[data-icon]]:shrink-0',
           props.className
         )}
       >
