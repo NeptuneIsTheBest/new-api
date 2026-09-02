@@ -1004,6 +1004,7 @@
     "Compliance confirmation required": "Cần xác nhận tuân thủ",
     "Compliance confirmed": "Đã xác nhận tuân thủ",
     "Compliance confirmed successfully": "Xác nhận tuân thủ thành công",
+    "Compress request bodies sent to the Codex upstream to reduce bandwidth usage": "Nén phần thân yêu cầu gửi đến dịch vụ Codex thượng nguồn bằng Zstd để giảm băng thông sử dụng",
     "Concatenate channel system prompt with user&apos;s prompt": "Nối lời nhắc hệ thống kênh với lời nhắc của người dùng",
     "Condition Path": "Đường dẫn điều kiện",
     "Condition Settings": "Cài đặt điều kiện",
@@ -5566,6 +5567,7 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Zstd Request Compression": "Nén yêu cầu bằng Zstd"
   }
 }

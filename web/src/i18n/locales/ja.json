@@ -1004,6 +1004,7 @@
     "Compliance confirmation required": "コンプライアンス確認が必要です",
     "Compliance confirmed": "コンプライアンス確認済み",
     "Compliance confirmed successfully": "コンプライアンス確認が完了しました",
+    "Compress request bodies sent to the Codex upstream to reduce bandwidth usage": "Codex アップストリームに送信するリクエスト本文を Zstd で圧縮し、帯域幅の使用量を削減します",
     "Concatenate channel system prompt with user&apos;s prompt": "チャネルのシステムプロンプトをユーザーのプロンプトと連結する",
     "Condition Path": "条件パス",
     "Condition Settings": "条件設定",
@@ -5566,6 +5567,7 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Zstd Request Compression": "Zstd リクエスト圧縮"
   }
 }

@@ -3,9 +3,11 @@ package codex
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -16,10 +18,23 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 )
 
 type Adaptor struct {
 }
+
+type zstdRequestBody struct {
+	common.ReplayableBody
+}
+
+func (zstdRequestBody) ContentEncoding() string {
+	return "zstd"
+}
+
+var getCodexRequestZstdEncoder = sync.OnceValues(func() (*zstd.Encoder, error) {
+	return zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+})
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
 	return nil, errors.New("codex channel: endpoint not supported")
@@ -110,7 +125,35 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
-	return channel.DoApiRequest(a, c, info, requestBody)
+	if !info.ChannelSetting.ZstdRequestCompressionEnabled || requestBody == nil {
+		return channel.DoApiRequest(a, c, info, requestBody)
+	}
+
+	data, err := io.ReadAll(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("codex channel: read request body for zstd compression: %w", err)
+	}
+	if len(data) == 0 {
+		return channel.DoApiRequest(a, c, info, strings.NewReader(""))
+	}
+
+	encoder, err := getCodexRequestZstdEncoder()
+	if err != nil {
+		return nil, fmt.Errorf("codex channel: create zstd request encoder: %w", err)
+	}
+	compressed := encoder.EncodeAll(data, nil)
+	data = nil
+	storage, err := common.CreateBodyStorage(compressed)
+	if err != nil {
+		return nil, fmt.Errorf("codex channel: store zstd request body: %w", err)
+	}
+	compressed = nil
+	defer storage.Close()
+
+	encodedBody := zstdRequestBody{
+		ReplayableBody: common.NewReplayableBodyReader(storage),
+	}
+	return channel.DoApiRequest(a, c, info, encodedBody)
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {

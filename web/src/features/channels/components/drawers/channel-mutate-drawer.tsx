@@ -295,6 +295,7 @@ const SENSITIVE_FORM_FIELDS = [
   'http_protocol',
   'http2_connection_shards',
   'pass_through_body_enabled',
+  'zstd_request_compression_enabled',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -349,6 +350,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.force_format ||
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
+    values.zstd_request_compression_enabled ||
     values.system_prompt_override ||
     values.force_include_obfuscation !== undefined ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
@@ -762,6 +764,9 @@ export function ChannelMutateDrawer({
   const currentForceFormat = form.watch('force_format')
   const currentThinkingToContent = form.watch('thinking_to_content')
   const currentPassThroughBodyEnabled = form.watch('pass_through_body_enabled')
+  const currentZstdRequestCompressionEnabled = form.watch(
+    'zstd_request_compression_enabled'
+  )
   const currentDisableTaskPollingSleep = form.watch(
     'disable_task_polling_sleep'
   )
@@ -1042,6 +1047,7 @@ export function ChannelMutateDrawer({
     currentForceFormat ||
     currentThinkingToContent ||
     currentPassThroughBodyEnabled ||
+    currentZstdRequestCompressionEnabled ||
     currentDisableTaskPollingSleep ||
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
@@ -4262,6 +4268,33 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              {currentType === 57 && (
+                                <FormField
+                                  control={form.control}
+                                  name='zstd_request_compression_enabled'
+                                  render={({ field }) => (
+                                    <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t('Zstd Request Compression')}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Compress request bodies sent to the Codex upstream to reduce bandwidth usage'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
 
                               <FormField
                                 control={form.control}

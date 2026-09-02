@@ -1004,6 +1004,7 @@
     "Compliance confirmation required": "Требуется подтверждение соответствия",
     "Compliance confirmed": "Соответствие подтверждено",
     "Compliance confirmed successfully": "Соответствие успешно подтверждено",
+    "Compress request bodies sent to the Codex upstream to reduce bandwidth usage": "Сжимать с помощью Zstd тела запросов, отправляемых вышестоящему сервису Codex, чтобы снизить расход трафика",
     "Concatenate channel system prompt with user&apos;s prompt": "Объединить системный промпт канала с промптом пользователя",
     "Condition Path": "Путь условия",
     "Condition Settings": "Настройки условия",
@@ -5566,6 +5567,7 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Zstd Request Compression": "Сжатие запросов Zstd"
   }
 }

@@ -25,6 +25,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type contentEncodedBody interface {
+	ContentEncoding() string
+}
+
 // ApplyUpstreamBodyMetadata restores metadata that net/http cannot infer from
 // a ReplayableBody. Callers must pass the original body because NewRequest
 // hides its dynamic type behind req.Body's io.ReadCloser wrapper.
@@ -326,13 +330,21 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
-	// 这样可以覆盖默认的 Authorization header 设置
+	// 在 SetupRequestHeader 之后应用 Header Override，使用户设置可以覆盖适配器默认 Header。
+	// 正文自身声明的 Content-Encoding 必须与实际字节一致，因此会在下方重新应用。
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
+	// The body encoding must describe the actual bytes on the wire. Apply it
+	// after header overrides so a configured override cannot desynchronize the
+	// Content-Encoding header from an internally encoded request body.
+	if encodedBody, ok := requestBody.(contentEncodedBody); ok {
+		if encoding := strings.TrimSpace(encodedBody.ContentEncoding()); encoding != "" {
+			req.Header.Set("Content-Encoding", encoding)
+		}
+	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)

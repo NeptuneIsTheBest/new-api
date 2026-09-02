@@ -1004,6 +1004,7 @@
     "Compliance confirmation required": "Compliance confirmation required",
     "Compliance confirmed": "Compliance confirmed",
     "Compliance confirmed successfully": "Compliance confirmed successfully",
+    "Compress request bodies sent to the Codex upstream to reduce bandwidth usage": "Compress request bodies sent to the Codex upstream to reduce bandwidth usage",
     "Concatenate channel system prompt with user&apos;s prompt": "Concatenate channel system prompt with user&apos;s prompt",
     "Condition Path": "Condition Path",
     "Condition Settings": "Condition Settings",
@@ -5566,6 +5567,7 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Zstd Request Compression": "Zstd Request Compression"
   }
 }

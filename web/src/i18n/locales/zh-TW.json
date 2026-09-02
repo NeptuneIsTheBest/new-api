@@ -1004,6 +1004,7 @@
     "Compliance confirmation required": "需要確認合規條款",
     "Compliance confirmed": "合規已確認",
     "Compliance confirmed successfully": "合規確認成功",
+    "Compress request bodies sent to the Codex upstream to reduce bandwidth usage": "使用 Zstd 壓縮傳送至 Codex 上游的請求主體，以降低頻寬使用量",
     "Concatenate channel system prompt with user&apos;s prompt": "將渠道系統提示與用戶的提示連接起來",
     "Condition Path": "條件路徑",
     "Condition Settings": "條件項設定",
@@ -5566,6 +5567,7 @@
     "Zero retention": "零數據保留",
     "Zhipu": "智譜",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "Zstd Request Compression": "Zstd 請求壓縮"
   }
 }
