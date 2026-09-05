@@ -30,10 +30,10 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            VERSION="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
           else
-            VERSION="$(git describe --tags)"
+            VERSION="$(git describe --tags --match 'v[0-9]*')"
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
