@@ -30,6 +30,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import { Separator } from '@/components/ui/separator'
 import {
   Tooltip,
   TooltipContent,
@@ -257,8 +258,39 @@ export function ApiKeyUsageCell(props: ApiKeyUsageCellProps) {
           </span>
         </span>
       </TooltipTrigger>
-      <TooltipContent role='tooltip' className='max-w-sm'>
-        {summary}
+      <TooltipContent
+        role='tooltip'
+        variant='card'
+        sideOffset={8}
+        className='w-72 max-w-[calc(100vw-2rem)]'
+      >
+        <div className='flex min-w-0 flex-col gap-2'>
+          <p className='font-medium'>{t('Period')}</p>
+          <dl className='grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-baseline gap-x-3 gap-y-1.5'>
+            <dt className='text-muted-foreground'>{t('Tokens')}</dt>
+            <dd className='min-w-0 text-right font-mono font-medium wrap-anywhere tabular-nums'>
+              {periodTokens}
+            </dd>
+            <dt className='text-muted-foreground'>{t('Cost')}</dt>
+            <dd className='min-w-0 text-right font-mono font-medium wrap-anywhere tabular-nums'>
+              {periodCost}
+            </dd>
+          </dl>
+        </div>
+        <Separator />
+        <div className='flex min-w-0 flex-col gap-2'>
+          <p className='font-medium'>{t('Total')}</p>
+          <dl className='grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-baseline gap-x-3 gap-y-1.5'>
+            <dt className='text-muted-foreground'>{t('Tokens')}</dt>
+            <dd className='min-w-0 text-right font-mono font-medium wrap-anywhere tabular-nums'>
+              {cumulativeTokens}
+            </dd>
+            <dt className='text-muted-foreground'>{t('Cost')}</dt>
+            <dd className='min-w-0 text-right font-mono font-medium wrap-anywhere tabular-nums'>
+              {cumulativeCost}
+            </dd>
+          </dl>
+        </div>
       </TooltipContent>
     </Tooltip>
   )
