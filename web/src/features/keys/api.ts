@@ -55,13 +55,14 @@ export async function getApiKeys(
   return res.data
 }
 
-// Search API keys by keyword or token (with pagination)
+// Search API keys by keyword, token, and groups (with pagination)
 export async function searchApiKeys(
   params: SearchApiKeysParams
 ): Promise<GetApiKeysResponse> {
   const {
     keyword = '',
     token = '',
+    groups = [],
     p,
     size,
     includeStats,
@@ -71,6 +72,7 @@ export async function searchApiKeys(
   const queryParams = new URLSearchParams()
   if (keyword) queryParams.set('keyword', keyword)
   if (token) queryParams.set('token', token)
+  for (const group of groups) queryParams.append('group', group)
   if (p != null) queryParams.set('p', String(p))
   if (size != null) queryParams.set('size', String(size))
   if (includeStats) queryParams.set('include_stats', 'true')

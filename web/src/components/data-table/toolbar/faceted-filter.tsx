@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type Column } from '@tanstack/react-table'
+import type { Column } from '@tanstack/react-table'
 import { Check as CheckIcon, PlusCircle as PlusCircledIcon } from 'lucide-react'
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
@@ -112,7 +112,12 @@ function DataTableFacetedFilterInner<TData, TValue>({
                       key={option.value}
                       className='rounded-sm px-1 font-normal'
                     >
-                      {t(option.label)}
+                      <span
+                        className='max-w-40 truncate'
+                        title={t(option.label)}
+                      >
+                        {t(option.label)}
+                      </span>
                     </Badge>
                   ))
               )}
@@ -128,9 +133,11 @@ function DataTableFacetedFilterInner<TData, TValue>({
             <CommandGroup>
               {options.map((option) => {
                 const isSelected = selectedValues.has(option.value)
+                const facetCount = facets?.get(option.value)
                 return (
                   <CommandItem
                     key={option.value}
+                    aria-checked={isSelected}
                     onSelect={() => handleOptionSelect(option.value)}
                   >
                     <div
@@ -143,28 +150,31 @@ function DataTableFacetedFilterInner<TData, TValue>({
                     >
                       <CheckIcon className={cn('text-background h-4 w-4')} />
                     </div>
-                    {option.iconNode ? (
+                    {Boolean(option.iconNode) && (
                       <span className='text-muted-foreground flex size-4 items-center justify-center'>
                         {option.iconNode}
                       </span>
-                    ) : option.icon ? (
+                    )}
+                    {!option.iconNode && option.icon && (
                       <option.icon className='text-muted-foreground size-4' />
-                    ) : null}
+                    )}
                     <span
                       className='min-w-0 flex-1 truncate'
                       title={t(option.label)}
                     >
                       {t(option.label)}
                     </span>
-                    {typeof option.count === 'number' ? (
+                    {typeof option.count === 'number' && (
                       <span className='text-muted-foreground ms-auto flex h-4 min-w-4 items-center justify-center font-mono text-xs'>
                         {option.count}
                       </span>
-                    ) : facets?.get(option.value) ? (
-                      <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
-                        {facets.get(option.value)}
-                      </span>
-                    ) : null}
+                    )}
+                    {typeof option.count !== 'number' &&
+                      Boolean(facetCount) && (
+                        <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
+                          {facetCount}
+                        </span>
+                      )}
                   </CommandItem>
                 )
               })}
@@ -209,5 +219,5 @@ function getNextSelectedValues(
     nextSelectedValues.add(optionValue)
   }
 
-  return Array.from(nextSelectedValues)
+  return [...nextSelectedValues]
 }

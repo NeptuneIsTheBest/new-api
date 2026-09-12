@@ -31,6 +31,7 @@ const apiKeySearchSchema = z.object({
     .catch([]),
   filter: z.string().optional().catch(''),
   token: z.string().optional().catch(''),
+  group: z.array(z.string()).optional().catch([]),
   statsStartTime: z.number().optional(),
   statsEndTime: z.number().optional(),
 })

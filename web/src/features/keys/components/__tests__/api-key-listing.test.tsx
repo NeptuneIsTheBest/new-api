@@ -305,12 +305,17 @@ function KeysPage() {
   )
 }
 
-async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
+async function renderKeysPage(
+  status = 1,
+  overrides: Partial<ApiKey> = {},
+  initialEntry = '/keys/',
+  total = 1
+) {
   let currentKey = { ...key, status, ...overrides }
   vi.mocked(api.get).mockImplementation(async (url) => {
     if (url.startsWith('/api/token/')) {
       return {
-        data: { success: true, data: { items: [currentKey], total: 1 } },
+        data: { success: true, data: { items: [currentKey], total } },
       }
     }
     return { data: { success: true, data: { default: { ratio: 1 } } } }
@@ -337,7 +342,7 @@ async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([keysRoute])]),
-    history: createMemoryHistory({ initialEntries: ['/keys/'] }),
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
   })
   await router.load()
   render(
@@ -350,6 +355,63 @@ async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
   await screen.findByText(currentKey.name)
   return { post, put, router }
 }
+
+it('selects multiple groups on the server, resets pagination and preserves search and statistics', async () => {
+  const { router } = await renderKeysPage(
+    1,
+    {},
+    '/keys/?page=2&filter=production&token=demo&statsStartTime=1700000000000&statsEndTime=1700086400000',
+    41
+  )
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'Group' }))
+  await user.click(screen.getByRole('option', { name: 'Follow user group' }))
+  expect(
+    screen.getByRole('option', { name: 'Follow user group' })
+  ).toHaveAttribute('aria-checked', 'true')
+  await user.click(screen.getByRole('option', { name: 'Cross-group' }))
+  await waitFor(() =>
+    expect(api.get).toHaveBeenCalledWith(
+      '/api/token/search?keyword=production&token=demo&group=&group=auto&p=1&size=20&include_stats=true&start_timestamp=1700000000&end_timestamp=1700086400'
+    )
+  )
+  expect(router.state.location.search).toMatchObject({
+    group: ['', 'auto'],
+    filter: 'production',
+    token: 'demo',
+    statsStartTime: 1700000000000,
+    statsEndTime: 1700086400000,
+  })
+  await user.keyboard('{Escape}')
+  expect(screen.getByRole('row', { name: /production/ })).toBeVisible()
+
+  await user.click(screen.getByRole('button', { name: /^Group/ }))
+  await user.click(screen.getByRole('option', { name: 'Clear filters' }))
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty('group')
+  )
+  await waitFor(() =>
+    expect(api.get).toHaveBeenCalledWith(
+      '/api/token/search?keyword=production&token=demo&p=1&size=20&include_stats=true&start_timestamp=1700000000&end_timestamp=1700086400'
+    )
+  )
+})
+
+it('restores a saved group filter even when that group is no longer offered', async () => {
+  await renderKeysPage(
+    1,
+    { group: 'retired' },
+    '/keys/?group=%5B%22retired%22%5D'
+  )
+  await userEvent.click(screen.getByRole('button', { name: /^Group/ }))
+  expect(screen.getByRole('option', { name: /^retired/ })).toHaveAttribute(
+    'aria-checked',
+    'true'
+  )
+  expect(api.get).toHaveBeenCalledWith(
+    expect.stringContaining('/api/token/search?group=retired&')
+  )
+})
 
 it.each([false, true])(
   'keeps period and cumulative usage alongside the new quota and time display (mobile=%s)',
@@ -551,8 +613,8 @@ it('keeps full mobile information without group or quota section headings', asyn
     expect(screen.getByText(zh.translation['Last Used'])).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Expires'])).toBeInTheDocument()
     expect(
-      screen.queryByText(zh.translation['Group'], { exact: true })
-    ).not.toBeInTheDocument()
+      screen.getAllByText(zh.translation['Group'], { exact: true })
+    ).toEqual([screen.getByRole('button', { name: zh.translation['Group'] })])
     expect(screen.getByText('default')).toBeInTheDocument()
     expect(screen.getByText('1x')).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Models'])).toBeInTheDocument()

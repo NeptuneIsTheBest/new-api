@@ -152,6 +152,8 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
     {
       accessorKey: 'group',
       header: t('Group'),
+      // Group filtering is applied by the server before pagination.
+      filterFn: () => true,
       cell: ({ row }) => {
         const apiKey = row.original
         const group = row.getValue('group') as string

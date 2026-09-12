@@ -20,7 +20,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { flexRender, type Table as TanstackTable } from '@tanstack/react-table'
 import { Database } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
@@ -42,8 +42,12 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { getUserGroups } from '@/lib/api'
 import dayjs from '@/lib/dayjs'
-import { createServerError } from '@/lib/server-error-message'
+import {
+  createServerError,
+  requireServerSuccess,
+} from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { getApiKeys, searchApiKeys } from '../api'
@@ -264,6 +268,7 @@ export function ApiKeysTable() {
     columnFilters: [
       { columnId: 'status', searchKey: 'status', type: 'array' },
       { columnId: '_tokenSearch', searchKey: 'token', type: 'string' },
+      { columnId: 'group', searchKey: 'group', type: 'array' },
     ],
   })
 
@@ -276,7 +281,29 @@ export function ApiKeysTable() {
     columnId: '_tokenSearch',
     onColumnFiltersChange,
   })
-  const shouldSearch = Boolean(globalFilter?.trim() || tokenFilter.trim())
+  const groupFilter = columnFilters.find((filter) => filter.id === 'group')
+    ?.value as string[] | undefined
+  const { data: groupsData } = useQuery({
+    queryKey: ['user-groups'],
+    queryFn: async () => requireServerSuccess(await getUserGroups()),
+    staleTime: 0,
+  })
+  const groupOptions = useMemo(() => {
+    const groups = new Set([
+      ...Object.keys(groupsData?.data ?? {}),
+      ...(groupFilter ?? []),
+    ])
+    groups.delete('')
+    groups.delete('auto')
+    return [
+      { label: t('Follow user group'), value: '' },
+      { label: t('Cross-group'), value: 'auto' },
+      ...[...groups].sort().map((group) => ({ label: group, value: group })),
+    ]
+  }, [groupsData, groupFilter, t])
+  const shouldSearch = Boolean(
+    globalFilter?.trim() || tokenFilter.trim() || groupFilter?.length
+  )
 
   // Fetch data with React Query
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
@@ -287,6 +314,7 @@ export function ApiKeysTable() {
       pagination.pageSize,
       globalFilter,
       tokenFilter,
+      groupFilter,
       statsStartTime,
       statsEndTime,
       refreshTrigger,
@@ -296,6 +324,7 @@ export function ApiKeysTable() {
         ? await searchApiKeys({
             keyword: globalFilter,
             token: tokenFilter,
+            groups: groupFilter,
             p: pagination.pageIndex + 1,
             size: pagination.pageSize,
             includeStats: true,
@@ -413,6 +442,11 @@ export function ApiKeysTable() {
           </>
         ),
         filters: [
+          {
+            columnId: 'group',
+            title: t('Group'),
+            options: groupOptions,
+          },
           {
             columnId: 'status',
             title: t('Status'),
