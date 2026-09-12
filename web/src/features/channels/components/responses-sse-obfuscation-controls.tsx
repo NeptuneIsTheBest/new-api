@@ -40,6 +40,7 @@ import type { ChannelFormValues } from '../lib'
 
 type ResponsesSSEObfuscationControlsProps = {
   control: Control<ChannelFormValues>
+  disabled?: boolean
 }
 
 export function ResponsesSSEObfuscationControls(
@@ -77,6 +78,7 @@ export function ResponsesSSEObfuscationControls(
                 </FormDescription>
               </div>
               <Select
+                disabled={props.disabled}
                 items={[
                   {
                     value: 'default',
@@ -145,7 +147,9 @@ export function ResponsesSSEObfuscationControls(
               <Switch
                 checked={field.value}
                 onCheckedChange={field.onChange}
-                disabled={forceIncludeObfuscation !== undefined}
+                disabled={
+                  props.disabled || forceIncludeObfuscation !== undefined
+                }
               />
             </FormControl>
           </FormItem>
