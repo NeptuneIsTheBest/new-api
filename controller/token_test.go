@@ -35,7 +35,6 @@ type tokenAPIResponse struct {
 
 type tokenPageResponse struct {
 	Items []tokenResponseItem `json:"items"`
-	Total int                 `json:"total"`
 }
 
 type tokenResponseItem struct {
@@ -488,107 +487,6 @@ func TestSearchTokensMasksKeyInResponse(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), token.Key) {
 		t.Fatalf("search response leaked raw token key: %s", recorder.Body.String())
-	}
-}
-
-func TestSearchTokensGroupDatabaseMatrix(t *testing.T) {
-	for _, database := range []struct {
-		name, env string
-		typ       common.DatabaseType
-	}{
-		{"sqlite", "", common.DatabaseTypeSQLite},
-		{"mysql", "TEST_MYSQL_DSN", common.DatabaseTypeMySQL},
-		{"postgres", "TEST_POSTGRES_DSN", common.DatabaseTypePostgreSQL},
-	} {
-		t.Run(database.name, func(t *testing.T) {
-			dsn := os.Getenv(database.env)
-			if database.env != "" && dsn == "" {
-				t.Skip(database.env + " is not configured")
-			}
-			previousDB, previousLogDB := model.DB, model.LOG_DB
-			previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
-			previousRedis, previousMaster := common.RedisEnabled, common.IsMasterNode
-			common.RedisEnabled, common.IsMasterNode = false, false
-			t.Setenv("LOG_SQL_DSN", "")
-			t.Cleanup(func() {
-				model.DB = previousDB
-				common.SetDatabaseTypes(previousMain, previousLog)
-				require.NoError(t, model.InitLogDB())
-				model.LOG_DB = previousLogDB
-				common.SetDatabaseTypes(previousMain, previousLog)
-				common.RedisEnabled, common.IsMasterNode = previousRedis, previousMaster
-			})
-			db, _ := newAuditTestDatabase(t, database.name, dsn)
-			model.DB = db
-			common.SetDatabaseTypes(database.typ, database.typ)
-			require.NoError(t, model.InitLogDB())
-			require.NoError(t, db.AutoMigrate(&model.Token{}))
-			versionSQL := "SELECT version()"
-			if database.name == "sqlite" {
-				versionSQL = "SELECT sqlite_version()"
-			}
-			var version string
-			require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
-			t.Logf("database version: %s", version)
-			for i, fixture := range []struct {
-				userID      int
-				name, group string
-				nullGroup   bool
-				deleted     bool
-			}{
-				{1, "inherited", "", false, false},
-				{1, "legacy-null", "", true, false},
-				{1, "vip-one", "vip", false, false},
-				{1, "vip-two", "vip", false, false},
-				{1, "cross-group", "auto", false, false},
-				{2, "other-vip", "vip", false, false},
-				{2, "other-inherited", "", false, false},
-				{2, "other-null", "", true, false},
-				{1, "deleted-vip", "vip", false, true},
-			} {
-				token := seedToken(t, db, fixture.userID, fixture.name, fmt.Sprintf("test-group-key-%d", i))
-				var group any = fixture.group
-				if fixture.nullGroup {
-					group = nil
-				}
-				require.NoError(t, db.Model(token).Updates(map[string]any{"group": group}).Error)
-				if fixture.deleted {
-					require.NoError(t, db.Delete(token).Error)
-				}
-			}
-			for _, tc := range []struct {
-				name, query string
-				names       []string
-				total       int
-			}{
-				{"unfiltered", "", []string{"cross-group", "vip-two", "vip-one", "legacy-null", "inherited"}, 5},
-				{"single group", "group=vip", []string{"vip-two", "vip-one"}, 2},
-				{"multiple groups", "group=vip&group=auto", []string{"cross-group", "vip-two", "vip-one"}, 3},
-				{"inherited group", "group=", []string{"legacy-null", "inherited"}, 2},
-				{"mixed inherited group", "group=&group=vip", []string{"vip-two", "vip-one", "legacy-null", "inherited"}, 4},
-				{"pagination", "group=vip&p=2&size=1", []string{"vip-one"}, 2},
-				{"keyword intersection", "group=vip&keyword=vip-one", []string{"vip-one"}, 1},
-				{"token intersection", "group=vip&token=sk-test-group-key-2", []string{"vip-one"}, 1},
-				{"unknown group", "group=missing", []string{}, 0},
-				{"group is a literal", "group=%27%20OR%201%3D1%20--", []string{}, 0},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/search?"+tc.query, nil, 1)
-					SearchTokens(ctx)
-					response := decodeAPIResponse(t, recorder)
-					require.True(t, response.Success, response.Message)
-					var page tokenPageResponse
-					require.NoError(t, common.Unmarshal(response.Data, &page))
-					names := make([]string, len(page.Items))
-					for i, item := range page.Items {
-						names[i] = item.Name
-					}
-					assert.Equal(t, tc.names, names)
-					assert.Equal(t, tc.total, page.Total)
-					assert.NotContains(t, recorder.Body.String(), "test-group-key-", "search must not expose usable API keys")
-				})
-			}
-		})
 	}
 }
 

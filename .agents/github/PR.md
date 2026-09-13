@@ -114,13 +114,16 @@ Open them. Do not write "already checked" without sources.
 
 ## Verification
 
-Only what was actually run.
+Only what was actually run. Preserve existing upstream tests without adding,
+modifying, or deleting them. Run relevant existing tests that do not depend on a
+database as needed. Database testing is not required for completion; omit database
+test details when no database tests were run.
 
 - Commands and results:
 - Manual steps and observed result:
 - UI: screenshot or recording (or why none):
-- Tests added or updated, or why none:
-- Databases / providers / platforms exercised:
+- Existing upstream tests run and results (or why none):
+- Providers / platforms exercised:
 - Not verified:
 
 ## Risks

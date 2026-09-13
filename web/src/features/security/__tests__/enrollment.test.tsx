@@ -17,14 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import {
-  act,
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -32,7 +25,6 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { OAUTH_POPUP_CALLBACK_MESSAGE } from '@/features/auth/constants'
 import type { UserProfile } from '@/features/profile/types'
 import { api } from '@/lib/api'
-import { STATUS_QUERY_KEY } from '@/lib/status-query'
 
 import { AccountBindings } from '../components/account-bindings'
 import { PasskeyCard } from '../components/passkey-card'
@@ -42,7 +34,6 @@ const credentialsDescriptor = Object.getOwnPropertyDescriptor(
   navigator,
   'credentials'
 )
-let queryClient: QueryClient
 const expiresAt = () => Math.floor(Date.now() / 1000) + 300
 const credential = {
   id: 'credential',
@@ -59,13 +50,6 @@ const credential = {
 }
 
 beforeEach(() => {
-  queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
-  queryClient.setQueryData(STATUS_QUERY_KEY, {
-    passkey_rp_ids: [window.location.hostname],
-    passkey_origins: window.location.origin,
-  })
   vi.stubGlobal(
     'PublicKeyCredential',
     class {
@@ -84,8 +68,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  cleanup()
-  queryClient.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   if (credentialsDescriptor) {
@@ -359,11 +341,7 @@ it('consumes Passkey authorization at setup and activates using only the dedicat
   })
   const success = vi.spyOn(toast, 'success')
   const user = userEvent.setup()
-  render(
-    <QueryClientProvider client={queryClient}>
-      <TwoFACard loading={false} />
-    </QueryClientProvider>
-  )
+  render(<TwoFACard loading={false} />)
   await user.click(await screen.findByRole('button', { name: 'Enable' }))
   await screen.findByText(
     'We will prompt your device to confirm using biometrics or your hardware key.'

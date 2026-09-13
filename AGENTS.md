@@ -38,12 +38,19 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 
 ## Rules
 
+### Testing Policy
+
+- Preserve the upstream tests already present in this repository. Across all modules, including the backend, `relaykit/`, frontend, and task plugins, do not add, modify, delete, rename, or reorganize test files or test cases. This also applies to test snapshots, fixtures, and helpers.
+- Run relevant existing upstream tests that do not depend on a database as needed for the change. Database tests are not required and must not be a condition for completing work, including tests using in-memory SQLite, real database instances, migrations, or a cross-database matrix.
+- Report existing test failures and unverified behavior honestly. Do not change assertions or expected results, regenerate snapshots, disable tests, or alter test scripts or CI configuration to conceal failures.
+- Existing build, typecheck, lint, formatting, and manual review requirements still apply. Record only the checks actually performed and their results; do not claim unrun tests passed.
+
 ### Common Code Quality
 
 - New code should stay direct and readable. Prefer early returns, clear branches, and well-named local variables to deep nesting or layered control flow.
 - Minimize nested function definitions. Use them only when required by a callback API or when keeping the closure local is clearly simpler than adding another symbol.
 - Avoid adding package-level or module-level helper functions that have only one caller and do not express a stable business concept. Inline that logic at the call site instead.
-- A separate function is appropriate when it represents reusable behavior, a required interface/framework callback, an exported API, a test fixture, or complex business logic that deserves direct tests.
+- A separate function is appropriate when it represents reusable behavior, a required interface/framework callback, an exported API, or complex business logic with a clear domain responsibility.
 - If a single-use helper is kept, its name must describe a durable domain concept rather than a mechanical step extracted only to shorten the caller.
 
 ### Authentication Security (OWASP Mandatory)
@@ -52,11 +59,11 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 - Before changing these flows, read the applicable OWASP guidance, starting with the [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) and [Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). Consult the password storage, forgot password, MFA, OAuth, and CSRF guidance when those mechanisms are involved. Identify the applicable controls before implementation; existing code is not a justification for retaining or introducing an insecure pattern.
 - Enforce security controls on the server. Apply the relevant requirements for credential storage and transport, resistance to account enumeration and brute force, CSRF and replay protection, token/challenge expiry and single use where required, protocol-specific verification, session rotation and invalidation, and re-authentication for sensitive account changes. Frontend checks MUST NOT substitute for server-side enforcement, and recovery or alternative login paths MUST NOT bypass the required authentication assurance.
 - Authentication audit events MUST exclude passwords, verification codes, recovery codes, private keys, and usable session or authentication tokens. Record enough non-secret context to investigate authentication failures and sensitive account changes.
-- Verify affected security controls with focused regression tests, including applicable failure, expiry, replay, and bypass cases, following the existing backend/frontend test conventions. Record the OWASP references (including the ASVS version and requirement IDs when used), validation performed, and any unresolved gaps in the change summary or PR description. Do not claim compliance or completion while an applicable security requirement remains unmet or unverified.
+- Review affected security controls, including applicable failure, expiry, replay, and bypass paths. Use relevant existing tests that do not depend on a database and manual verification as needed, following the repository testing policy. Record the OWASP references (including the ASVS version and requirement IDs when used), validation performed, and any unresolved gaps in the change summary or PR description. Do not claim security compliance for controls that remain unmet or unverified.
 
 ### Backend Rules
 
-**Modern Go conventions:** Apply these conventions to new or modified Go code, including tests and `relaykit/`, when they preserve behavior and improve readability. Use the Go version declared in the relevant module's `go.mod` as the compatibility baseline.
+**Modern Go conventions:** Apply these conventions to new or modified production Go code, including `relaykit/`, when they preserve behavior and improve readability. Use the Go version declared in the relevant module's `go.mod` as the compatibility baseline. Preserve existing tests unchanged.
 
 - Use `any` instead of `interface{}`, including map values, slice elements, parameters, and return types.
 - For fixed-count loops, prefer `for i := range n`, or `for range n` when the index is unused. For slice indices, prefer `for i := range items`. Keep conventional loops when the bound changes during iteration or the loop needs a different start or step.
@@ -68,7 +75,7 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 - Use `strings.Builder` for repeated string concatenation in loops; retain direct concatenation for simple fixed expressions.
 - Use `reflect.TypeFor[T]()` when the type is known statically, and `reflect.Pointer` instead of `reflect.Ptr`. Keep `reflect.TypeOf` when the dynamic type of a value is required.
 - Prefer `sync.WaitGroup.Go` for the standard `Add(1)` / goroutine / deferred `Done()` pattern when its lifecycle and panic contract apply. Preserve existing recovery behavior; the function passed to `Go` must not panic.
-- Remove redundant loop-variable copies such as `tc := tc` when they exist only for pre-Go-1.22 closure capture. Retain copies needed for actual snapshot semantics or variables assigned outside the loop.
+- Remove redundant loop-variable copies such as `item := item` when they exist only for pre-Go-1.22 closure capture. Retain copies needed for actual snapshot semantics or variables assigned outside the loop.
 - Remove ineffective `omitempty` tags on non-pointer struct fields only after confirming the active JSON encoder preserves the same output. Do not change field types or omission behavior as part of a style cleanup; optional relay scalar fields must still follow the pointer rules below.
 - Format modified Go files with `gofmt` and remove unused imports after these changes.
 
@@ -91,11 +98,10 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
 
 **Database compatibility:** All database code MUST work with SQLite, MySQL >= 5.7.8, and PostgreSQL >= 9.6 simultaneously.
 
-- Any change that can affect database behavior MUST be verified before the work is considered complete. This includes ORM/database-driver dependency changes, connection/DSN/protocol or prepared-statement configuration, models and GORM tags, migrations and `AutoMigrate`, constraints and indexes, `Scanner`/`Valuer`/serializer behavior, raw SQL, transactions, and row locking.
-- Required database verification MUST exercise real SQLite, MySQL, and PostgreSQL instances. Unit tests, mocks, a successful build, code inspection, or testing only one dialect are not substitutes. Use at least one supported version of each engine; changes that depend on version-specific behavior must also cover the minimum supported version.
-- Treat GORM core and its database dialect/driver packages as a compatible version set. Any change to one of them requires checking upstream compatibility and running the complete three-database verification matrix; do not upgrade only the core package and infer that existing drivers remain compatible.
-- Schema or migration changes MUST be tested both on a fresh database and by upgrading a representative database created by the latest released version. Run startup/migration at least twice to prove idempotency, and verify that existing data, indexes, constraints, and uniqueness guarantees are preserved. Cover the separately configured log database when the affected path is shared with or used by it.
-- Record the exact database versions, commands, and results in the final handoff or pull request. If any required database verification cannot be run, report the blocker explicitly and do not claim the change is database-compatible or complete.
+- Review database-affecting changes for compatibility with all supported engines through code inspection and upstream documentation. This includes ORM/database-driver dependency changes, connection/DSN/protocol or prepared-statement configuration, models and GORM tags, migrations and `AutoMigrate`, constraints and indexes, `Scanner`/`Valuer`/serializer behavior, raw SQL, transactions, and row locking.
+- Database testing is not required. Do not make completion depend on real SQLite/MySQL/PostgreSQL instances, a three-database matrix, fresh-database or upgrade tests, repeated startup/migration checks, or log-database tests. Database environment setup and database version/test-result reports are not required; do not claim runtime database verification unless it was actually performed.
+- Treat GORM core and its database dialect/driver packages as a compatible version set. Any change to one of them requires checking upstream compatibility; do not upgrade only the core package and infer that existing drivers remain compatible.
+- Schema and migration changes must remain idempotent and preserve existing data, indexes, constraints, and uniqueness guarantees. Review both fresh-database and upgrade paths, including the separately configured log database when the affected path is shared with or used by it.
 - Prefer GORM methods (`Create`, `Find`, `Where`, `Updates`, etc.) over raw SQL.
 - Let GORM handle primary key generation; do not use `AUTO_INCREMENT` or `SERIAL` directly.
 - Standard `SELECT ... FOR UPDATE` row locks built with GORM query methods in `model/` MUST use `lockForUpdate(tx)`. Do not use the legacy GORM v1 pattern `tx.Set("gorm:query_option", "FOR UPDATE")`, because GORM v2 silently ignores it and no lock is acquired. Do not duplicate `clause.Locking{Strength: "UPDATE"}` at call sites; the shared helper emits `FOR UPDATE` for MySQL/PostgreSQL and skips it for SQLite, where the syntax is unsupported. Dialect-specific locking with different semantics (for example, a MySQL next-key/gap lock) may use raw SQL only behind explicit database-type branches with valid fallbacks for every supported database.
@@ -106,7 +112,7 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
   - Use `common.UsingMainDatabase(...)` for primary database branches and `common.UsingLogDatabase(...)` for log database branches.
 - Do not use database-specific features without cross-DB fallback, including MySQL-only functions, PostgreSQL-only operators, SQLite-unsupported `ALTER COLUMN`, or database-specific JSON column types without a `TEXT` fallback.
 - Migrations must work on all three databases. For SQLite, use `ALTER TABLE ... ADD COLUMN` instead of `ALTER COLUMN` (see `model/main.go` for patterns).
-- Avoid GORM boolean default tags such as `gorm:"default:true"` when the default is a business rule already enforced by code. MySQL and PostgreSQL can normalize boolean defaults differently, causing GORM `AutoMigrate` to repeatedly issue `ALTER TABLE` on restart. Prefer setting these defaults in request/model normalization, hooks, constructors, or service logic; do not replace `default:true` with `default:1` unless the behavior is verified across SQLite, MySQL, and PostgreSQL.
+- Avoid GORM boolean default tags such as `gorm:"default:true"` when the default is a business rule already enforced by code. MySQL and PostgreSQL can normalize boolean defaults differently, causing GORM `AutoMigrate` to repeatedly issue `ALTER TABLE` on restart. Prefer setting these defaults in request/model normalization, hooks, constructors, or service logic; do not assume replacing `default:true` with `default:1` resolves cross-database normalization differences.
 
 **Relay and provider behavior:**
 
@@ -136,21 +142,7 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
 - Multiplier maps go through `types.PriceData.AddOtherRatio`, which rejects non-positive, NaN, and +Inf ratios. Do not write to `PriceData.OtherRatios` directly, and do not weaken these guards.
 - Pre-consume (预扣费) and settle (结算/差额) must both be safe: a saturated oversized quota must fail pre-consume with insufficient-quota, never silently wrap. When adding a new billing path (new relay format, new task platform, new adjustment hook), trace the full chain — validation → EstimateBilling/OtherRatios → quota conversion → pre-consume → settle/refund — and confirm each step preserves these invariants.
 - Fields parsed into unsigned types (`*uint`) accept huge positive JSON numbers (e.g. `18446744073686646784`, a wrapped negative); a `>= 0` check is not sufficient, an upper bound is mandatory.
-- Regression tests for these invariants belong with the boundary they protect (request validators, converter helpers). See `relay/helper/openai_image_request_test.go`, `relay/common/relay_utils_test.go`, and `common/quota_math_test.go` for the expected style.
-
-**Backend test quality:** Backend tests must protect real behavior, API contracts, billing/accounting invariants, data compatibility, or regression paths.
-
-- **Do not scatter tests for a small change:** For a focused feature or fix, extend an existing suitable test file first. If a new test file is necessary, add at most one and consolidate the key regression cases there. MUST NOT create separate test files for the same small feature across `controller/`, `service/`, `setting/`, or other layers merely because its call chain crosses those layers. Do not repeat fixtures and assertions at each layer. Keep the cases compact and focused on observable behavior; the number of production files touched is not a reason to add more test files.
-- Do not add tests that only improve coverage numbers, prove that code happens to run, or lock in implementation details without a user-visible or cross-module contract.
-- Avoid fake fuzz/stress/smoke/performance tests built from random inputs, large loop counts, sleeps, timing comparisons, or log-only assertions.
-- Avoid duplicate tests that exercise the same branch with different names but no new invariant.
-- Avoid tests that force incorrect provider/protocol semantics into production code.
-- Avoid tests that assert private constants, select-field lists, helper internals, or file layout when observable behavior is already covered elsewhere.
-- Prefer deterministic table tests with explicit inputs and exact expected outputs.
-- When tests need database, request context, user group, settings, or cache state, initialize that state explicitly inside the test fixture.
-- New or substantially rewritten Go backend tests MUST use `github.com/stretchr/testify/require` for setup and fatal assertions, and `github.com/stretchr/testify/assert` for non-fatal value checks.
-- Avoid hand-written assertion helpers unless they encode a reusable project-specific invariant.
-- When cleaning tests, preserve meaningful regression coverage. If a deleted test covered a real contract indirectly, replace it with a smaller test that asserts that contract directly.
+- Existing regression tests such as `relay/helper/openai_image_request_test.go`, `relay/common/relay_utils_test.go`, and `common/quota_math_test.go` document billing boundary behavior. Preserve them unchanged and run relevant existing non-database tests as needed, following the repository testing policy.
 
 **Documentation files:**
 

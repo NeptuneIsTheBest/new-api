@@ -23,11 +23,11 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { getTaskPluginOptions } from '../../api'
-import { CHANNEL_TYPE_TASK_PLUGIN } from '../../constants'
-import { ChannelTypeLogo, TaskPluginChannelBadge } from '../channel-type-badge'
+import { getTaskPluginOptions } from '../api'
+import { CHANNEL_TYPE_TASK_PLUGIN } from '../constants'
+import { ChannelTypeLogo, TaskPluginChannelBadge } from './channel-type-badge'
 
-vi.mock('../../api', () => ({ getTaskPluginOptions: vi.fn() }))
+vi.mock('../api', () => ({ getTaskPluginOptions: vi.fn() }))
 vi.mock('@/lib/lobe-icon', () => ({
   getLobeIcon: (name: string) => <svg data-testid={name} />,
 }))

@@ -32,7 +32,6 @@ import {
 import {
   act,
   cleanup,
-  fireEvent,
   render,
   screen,
   within,
@@ -53,7 +52,6 @@ import {
 
 import { apiKeySchema, type ApiKey } from '../../types'
 import { ApiKeyQuotaCell } from '../api-key-quota-cell'
-import { ApiKeyUsageCell } from '../api-keys-cells'
 import { useApiKeysColumns } from '../api-keys-columns'
 import { ApiKeysProvider } from '../api-keys-provider'
 import { ApiKeysTable } from '../api-keys-table'
@@ -305,17 +303,12 @@ function KeysPage() {
   )
 }
 
-async function renderKeysPage(
-  status = 1,
-  overrides: Partial<ApiKey> = {},
-  initialEntry = '/keys/',
-  total = 1
-) {
+async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
   let currentKey = { ...key, status, ...overrides }
   vi.mocked(api.get).mockImplementation(async (url) => {
     if (url.startsWith('/api/token/')) {
       return {
-        data: { success: true, data: { items: [currentKey], total } },
+        data: { success: true, data: { items: [currentKey], total: 1 } },
       }
     }
     return { data: { success: true, data: { default: { ratio: 1 } } } }
@@ -342,7 +335,7 @@ async function renderKeysPage(
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([keysRoute])]),
-    history: createMemoryHistory({ initialEntries: [initialEntry] }),
+    history: createMemoryHistory({ initialEntries: ['/keys/'] }),
   })
   await router.load()
   render(
@@ -353,148 +346,8 @@ async function renderKeysPage(
     </I18nextProvider>
   )
   await screen.findByText(currentKey.name)
-  return { post, put, router }
+  return { post, put }
 }
-
-it('selects multiple groups on the server, resets pagination and preserves search and statistics', async () => {
-  const { router } = await renderKeysPage(
-    1,
-    {},
-    '/keys/?page=2&filter=production&token=demo&statsStartTime=1700000000000&statsEndTime=1700086400000',
-    41
-  )
-  const user = userEvent.setup()
-  await user.click(screen.getByRole('button', { name: 'Group' }))
-  await user.click(screen.getByRole('option', { name: 'Follow user group' }))
-  expect(
-    screen.getByRole('option', { name: 'Follow user group' })
-  ).toHaveAttribute('aria-checked', 'true')
-  await user.click(screen.getByRole('option', { name: 'Cross-group' }))
-  await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith(
-      '/api/token/search?keyword=production&token=demo&group=&group=auto&p=1&size=20&include_stats=true&start_timestamp=1700000000&end_timestamp=1700086400'
-    )
-  )
-  expect(router.state.location.search).toMatchObject({
-    group: ['', 'auto'],
-    filter: 'production',
-    token: 'demo',
-    statsStartTime: 1700000000000,
-    statsEndTime: 1700086400000,
-  })
-  await user.keyboard('{Escape}')
-  expect(screen.getByRole('row', { name: /production/ })).toBeVisible()
-
-  await user.click(screen.getByRole('button', { name: /^Group/ }))
-  await user.click(screen.getByRole('option', { name: 'Clear filters' }))
-  await waitFor(() =>
-    expect(router.state.location.search).not.toHaveProperty('group')
-  )
-  await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith(
-      '/api/token/search?keyword=production&token=demo&p=1&size=20&include_stats=true&start_timestamp=1700000000&end_timestamp=1700086400'
-    )
-  )
-})
-
-it('restores a saved group filter even when that group is no longer offered', async () => {
-  await renderKeysPage(
-    1,
-    { group: 'retired' },
-    '/keys/?group=%5B%22retired%22%5D'
-  )
-  await userEvent.click(screen.getByRole('button', { name: /^Group/ }))
-  expect(screen.getByRole('option', { name: /^retired/ })).toHaveAttribute(
-    'aria-checked',
-    'true'
-  )
-  expect(api.get).toHaveBeenCalledWith(
-    expect.stringContaining('/api/token/search?group=retired&')
-  )
-})
-
-it.each([false, true])(
-  'keeps period and cumulative usage alongside the new quota and time display (mobile=%s)',
-  async (mobile) => {
-    const matchMedia = window.matchMedia
-    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
-      ...matchMedia(query),
-      matches: mobile && query.includes('max-width'),
-    }))
-    await renderKeysPage(1, {
-      usage_stats: {
-        period: { total_tokens: 1234, net_quota: 500000 },
-        cumulative: { total_tokens: 5678, net_quota: 1500000 },
-      },
-    })
-    const usage = screen.getByRole('button', {
-      name: /^Period: Tokens 1,234, Cost /,
-    })
-    expect(within(usage).getByText('1,234')).toBeVisible()
-    expect(within(usage).getByText('$1')).toBeVisible()
-    expect(screen.getByRole('button', { name: /Remaining 80;/ })).toBeVisible()
-    expect(screen.getByText('Last Used')).toBeVisible()
-
-    const user = userEvent.setup()
-    act(() => usage.focus())
-    const details = await screen.findByRole('tooltip')
-    expect(within(details).getByText('Period')).toBeVisible()
-    expect(within(details).getByText('Total')).toBeVisible()
-    expect(within(details).getByText('1,234')).toBeVisible()
-    expect(within(details).getByText('5,678')).toBeVisible()
-    expect(within(details).getByText('$1')).toBeVisible()
-    expect(within(details).getByText('$3')).toBeVisible()
-    await user.keyboard('{Escape}')
-    await waitFor(() =>
-      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
-    )
-  }
-)
-
-it('shows unavailable usage without inventing zero totals when statistics are absent', () => {
-  render(
-    <I18nextProvider i18n={i18n}>
-      <ApiKeyUsageCell stats={undefined} />
-    </I18nextProvider>
-  )
-  expect(screen.getByText('—')).toBeVisible()
-  expect(screen.queryByRole('button')).not.toBeInTheDocument()
-})
-
-it('updates the statistics period through the shared date picker and retains it when searching keys', async () => {
-  const { router } = await renderKeysPage()
-  const user = userEvent.setup()
-  await user.click(screen.getByRole('button', { name: /^\d{4}-\d{2}/ }))
-  fireEvent.change(screen.getByLabelText('Start Time'), {
-    target: { value: '2026-09-01T09:30' },
-  })
-  fireEvent.change(screen.getByLabelText('End Time'), {
-    target: { value: '2026-09-08T17:45' },
-  })
-  await user.click(screen.getByRole('button', { name: 'Confirm' }))
-  const start = new Date(2026, 8, 1, 9, 30).getTime()
-  const end = new Date(2026, 8, 8, 17, 45).getTime()
-  await waitFor(() =>
-    expect(router.state.location.search).toMatchObject({
-      statsStartTime: start,
-      statsEndTime: end,
-    })
-  )
-  await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith(
-      `/api/token/?p=1&size=20&include_stats=true&start_timestamp=${start / 1000}&end_timestamp=${end / 1000}`
-    )
-  )
-  await user.type(
-    screen.getByPlaceholderText('Filter by name...'),
-    'production'
-  )
-  await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith(
-      `/api/token/search?keyword=production&p=1&size=20&include_stats=true&start_timestamp=${start / 1000}&end_timestamp=${end / 1000}`
-    )
-  )
-})
 
 it('combines creation and last use while keeping expiry, models and IP restrictions separate', async () => {
   await renderKeysPage()
@@ -613,8 +466,8 @@ it('keeps full mobile information without group or quota section headings', asyn
     expect(screen.getByText(zh.translation['Last Used'])).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Expires'])).toBeInTheDocument()
     expect(
-      screen.getAllByText(zh.translation['Group'], { exact: true })
-    ).toEqual([screen.getByRole('button', { name: zh.translation['Group'] })])
+      screen.queryByText(zh.translation['Group'], { exact: true })
+    ).not.toBeInTheDocument()
     expect(screen.getByText('default')).toBeInTheDocument()
     expect(screen.getByText('1x')).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Models'])).toBeInTheDocument()

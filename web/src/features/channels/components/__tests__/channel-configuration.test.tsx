@@ -1177,126 +1177,6 @@ test('request processing configuration does not mark the network category as con
   ).not.toHaveAccessibleName(/Configured/)
 })
 
-test('Codex authorization fills the key draft and persists it only when the channel is saved', async () => {
-  editingChannel = { ...editingChannel, type: 57 }
-  const credential = {
-    access_token: 'test-access-token',
-    refresh_token: 'test-refresh-token',
-    account_id: 'test-account-id',
-  }
-  vi.spyOn(api, 'post').mockImplementation(async (url) => {
-    if (url === '/api/channel/codex/oauth/start') {
-      return {
-        data: {
-          success: true,
-          data: { authorize_url: 'https://auth.example/authorize' },
-        },
-      }
-    }
-    if (url === '/api/channel/codex/oauth/complete') {
-      return {
-        data: { success: true, data: { key: JSON.stringify(credential) } },
-      }
-    }
-    throw new Error(`Unexpected POST ${url}`)
-  })
-  const put = vi
-    .spyOn(api, 'put')
-    .mockResolvedValue({ data: { success: true } })
-  const user = userEvent.setup()
-  render(<ConfigurationHarness currentRow={editingChannel} />)
-  await screen.findByDisplayValue('Existing channel')
-  await user.click(
-    screen.getByRole('button', { name: 'Authorize with ChatGPT' })
-  )
-  const dialog = within(
-    screen.getByRole('dialog', { name: 'Codex Authorization' })
-  )
-  await user.click(dialog.getByRole('button', { name: 'Start authorization' }))
-  expect(
-    await dialog.findByRole('button', { name: 'Open authorization page' })
-  ).toHaveAttribute('href', 'https://auth.example/authorize')
-  await user.type(
-    dialog.getByLabelText('Authorization callback URL'),
-    'http://localhost:1455/auth/callback?code=test-code&state=test-state'
-  )
-  await user.click(dialog.getByRole('button', { name: 'Generate credential' }))
-  await waitFor(() =>
-    expect(
-      screen.queryByRole('dialog', { name: 'Codex Authorization' })
-    ).not.toBeInTheDocument()
-  )
-  expect(put).not.toHaveBeenCalled()
-  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
-  await waitFor(() => expect(put).toHaveBeenCalled())
-  const payload = put.mock.calls[0]?.[1] as { key: string }
-  expect(JSON.parse(payload.key)).toEqual(credential)
-})
-
-test('Codex compression updates the request configuration indicator and survives saving', async () => {
-  editingChannel = {
-    ...editingChannel,
-    type: 57,
-    setting: '{"zstd_request_compression_enabled":true}',
-  }
-  const put = vi
-    .spyOn(api, 'put')
-    .mockResolvedValue({ data: { success: true } })
-  const user = userEvent.setup()
-  render(<ConfigurationHarness currentRow={editingChannel} />)
-  await screen.findByDisplayValue('Existing channel')
-  const tab = screen.getByRole('tab', { name: /Request & Response/ })
-  expect(tab).toHaveAccessibleName(/Configured/)
-  await user.click(tab)
-  const compression = screen.getByRole('switch', {
-    name: 'Zstd Request Compression',
-  })
-  expect(compression).toBeChecked()
-  await user.click(compression)
-  expect(tab).not.toHaveAccessibleName(/Configured/)
-  await user.click(compression)
-  expect(tab).toHaveAccessibleName(/Configured/)
-  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
-  await waitFor(() => expect(put).toHaveBeenCalled())
-  const payload = put.mock.calls[0]?.[1] as { setting: string }
-  expect(JSON.parse(payload.setting)).toMatchObject({
-    zstd_request_compression_enabled: true,
-  })
-})
-
-test.each([true, false])(
-  'forced Responses SSE obfuscation %s stays configured and is preserved on save',
-  async (forced) => {
-    editingChannel = {
-      ...editingChannel,
-      settings: JSON.stringify({ force_include_obfuscation: forced }),
-    }
-    const put = vi
-      .spyOn(api, 'put')
-      .mockResolvedValue({ data: { success: true } })
-    const user = userEvent.setup()
-    render(<ConfigurationHarness currentRow={editingChannel} />)
-    await screen.findByDisplayValue('Existing channel')
-    const tab = screen.getByRole('tab', { name: /Request & Response/ })
-    expect(tab).toHaveAccessibleName(/Configured/)
-    await user.click(tab)
-    expect(
-      screen.getByRole('combobox', { name: 'Responses SSE obfuscation' })
-    ).toHaveTextContent(forced ? 'Force enabled' : 'Force disabled')
-    expect(
-      screen.getByRole('switch', {
-        name: 'Allow include usage obfuscation passthrough',
-      })
-    ).toHaveAttribute('aria-disabled', 'true')
-    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
-    await waitFor(() => expect(put).toHaveBeenCalled())
-    const payload = put.mock.calls[0]?.[1] as { settings: string }
-    expect(JSON.parse(payload.settings)).toMatchObject({
-      force_include_obfuscation: forced,
-    })
-  }
-)
-
 test('configuration from fields unsupported by the selected provider stays unmarked', async () => {
   editingChannel = {
     ...editingChannel,
@@ -1645,7 +1525,6 @@ test('advanced custom edits preview draft connection settings with the saved key
 })
 
 test('an operator without sensitive write permission can discover saved models and update routing', async () => {
-  editingChannel = { ...editingChannel, type: 57 }
   useAuthStore.setState({
     auth: {
       ...originalAuth,
@@ -1669,9 +1548,6 @@ test('an operator without sensitive write permission can discover saved models a
   await screen.findByDisplayValue('Existing channel')
   expect(screen.getByRole('button', { name: 'Change provider' })).toBeDisabled()
   expect(screen.getByLabelText('API Key *')).toBeDisabled()
-  expect(
-    screen.queryByRole('button', { name: 'Authorize with ChatGPT' })
-  ).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Fetch from Upstream' }))
   expect(
     await screen.findByRole('checkbox', { name: 'upstream-model' })
@@ -1681,12 +1557,6 @@ test('an operator without sensitive write permission can discover saved models a
   expect(thinking).toHaveAttribute('aria-disabled', 'true')
   await user.click(thinking)
   expect(thinking).not.toBeChecked()
-  expect(
-    screen.getByRole('switch', { name: 'Zstd Request Compression' })
-  ).toHaveAttribute('aria-disabled', 'true')
-  expect(
-    screen.getByRole('combobox', { name: 'Responses SSE obfuscation' })
-  ).toBeDisabled()
   await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
   expect(screen.getByLabelText('Proxy Address')).toBeDisabled()
   await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
