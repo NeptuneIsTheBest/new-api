@@ -247,8 +247,8 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		defer form.RemoveAll()
-		var body bytes.Buffer
+		var body common.BodyStorageWriter
+		defer body.Close()
 		writer := multipart.NewWriter(&body)
 		for _, part := range descriptor.Parts {
 			if part.FileRef == "" {
@@ -301,7 +301,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 			return nil, err
 		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-		return bytes.NewReader(body.Bytes()), nil
+		return body.Finish()
 	}
 	if descriptor.Body == nil {
 		return nil, nil
@@ -337,7 +337,6 @@ func inlineJSONFilePlaceholders(c *gin.Context, body any) (any, error) {
 			return nil, parseErr
 		}
 		form = parsed
-		defer form.RemoveAll()
 	}
 	limit := maxInlineFileBytes()
 	var total int64
@@ -1307,7 +1306,6 @@ func (a *TaskAdaptor) submitContext(c *gin.Context, info *relaycommon.RelayInfo)
 			requestHeaders["Accept"] = c.GetHeader("Accept")
 			if strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") {
 				if form, err := common.ParseMultipartFormReusable(c); err == nil {
-					defer form.RemoveAll()
 					for field, headers := range form.File {
 						for _, header := range headers {
 							files = append(files, map[string]any{"ref": "request_file:" + field, "field": field, "filename": header.Filename, "mimeType": header.Header.Get("Content-Type"), "size": header.Size})

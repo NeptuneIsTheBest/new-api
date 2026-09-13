@@ -905,7 +905,6 @@ func buildTaskPluginRouteRequest(c *gin.Context) (pluginruntime.RouteRequestCont
 		if parseErr != nil {
 			return requestContext, parseErr
 		}
-		defer form.RemoveAll()
 		if err = validateTaskPluginFields(form.Value); err != nil {
 			return requestContext, err
 		}

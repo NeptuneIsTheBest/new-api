@@ -343,6 +343,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "build_request_failed", http.StatusInternalServerError)
 	}
+	if storage, ok := requestBody.(common.BodyStorage); ok {
+		defer storage.Close()
+	}
 
 	// 9. 发送请求
 	resp, err := adaptor.DoRequest(c, info, requestBody)

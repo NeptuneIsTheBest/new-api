@@ -40,6 +40,122 @@ type ReplayableBody interface {
 // ErrStorageClosed 存储已关闭错误
 var ErrStorageClosed = fmt.Errorf("body storage is closed")
 
+// BodyStorageWriter builds an outbound body without buffering the entire payload
+// before spilling to disk. Its zero value is ready to use. It is request-local
+// and must not be used concurrently. Defer Close to discard an unfinished body;
+// Finish transfers ownership of the returned body to the caller.
+type BodyStorageWriter struct {
+	buffer     bytes.Buffer
+	disk       *diskStorage
+	memoryOnly bool
+	closed     bool
+	err        error
+}
+
+func (w *BodyStorageWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	if w.closed {
+		return 0, ErrStorageClosed
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if w.disk != nil && !IsDiskCacheAvailable(int64(len(p))) {
+		// Capacity can run out while another request is being built. Retain
+		// the usual memory fallback, recovering the complete prefix first.
+		data, err := w.disk.Bytes()
+		if err != nil {
+			w.err = err
+			_ = w.Close()
+			return 0, err
+		}
+		_ = w.disk.Close()
+		w.disk = nil
+		w.buffer = *bytes.NewBuffer(data)
+		w.memoryOnly = true
+	}
+
+	if w.disk == nil && !w.memoryOnly && ShouldUseDiskCache(int64(w.buffer.Len())+int64(len(p))) {
+		path, file, err := CreateDiskCacheFile(DiskCacheTypeBody)
+		if err != nil {
+			SysError(fmt.Sprintf("failed to create outbound body storage, falling back to memory: %v", err))
+			w.memoryOnly = true
+		} else {
+			w.disk = &diskStorage{file: file, filePath: path}
+			IncrementDiskFiles(0)
+			n, err := file.Write(w.buffer.Bytes())
+			w.disk.size = int64(n)
+			atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, int64(n))
+			if err == nil && n != w.buffer.Len() {
+				err = io.ErrShortWrite
+			}
+			w.buffer = bytes.Buffer{}
+			if err != nil {
+				w.err = err
+				_ = w.Close()
+				return 0, err
+			}
+		}
+	}
+
+	if w.disk == nil {
+		return w.buffer.Write(p)
+	}
+	n, err := w.disk.file.Write(p)
+	w.disk.size += int64(n)
+	atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, int64(n))
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.err = err
+		_ = w.Close()
+	}
+	return n, err
+}
+
+// Finish returns a *bytes.Buffer for an in-memory body, preserving existing
+// adaptor behavior. A disk-backed body is a BodyStorage; its caller must close
+// it after the upstream attempt. ApplyUpstreamBodyMetadata keeps net/http from
+// closing that storage prematurely and provides independent replay readers.
+func (w *BodyStorageWriter) Finish() (io.Reader, error) {
+	if w.err != nil {
+		return nil, w.err
+	}
+	if w.closed {
+		return nil, ErrStorageClosed
+	}
+	if w.disk != nil {
+		if _, err := w.disk.Seek(0, io.SeekStart); err != nil {
+			w.err = err
+			_ = w.Close()
+			return nil, err
+		}
+		body := w.disk
+		w.disk = nil
+		w.closed = true
+		return body, nil
+	}
+	body := bytes.NewBuffer(w.buffer.Bytes())
+	w.buffer = bytes.Buffer{}
+	w.closed = true
+	return body, nil
+}
+
+func (w *BodyStorageWriter) Close() error {
+	w.closed = true
+	w.buffer = bytes.Buffer{}
+	if w.disk != nil {
+		err := w.disk.Close()
+		w.disk = nil
+		return err
+	}
+	return nil
+}
+
 // memoryStorage 内存存储实现
 type memoryStorage struct {
 	data   []byte

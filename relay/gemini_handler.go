@@ -27,13 +27,19 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewErrorWithStatusCode(fmt.Errorf("invalid request type, expected *dto.GeminiChatRequest, got %T", info.Request), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 
-	request, err := common.DeepCopy(geminiReq)
-	if err != nil {
-		return types.NewError(fmt.Errorf("failed to copy request to GeminiChatRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	passThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled
+	requestCopy := *geminiReq
+	request := &requestCopy
+	if !passThrough {
+		var err error
+		request, err = common.DeepCopy(geminiReq)
+		if err != nil {
+			return types.NewError(fmt.Errorf("failed to copy request to GeminiChatRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
 	}
 
 	// model mapped 模型映射
-	err = helper.ModelMappedHelper(c, info, request)
+	err := helper.ModelMappedHelper(c, info, request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
@@ -48,7 +54,12 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 	adaptor.Init(info)
 
-	if info.ChannelSetting.SystemPrompt != "" {
+	// Only the local model metadata may change on the shallow pass-through
+	// copy; its system instruction and content still belong to the original.
+	if passThrough && info.ChannelSetting.SystemPrompt != "" && request.SystemInstructions != nil && len(request.SystemInstructions.Parts) > 0 && info.ChannelSetting.SystemPromptOverride {
+		common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+	}
+	if !passThrough && info.ChannelSetting.SystemPrompt != "" {
 		if request.SystemInstructions == nil {
 			request.SystemInstructions = &dto.GeminiChatContent{
 				Parts: []dto.GeminiPart{
@@ -75,7 +86,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	// Clean up empty system instruction
-	if request.SystemInstructions != nil {
+	if !passThrough && request.SystemInstructions != nil {
 		hasContent := false
 		for _, part := range request.SystemInstructions.Parts {
 			if part.Text != "" {
@@ -89,7 +100,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if passThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())

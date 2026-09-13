@@ -1,9 +1,12 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1089,10 +1092,16 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 		return jsonData, nil
 	}
 
-	// Keep large message/input payloads encoded while filtering control fields.
-	var data map[string]json.RawMessage
-	if err := common.Unmarshal(jsonData, &data); err != nil {
+	// Validate with the host codec while skipping field values. Decoding into
+	// RawMessage would copy every large message/input before encoding it again.
+	var object struct{}
+	if err := common.Unmarshal(jsonData, &object); err != nil {
 		common.SysError("RemoveDisabledFields Unmarshal error :" + err.Error())
+		return jsonData, nil
+	}
+	data, err := rawJSONObjectFields(jsonData)
+	if err != nil {
+		common.SysError("RemoveDisabledFields object error :" + err.Error())
 		return jsonData, nil
 	}
 
@@ -1124,8 +1133,8 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 	// 默认移除 stream_options.include_obfuscation，除非明确允许（避免关闭响应流混淆保护）
 	if !channelOtherSettings.AllowIncludeObfuscation {
 		if raw := data["stream_options"]; common.GetJsonType(raw) == "object" {
-			var streamOptions map[string]json.RawMessage
-			if err := common.Unmarshal(raw, &streamOptions); err != nil {
+			streamOptions, err := rawJSONObjectFields(raw)
+			if err != nil {
 				common.SysError("RemoveDisabledFields stream_options Unmarshal error :" + err.Error())
 				return jsonData, nil
 			}
@@ -1134,7 +1143,7 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 			if len(streamOptions) == 0 {
 				delete(data, "stream_options")
 			} else if includeExists {
-				filtered, err := common.Marshal(streamOptions)
+				filtered, err := marshalRawJSONObject(streamOptions)
 				if err != nil {
 					common.SysError("RemoveDisabledFields stream_options Marshal error :" + err.Error())
 					return jsonData, nil
@@ -1144,12 +1153,96 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 		}
 	}
 
-	jsonDataAfter, err := common.Marshal(data)
+	jsonDataAfter, err := marshalRawJSONObject(data)
 	if err != nil {
 		common.SysError("RemoveDisabledFields Marshal error :" + err.Error())
 		return jsonData, nil
 	}
 	return jsonDataAfter, nil
+}
+
+// rawJSONObjectFields retains views into an already validated JSON object.
+// Decode only the names so escaped keys and duplicate keys retain the host
+// codec's last-value-wins behavior, without copying the raw field payloads.
+func rawJSONObjectFields(data []byte) (map[string][]byte, error) {
+	fields := make(map[string][]byte)
+	depth := 0
+	quoted, escaped := false, false
+	keyStart, keyEnd, valueStart := -1, -1, -1
+	for i, current := range data {
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if current == '\\' {
+				escaped = true
+			} else if current == '"' {
+				quoted = false
+				if depth == 1 && keyEnd < 0 {
+					keyEnd = i + 1
+				}
+			}
+			continue
+		}
+		if depth == 1 && keyEnd >= 0 && valueStart < 0 {
+			switch current {
+			case ':', ' ', '\t', '\n', '\r':
+			default:
+				valueStart = i
+			}
+		}
+		if depth == 1 && (current == ',' || current == '}') {
+			if keyStart >= 0 {
+				if keyEnd <= keyStart || valueStart < keyEnd {
+					return nil, fmt.Errorf("invalid JSON object field")
+				}
+				var name string
+				if err := common.Unmarshal(data[keyStart:keyEnd], &name); err != nil {
+					return nil, err
+				}
+				fields[name] = bytes.TrimSpace(data[valueStart:i])
+			}
+			keyStart, keyEnd, valueStart = -1, -1, -1
+		}
+		switch current {
+		case '"':
+			quoted = true
+			if depth == 1 && keyStart < 0 {
+				keyStart = i
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		}
+	}
+	return fields, nil
+}
+
+// marshalRawJSONObject writes validated raw values into one exactly sized
+// output buffer. Keys use the usual codec and ordering; values stay encoded.
+func marshalRawJSONObject(fields map[string][]byte) ([]byte, error) {
+	names := slices.Sorted(maps.Keys(fields))
+	keys := make([][]byte, len(names))
+	size := 2 + max(len(names)-1, 0)
+	for i, name := range names {
+		key, err := common.Marshal(name)
+		if err != nil {
+			return nil, err
+		}
+		keys[i] = key
+		size += len(key) + 1 + len(fields[name])
+	}
+	data := make([]byte, 0, size)
+	data = append(data, '{')
+	for i, name := range names {
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, keys[i]...)
+		data = append(data, ':')
+		data = append(data, fields[name]...)
+	}
+	return append(data, '}'), nil
 }
 
 func hasRemovableDisabledField(jsonData []byte, channelOtherSettings dto.ChannelOtherSettings) bool {

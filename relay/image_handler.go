@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,9 +74,12 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
-		switch convertedRequest.(type) {
-		case *bytes.Buffer:
-			requestBody = convertedRequest.(io.Reader)
+		switch converted := convertedRequest.(type) {
+		case io.Reader:
+			requestBody = converted
+			if storage, ok := converted.(common.BodyStorage); ok {
+				defer storage.Close()
+			}
 		default:
 			jsonData, err = common.Marshal(convertedRequest)
 			if err != nil {

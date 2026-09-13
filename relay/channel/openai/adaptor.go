@@ -9,7 +9,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -444,10 +443,13 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 		return bytes.NewReader(jsonData), nil
 	} else {
-		var requestBody bytes.Buffer
+		var requestBody common.BodyStorageWriter
+		defer requestBody.Close()
 		writer := multipart.NewWriter(&requestBody)
 
-		writer.WriteField("model", request.Model)
+		if err := writer.WriteField("model", request.Model); err != nil {
+			return nil, err
+		}
 
 		formData, err2 := common.ParseMultipartFormReusable(c)
 		if err2 != nil {
@@ -463,7 +465,9 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 				continue
 			}
 			for _, value := range values {
-				writer.WriteField(key, value)
+				if err := writer.WriteField(key, value); err != nil {
+					return nil, err
+				}
 				logger.LogDebug(c.Request.Context(), "--form '%s=\"%s\"'", key, value)
 			}
 		}
@@ -494,10 +498,12 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 
 		// 关闭 multipart 编写器以设置分界线
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		logger.LogDebug(c.Request.Context(), "--header 'Content-Type: %s'", writer.FormDataContentType())
-		return &requestBody, nil
+		return requestBody.Finish()
 	}
 }
 
@@ -508,20 +514,17 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 			return request, nil
 		}
 
-		var requestBody bytes.Buffer
+		var requestBody common.BodyStorageWriter
+		defer requestBody.Close()
 		writer := multipart.NewWriter(&requestBody)
 
-		writer.WriteField("model", request.Model)
+		if err := writer.WriteField("model", request.Model); err != nil {
+			return nil, err
+		}
 		// 使用已解析的 multipart 表单，避免重复解析
-		mf := c.Request.MultipartForm
-		if mf == nil {
-			form, err := common.ParseMultipartFormReusable(c)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse multipart form: %w", err)
-			}
-			c.Request.MultipartForm = form
-			c.Request.PostForm = url.Values(form.Value)
-			mf = form
+		mf, err := common.ParseMultipartFormReusable(c)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse multipart form: %w", err)
 		}
 
 		// 写入所有非文件字段
@@ -531,7 +534,9 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 					continue
 				}
 				for _, value := range values {
-					writer.WriteField(key, value)
+					if err := writer.WriteField(key, value); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -584,10 +589,12 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 				part, err := writer.CreatePart(h)
 				if err != nil {
+					_ = file.Close()
 					return nil, fmt.Errorf("create form part failed for image %d: %w", i, err)
 				}
 
 				if _, err := io.Copy(part, file); err != nil {
+					_ = file.Close()
 					return nil, fmt.Errorf("copy file failed for image %d: %w", i, err)
 				}
 
@@ -613,10 +620,12 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 				maskPart, err := writer.CreatePart(h)
 				if err != nil {
+					_ = maskFile.Close()
 					return nil, errors.New("create form file failed for mask")
 				}
 
 				if _, err := io.Copy(maskPart, maskFile); err != nil {
+					_ = maskFile.Close()
 					return nil, errors.New("copy mask file failed")
 				}
 				_ = maskFile.Close()
@@ -626,9 +635,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 
 		// 关闭 multipart 编写器以设置分界线
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-		return &requestBody, nil
+		return requestBody.Finish()
 
 	default:
 		return request, nil
