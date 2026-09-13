@@ -12,9 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo) (billingexpr.RequestInput, error) {
+// ResolveIncomingBillingExprRequestInput includes the body by default. Callers
+// without a param() dependency can opt out of reading or copying it.
+func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.RelayInfo, includeBody ...bool) (billingexpr.RequestInput, error) {
+	readBody := len(includeBody) == 0 || includeBody[0]
 	if info != nil && info.BillingRequestInput != nil {
-		input := cloneRequestInput(*info.BillingRequestInput)
+		input := cloneRequestInput(*info.BillingRequestInput, readBody)
 		merged := cloneStringMap(info.RequestHeaders)
 		maps.Copy(merged, input.Headers)
 		input.Headers = merged
@@ -24,6 +27,9 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 	input := billingexpr.RequestInput{}
 	if info != nil {
 		input.Headers = cloneStringMap(info.RequestHeaders)
+	}
+	if !readBody {
+		return input, nil
 	}
 
 	bodyBytes, err := readIncomingBillingExprBody(c)
@@ -37,7 +43,8 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 // ResolveImageBillingRequestInput freezes only the validated scalar image
 // parameters needed by pricing. Image files, prompts and base64 payloads are
 // deliberately excluded, including for multipart edits.
-func ResolveImageBillingRequestInput(c *gin.Context, info *relaycommon.RelayInfo, input billingexpr.RequestInput) (billingexpr.RequestInput, error) {
+// Pass false to skip encoding the scalar body when param() is unused.
+func ResolveImageBillingRequestInput(c *gin.Context, info *relaycommon.RelayInfo, input billingexpr.RequestInput, includeBody ...bool) (billingexpr.RequestInput, error) {
 	request, ok := info.Request.(*dto.ImageRequest)
 	if !ok {
 		return input, nil
@@ -53,6 +60,11 @@ func ResolveImageBillingRequestInput(c *gin.Context, info *relaycommon.RelayInfo
 	topLevelCount, err := request.ImageCount(false)
 	if err != nil {
 		return input, err
+	}
+	if len(includeBody) > 0 && !includeBody[0] {
+		input.Body = nil
+		input.ImageCount = &count
+		return input, nil
 	}
 	body := map[string]any{"model": request.Model, "n": topLevelCount, "size": request.Size, "quality": request.Quality}
 	if request.BillingParameters != nil {
@@ -94,7 +106,7 @@ func readIncomingBillingExprBody(c *gin.Context) ([]byte, error) {
 	return storage.Bytes()
 }
 
-func cloneRequestInput(src billingexpr.RequestInput) billingexpr.RequestInput {
+func cloneRequestInput(src billingexpr.RequestInput, includeBody bool) billingexpr.RequestInput {
 	input := billingexpr.RequestInput{
 		Headers: cloneStringMap(src.Headers),
 	}
@@ -102,7 +114,7 @@ func cloneRequestInput(src billingexpr.RequestInput) billingexpr.RequestInput {
 		count := *src.ImageCount
 		input.ImageCount = &count
 	}
-	if len(src.Body) > 0 {
+	if includeBody && len(src.Body) > 0 {
 		input.Body = append([]byte(nil), src.Body...)
 	}
 	return input

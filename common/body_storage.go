@@ -82,6 +82,9 @@ func (m *memoryStorage) Close() error {
 	defer m.mu.Unlock()
 	if atomic.CompareAndSwapInt32(&m.closed, 0, 1) {
 		DecrementMemoryBuffers(m.size)
+		// Existing replay readers retain their own references to the payload.
+		m.data = nil
+		m.reader = nil
 	}
 	return nil
 }
@@ -156,15 +159,24 @@ func newDiskStorage(data []byte, cachePath string) (*diskStorage, error) {
 	}, nil
 }
 
-func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string) (*diskStorage, error) {
+func newDiskStorageFromReader(reader io.Reader, maxBytes int64, prefix []byte) (*diskStorage, error) {
+	if int64(len(prefix)) > maxBytes {
+		return nil, ErrRequestBodyTooLarge
+	}
 	// 使用统一的缓存目录管理
 	filePath, file, err := CreateDiskCacheFile(DiskCacheTypeBody)
 	if err != nil {
 		return nil, err
 	}
 
-	// 从 reader 读取并写入文件
-	written, err := io.Copy(file, io.LimitReader(reader, maxBytes+1))
+	// Write the buffered prefix once instead of copying it in small chunks.
+	n, err := file.Write(prefix)
+	written := int64(n)
+	if err == nil {
+		var copied int64
+		copied, err = io.Copy(file, io.LimitReader(reader, maxBytes+1-written))
+		written += copied
+	}
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
@@ -230,26 +242,14 @@ func (d *diskStorage) Bytes() ([]byte, error) {
 		return nil, ErrStorageClosed
 	}
 
-	// 保存当前位置
-	currentPos, err := d.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, err
-	}
-
-	// 移动到开头
-	if _, err := d.file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	// 读取全部内容
+	// Read at a fixed offset so the replay cursor stays unchanged even when
+	// a truncated cache file or another read error prevents a complete read.
 	data := make([]byte, d.size)
-	_, err = io.ReadFull(d.file, data)
-	if err != nil {
-		return nil, err
+	n, err := d.file.ReadAt(data, 0)
+	if err == io.EOF && n > 0 {
+		err = io.ErrUnexpectedEOF
 	}
-
-	// 恢复位置
-	if _, err := d.file.Seek(currentPos, io.SeekStart); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -306,13 +306,32 @@ func CreateBodyStorage(data []byte) (BodyStorage, error) {
 // CreateBodyStorageFromReader 从 Reader 创建存储（用于大请求的流式处理）
 func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes int64) (BodyStorage, error) {
 	threshold := GetDiskCacheThresholdBytes()
+	diskSize := contentLength
+	var prefix []byte
 
-	// 如果启用了磁盘缓存且内容长度超过阈值，直接使用磁盘存储
+	// Unknown or understated lengths (e.g. compressed requests) must not force
+	// the entire body through memory before spilling. Require room for the full
+	// request limit because the eventual size is not known yet.
+	if IsDiskCacheEnabled() && threshold <= maxBytes &&
+		(diskSize <= 0 || diskSize < threshold) && IsDiskCacheAvailable(maxBytes) {
+		var err error
+		prefix, err = io.ReadAll(io.LimitReader(reader, max(threshold, 0)))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(prefix)) < threshold {
+			IncrementMemoryCacheHits()
+			return newMemoryStorage(prefix), nil
+		}
+		diskSize = maxBytes
+	}
+
+	// 已知大请求及达到阈值的请求直接流式写入磁盘。
 	if IsDiskCacheEnabled() &&
-		contentLength > 0 &&
-		contentLength >= threshold &&
-		IsDiskCacheAvailable(contentLength) {
-		storage, err := newDiskStorageFromReader(reader, maxBytes, GetDiskCachePath())
+		diskSize > 0 &&
+		diskSize >= threshold &&
+		IsDiskCacheAvailable(diskSize) {
+		storage, err := newDiskStorageFromReader(reader, maxBytes, prefix)
 		if err != nil {
 			if IsRequestBodyTooLargeError(err) {
 				return nil, err
@@ -326,6 +345,9 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	}
 
 	// 使用内存读取
+	if len(prefix) > 0 {
+		reader = io.MultiReader(bytes.NewReader(prefix), reader)
+	}
 	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
 	if err != nil {
 		return nil, err

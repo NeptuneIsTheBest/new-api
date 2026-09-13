@@ -371,12 +371,18 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 		estimatedCompletionTokens = defaultTieredPreConsumeMaxTokens
 	}
 
-	requestInput, err := ResolveIncomingBillingExprRequestInput(c, info)
+	usedVars := billingexpr.UsedVarsByHash(exprStr, exprHash)
+	needsBody := usedVars["param"]
+	_, isImage := info.Request.(*dto.ImageRequest)
+	useImageInput := isImage && usedVars["image_count"]
+	// Image quantities use validated DTO scalars, so their billing context
+	// never needs to materialize the original request body.
+	requestInput, err := ResolveIncomingBillingExprRequestInput(c, info, needsBody && !useImageInput)
 	if err != nil {
 		return hosttypes.PriceData{}, err
 	}
-	if billingexpr.UsedVarsByHash(exprStr, exprHash)["image_count"] {
-		requestInput, err = ResolveImageBillingRequestInput(c, info, requestInput)
+	if useImageInput {
+		requestInput, err = ResolveImageBillingRequestInput(c, info, requestInput, needsBody)
 		if err != nil {
 			return hosttypes.PriceData{}, err
 		}

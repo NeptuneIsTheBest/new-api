@@ -322,6 +322,18 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	// GetBodyStorage rewinds storage. Restore the body on both paths even if
+	// JSON validation fails.
+	c.Request.Body = io.NopCloser(storage)
+	if storage.IsDisk() {
+		// An independent reader keeps the original body ready for replay.
+		reader, err := storage.NewReader()
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		return readModelRequestJSON(reader)
+	}
 	requestBody, err := storage.Bytes()
 	if err != nil {
 		return nil, err
@@ -346,7 +358,6 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
 		return nil, seekErr
 	}
-	c.Request.Body = io.NopCloser(storage)
 
 	return &ModelRequest{
 		Model: model,

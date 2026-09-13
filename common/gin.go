@@ -110,30 +110,20 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 	if err != nil {
 		return err
 	}
+	// GetBodyStorage rewinds the storage. Restore the body before parsing so
+	// callers can replay it even when reading or decoding fails.
+	c.Request.Body = io.NopCloser(storage)
 	contentType := c.Request.Header.Get("Content-Type")
 
-	// disk-backed JSON: stream-decode directly from the file to avoid
-	// materializing the entire payload back into a transient []byte
-	// (diskStorage.Bytes() would ReadFull the whole file into the heap).
-	if storage.IsDisk() && strings.HasPrefix(contentType, "application/json") {
-		if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
-			return seekErr
-		}
-		if err := DecodeJson(storage, v); err != nil {
-			return err
-		}
-		if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
-			return seekErr
-		}
-		c.Request.Body = io.NopCloser(storage)
-		return nil
-	}
-
+	// Bytes reuses memory storage or allocates once at the actual disk size.
+	// Decoder.Decode would buffer the whole JSON value with repeated growth.
 	requestBody, err := storage.Bytes()
 	if err != nil {
 		return err
 	}
 	if strings.HasPrefix(contentType, "application/json") {
+		// Validate the entire document, including any trailing data, on both
+		// storage paths.
 		err = Unmarshal(requestBody, v)
 	} else if strings.Contains(contentType, gin.MIMEPOSTForm) {
 		err = parseFormData(requestBody, v)
@@ -150,7 +140,6 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
 		return seekErr
 	}
-	c.Request.Body = io.NopCloser(storage)
 	return nil
 }
 
