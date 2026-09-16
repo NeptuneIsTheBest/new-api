@@ -94,6 +94,16 @@ For commercial licensing, please contact support@quantumnous.com
 }
 
 :root {
+  /* Group colors retain their hue across theme presets. */
+  --group-color-blue: #1d4ed8;
+  --group-color-green: #15803d;
+  --group-color-cyan: #0e7490;
+  --group-color-purple: #7e22ce;
+  --group-color-pink: #be185d;
+  --group-color-red: #b91c1c;
+  --group-color-orange: #c2410c;
+  --group-color-yellow: #854d0e;
+  --group-color-grey: #4b5563;
   --radius: 1rem;
   --app-header-height: 3rem;
   /* Static build-channel fallback consumed when JS hasn't booted yet. */
@@ -179,6 +189,15 @@ For commercial licensing, please contact support@quantumnous.com
 }
 
 .dark {
+  --group-color-blue: #93c5fd;
+  --group-color-green: #86efac;
+  --group-color-cyan: #67e8f9;
+  --group-color-purple: #d8b4fe;
+  --group-color-pink: #f9a8d4;
+  --group-color-red: #fca5a5;
+  --group-color-orange: #fdba74;
+  --group-color-yellow: #fde047;
+  --group-color-grey: #d1d5db;
   /* OpenAI-like dark mode with a crisp charcoal canvas. */
   --background: oklch(0.235 0 0);
   --foreground: oklch(0.965 0 0);

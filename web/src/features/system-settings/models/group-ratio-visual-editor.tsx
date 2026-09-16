@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Combobox } from '@/components/ui/combobox'
 import {
   AlertTriangle,
   ChevronDown,
@@ -58,9 +57,9 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { Combobox } from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-
 import {
   Sheet,
   SheetContent,
@@ -68,11 +67,14 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { parseGroupColors, type GroupColor } from '@/lib/group-colors'
 
 import { safeJsonParse } from '../utils/json-parser'
+import { GroupColorSelect } from './group-color-select'
 
 type GroupRatioVisualEditorProps = {
   groupRatio: string
+  groupColors: string
   topupGroupRatio: string
   userUsableGroups: string
   groupGroupRatio: string
@@ -89,6 +91,7 @@ type GroupPricingRow = {
   topupRatio: string
   selectable: boolean
   description: string
+  color: GroupColor | null
 }
 
 type RegistryEntry = {
@@ -137,11 +140,13 @@ function parseNestedRatioMap(
 function buildGroupPricingRows(
   groupRatio: string,
   userUsableGroups: string,
-  topupGroupRatio: string
+  topupGroupRatio: string,
+  groupColors: string
 ): GroupPricingRow[] {
   const ratioMap = parseRatioMap(groupRatio)
   const usableMap = parseUsableMap(userUsableGroups)
   const topupMap = parseRatioMap(topupGroupRatio)
+  const colors = parseGroupColors(groupColors)
   const names = new Set([
     ...Object.keys(ratioMap),
     ...Object.keys(usableMap),
@@ -155,6 +160,7 @@ function buildGroupPricingRows(
     topupRatio: Object.hasOwn(topupMap, name) ? String(topupMap[name]) : '',
     selectable: Object.hasOwn(usableMap, name),
     description: String(usableMap[name] ?? ''),
+    color: Object.hasOwn(colors, name) ? colors[name] : null,
   }))
 }
 
@@ -180,6 +186,17 @@ function serializeGroupPricingRows(rows: GroupPricingRow[]) {
     GroupRatio: JSON.stringify(groupRatio, null, 2),
     UserUsableGroups: JSON.stringify(userUsableGroups, null, 2),
     TopupGroupRatio: JSON.stringify(topupGroupRatio, null, 2),
+    GroupColors: JSON.stringify(
+      Object.fromEntries(
+        rows
+          .filter(
+            (row) => row.name.trim() && row.name.trim() !== 'auto' && row.color
+          )
+          .map((row) => [row.name.trim(), row.color])
+      ),
+      null,
+      2
+    ),
   }
 }
 
@@ -189,18 +206,33 @@ function groupPricingSignature(rows: GroupPricingRow[]): string {
     groupRatio: parseRatioMap(serialized.GroupRatio),
     userUsableGroups: parseUsableMap(serialized.UserUsableGroups),
     topupGroupRatio: parseRatioMap(serialized.TopupGroupRatio),
+    groupColors: Object.entries(parseGroupColors(serialized.GroupColors)).sort(
+      ([a], [b]) => a.localeCompare(b)
+    ),
   })
 }
 
 function sourceGroupPricingSignature(
   groupRatio: string,
   userUsableGroups: string,
-  topupGroupRatio: string
+  topupGroupRatio: string,
+  groupColors: string
 ): string {
+  const ratioMap = parseRatioMap(groupRatio)
+  const usableMap = parseUsableMap(userUsableGroups)
+  const topupMap = parseRatioMap(topupGroupRatio)
+  const names = new Set([
+    ...Object.keys(ratioMap),
+    ...Object.keys(usableMap),
+    ...Object.keys(topupMap),
+  ])
   return JSON.stringify({
-    groupRatio: parseRatioMap(groupRatio),
-    userUsableGroups: parseUsableMap(userUsableGroups),
-    topupGroupRatio: parseRatioMap(topupGroupRatio),
+    groupRatio: ratioMap,
+    userUsableGroups: usableMap,
+    topupGroupRatio: topupMap,
+    groupColors: Object.entries(parseGroupColors(groupColors))
+      .filter(([name]) => names.has(name))
+      .sort(([a], [b]) => a.localeCompare(b)),
   })
 }
 
@@ -232,18 +264,21 @@ function GroupNameSelect(props: GroupNameSelectProps) {
 
   return (
     <Combobox
-  options={options.map((name) => ({ value: name, label: name }))}
-  value={props.value}
-  onValueChange={(value) => { if (value) props.onValueChange(value) }}
-  className={props.className ?? 'w-48'}
-  placeholder={props.placeholder}
-  aria-label={props.placeholder}
-/>
+      options={options.map((name) => ({ value: name, label: name }))}
+      value={props.value}
+      onValueChange={(value) => {
+        if (value) props.onValueChange(value)
+      }}
+      className={props.className ?? 'w-48'}
+      placeholder={props.placeholder}
+      aria-label={props.placeholder}
+    />
   )
 }
 
 export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   groupRatio,
+  groupColors,
   topupGroupRatio,
   userUsableGroups,
   groupGroupRatio,
@@ -319,6 +354,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
     <div className='space-y-4'>
       <GroupPricingTable
         groupRatio={groupRatio}
+        groupColors={groupColors}
         userUsableGroups={userUsableGroups}
         topupGroupRatio={topupGroupRatio}
         onChange={onChange}
@@ -411,6 +447,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
 
 type GroupPricingTableProps = {
   groupRatio: string
+  groupColors: string
   userUsableGroups: string
   topupGroupRatio: string
   onChange: (field: string, value: string) => void
@@ -419,6 +456,7 @@ type GroupPricingTableProps = {
 
 function GroupPricingTable({
   groupRatio,
+  groupColors,
   userUsableGroups,
   topupGroupRatio,
   onChange,
@@ -426,14 +464,20 @@ function GroupPricingTable({
 }: GroupPricingTableProps) {
   const { t } = useTranslation()
   const [rows, setRows] = useState<GroupPricingRow[]>(() =>
-    buildGroupPricingRows(groupRatio, userUsableGroups, topupGroupRatio)
+    buildGroupPricingRows(
+      groupRatio,
+      userUsableGroups,
+      topupGroupRatio,
+      groupColors
+    )
   )
 
   useEffect(() => {
     const incomingSignature = sourceGroupPricingSignature(
       groupRatio,
       userUsableGroups,
-      topupGroupRatio
+      topupGroupRatio,
+      groupColors
     )
     setRows((currentRows) => {
       if (groupPricingSignature(currentRows) === incomingSignature) {
@@ -442,27 +486,48 @@ function GroupPricingTable({
       return buildGroupPricingRows(
         groupRatio,
         userUsableGroups,
-        topupGroupRatio
+        topupGroupRatio,
+        groupColors
       )
     })
-  }, [groupRatio, userUsableGroups, topupGroupRatio])
+  }, [groupRatio, userUsableGroups, topupGroupRatio, groupColors])
 
   const emitRows = useCallback(
     (nextRows: GroupPricingRow[]) => {
       setRows(nextRows)
       const serialized = serializeGroupPricingRows(nextRows)
-      onChange('GroupRatio', serialized.GroupRatio)
-      onChange('UserUsableGroups', serialized.UserUsableGroups)
-      onChange('TopupGroupRatio', serialized.TopupGroupRatio)
+      const previous = serializeGroupPricingRows(rows)
+      for (const field of [
+        'GroupRatio',
+        'UserUsableGroups',
+        'TopupGroupRatio',
+      ] as const) {
+        if (serialized[field] !== previous[field]) {
+          onChange(field, serialized[field])
+        }
+      }
+      if (serialized.GroupColors !== previous.GroupColors) {
+        // Preserve JSON-only entries for groups outside the pricing table.
+        const colors = parseGroupColors(groupColors)
+        for (const row of rows) delete colors[row.name.trim()]
+        onChange(
+          'GroupColors',
+          JSON.stringify(
+            { ...colors, ...parseGroupColors(serialized.GroupColors) },
+            null,
+            2
+          )
+        )
+      }
     },
-    [onChange]
+    [onChange, rows, groupColors]
   )
 
   const updateRow = useCallback(
     (
       id: string,
       field: Exclude<keyof GroupPricingRow, '_id'>,
-      value: string | number | boolean
+      value: string | number | boolean | null
     ) => {
       emitRows(
         rows.map((row) => (row._id === id ? { ...row, [field]: value } : row))
@@ -488,6 +553,7 @@ function GroupPricingTable({
         topupRatio: '',
         selectable: true,
         description: '',
+        color: null,
       },
     ])
   }, [emitRows, rows])
@@ -548,6 +614,20 @@ function GroupPricingTable({
                       updateRow(row._id, 'name', event.target.value)
                     }
                     aria-invalid={duplicateNames.includes(row.name.trim())}
+                  />
+                ),
+              },
+              {
+                id: 'color',
+                header: t('Color'),
+                className: 'w-44',
+                cell: (row) => (
+                  <GroupColorSelect
+                    group={row.name.trim()}
+                    value={row.color}
+                    onValueChange={(color) =>
+                      updateRow(row._id, 'color', color)
+                    }
                   />
                 ),
               },

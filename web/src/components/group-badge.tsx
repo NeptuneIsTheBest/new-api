@@ -16,9 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ReactNode } from 'react'
+import { useContext, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { GroupColorsContext } from '@/context/group-colors-context'
+import type { GroupColor } from '@/lib/group-colors'
 import { cn } from '@/lib/utils'
 
 import { StatusBadge, type StatusBadgeProps } from './status-badge'
@@ -56,9 +58,11 @@ export function GroupMultiplierBadge(props: {
 
 type GroupBadgeProps = Omit<
   StatusBadgeProps,
-  'autoColor' | 'label' | 'variant'
+  'autoColor' | 'color' | 'label' | 'variant'
 > & {
   group?: string | null
+  /** undefined uses saved colors; null previews automatic coloring. */
+  color?: GroupColor | null
   label?: string
   ratio?: number | null
   ratioLabel?: string
@@ -80,8 +84,10 @@ function getGroupLabel(params: {
 
 export function GroupBadge(props: GroupBadgeProps) {
   const { t } = useTranslation()
+  const colors = useContext(GroupColorsContext)
   const {
     group,
+    color: colorOverride,
     label: labelOverride,
     ratio,
     ratioLabel,
@@ -95,6 +101,11 @@ export function GroupBadge(props: GroupBadgeProps) {
   const isAutoGroup = groupName === 'auto'
   const isEmptyGroup = !groupName
   const isSpecialGroup = isAutoGroup || isEmptyGroup
+  let color = colorOverride
+  if (color === undefined && groupName && Object.hasOwn(colors, groupName)) {
+    color = colors[groupName]
+  }
+  if (isSpecialGroup) color = null
   const label = getGroupLabel({
     labelOverride,
     groupName,
@@ -111,6 +122,7 @@ export function GroupBadge(props: GroupBadgeProps) {
       showDot={showDot ?? (isSpecialGroup ? false : undefined)}
       variant={isSpecialGroup ? 'neutral' : undefined}
       autoColor={isSpecialGroup ? undefined : groupName}
+      color={color ? `var(--group-color-${color})` : undefined}
       className={cn('min-w-0 shrink overflow-hidden', className)}
     />
   )

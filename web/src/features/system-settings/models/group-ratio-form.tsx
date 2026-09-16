@@ -66,6 +66,7 @@ import { GroupSpecialUsableRulesEditor } from './group-special-usable-editor'
 
 type GroupFormValues = {
   GroupRatio: string
+  GroupColors: string
   TopupGroupRatio: string
   UserUsableGroups: string
   GroupGroupRatio: string
@@ -168,6 +169,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
           <div className='space-y-6'>
             <GroupRatioVisualEditor
               groupRatio={form.watch('GroupRatio')}
+              groupColors={form.watch('GroupColors')}
               topupGroupRatio={form.watch('TopupGroupRatio')}
               userUsableGroups={form.watch('UserUsableGroups')}
               groupGroupRatio={form.watch('GroupGroupRatio')}
@@ -206,6 +208,16 @@ export const GroupRatioForm = memo(function GroupRatioForm({
               }
             />
 
+            <FormField
+              control={form.control}
+              name='GroupColors'
+              render={() => (
+                <FormItem>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
             <GroupSpecialUsableRulesEditor
               value={form.watch('GroupSpecialUsableGroup')}
               groupOptions={groupNames}
@@ -239,6 +251,34 @@ export const GroupRatioForm = memo(function GroupRatioForm({
           </div>
         ) : (
           <SettingsForm onSubmit={form.handleSubmit(onSave)}>
+            <FormField
+              control={form.control}
+              name='GroupColors'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Group colors')}</FormLabel>
+                  <FormControl>
+                    <JsonCodeEditor
+                      value={field.value}
+                      onChange={field.onChange}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      textareaRef={field.ref}
+                      heightClassName='h-40 min-h-40 max-h-40'
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Map group names to preset colors. Omit a group to use automatic coloring.'
+                    )}
+                    {
+                      ' blue, green, cyan, purple, pink, red, orange, yellow, grey.'
+                    }
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
             <FormField
               control={form.control}
               name='GroupRatio'

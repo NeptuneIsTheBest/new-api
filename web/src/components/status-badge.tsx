@@ -131,6 +131,8 @@ export interface StatusBadgeProps extends Omit<
   copyable?: boolean
   copyText?: string
   autoColor?: string
+  /** Explicit display color; keeps dots and text in the same color. */
+  color?: string
   /** Visual style. Defaults to 'badge'. Can be overridden via StatusBadgeTypeContext. */
   type?: StatusBadgeType
 }
@@ -146,6 +148,8 @@ export function StatusBadge({
   copyable = true,
   copyText,
   autoColor,
+  color,
+  style,
   type: typeProp,
   className,
   onClick,
@@ -197,13 +201,14 @@ export function StatusBadge({
       )}
       onClick={handleClick}
       title={title}
+      style={color ? { ...style, color } : style}
       {...props}
     >
       {showDot && (
         <span
           className={cn(
             'inline-block size-1.5 shrink-0 rounded-full',
-            dotColorMap[computedVariant]
+            color ? 'bg-current' : dotColorMap[computedVariant]
           )}
           aria-hidden='true'
         />

@@ -13,13 +13,19 @@ import (
 
 func GetGroups(c *gin.Context) {
 	groupNames := make([]string, 0)
+	configuredColors := setting.GetGroupColorsCopy()
+	groupColors := make(map[string]string)
 	for groupName := range ratio_setting.GetGroupRatioCopy() {
 		groupNames = append(groupNames, groupName)
+		if color, ok := configuredColors[groupName]; ok {
+			groupColors[groupName] = color
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    groupNames,
+		"success":      true,
+		"message":      "",
+		"data":         groupNames,
+		"group_colors": groupColors,
 	})
 }
 
@@ -29,12 +35,17 @@ func GetUserGroups(c *gin.Context) {
 	userId := c.GetInt("id")
 	userGroup, _ = model.GetUserGroup(userId, false)
 	userUsableGroups := service.GetUserUsableGroups(userGroup)
-	for groupName, _ := range ratio_setting.GetGroupRatioCopy() {
+	configuredColors := setting.GetGroupColorsCopy()
+	groupColors := make(map[string]string)
+	for groupName := range ratio_setting.GetGroupRatioCopy() {
 		// UserUsableGroups contains the groups that the user can use
 		if desc, ok := userUsableGroups[groupName]; ok {
 			usableGroups[groupName] = map[string]any{
 				"ratio": service.GetUserGroupRatio(userGroup, groupName),
 				"desc":  desc,
+			}
+			if color, ok := configuredColors[groupName]; ok {
+				groupColors[groupName] = color
 			}
 		}
 	}
@@ -45,8 +56,9 @@ func GetUserGroups(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    usableGroups,
+		"success":      true,
+		"message":      "",
+		"data":         usableGroups,
+		"group_colors": groupColors,
 	})
 }

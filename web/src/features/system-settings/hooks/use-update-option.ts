@@ -20,6 +20,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { GROUP_COLORS_QUERY_KEY } from '@/lib/group-colors'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -47,6 +48,13 @@ const STATUS_RELATED_KEYS = new Set([
   'passkey.origins',
 ])
 
+const GROUP_COLOR_RELATED_KEYS = new Set([
+  'GroupColors',
+  'GroupRatio',
+  'UserUsableGroups',
+  'group_ratio_setting.group_special_usable_group',
+])
+
 export function useUpdateOption() {
   const queryClient = useQueryClient()
 
@@ -57,6 +65,10 @@ export function useUpdateOption() {
       if (data.success) {
         // Always refresh system-options
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
+
+        if (GROUP_COLOR_RELATED_KEYS.has(variables.key)) {
+          queryClient.invalidateQueries({ queryKey: GROUP_COLORS_QUERY_KEY })
+        }
 
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.has(variables.key)) {
