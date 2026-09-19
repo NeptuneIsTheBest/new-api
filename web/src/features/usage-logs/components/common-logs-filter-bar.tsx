@@ -20,13 +20,14 @@ import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CompactDateTimeRangePicker } from '@/components/compact-date-time-range-picker'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
+import { PortalContainerContext } from '@/components/ui/portal-container'
 import {
   Select,
   SelectContent,
@@ -125,6 +126,7 @@ export function CommonLogsFilterBar<TData>(
   const searchParams = route.useSearch()
   const { isAdminView: isAdmin } = useLogsViewScope()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
+  const groupFilterContainer = useRef<HTMLDivElement>(null)
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups } = useQuery({
     queryKey: ['groups'],
@@ -345,17 +347,21 @@ export function CommonLogsFilterBar<TData>(
   )
   const groupFilter = (
     <LogsFilterField className={sensitiveInputClass}>
-      <Combobox
-        options={groupOptions}
-        allowCustomValue
-        aria-label={t('Group')}
-        emptyText={t('No group found.')}
-        placeholder={t('Group')}
-        className='h-8 min-w-0 text-sm leading-5'
-        value={filters.group || ''}
-        onValueChange={(value) => handleChange('group', value ?? '')}
-        onKeyDown={handleKeyDown}
-      />
+      <div ref={groupFilterContainer}>
+        <PortalContainerContext.Provider value={groupFilterContainer}>
+          <Combobox
+            options={groupOptions}
+            allowCustomValue
+            aria-label={t('Group')}
+            emptyText={t('No group found.')}
+            placeholder={t('Group')}
+            className='h-8 min-w-0 text-sm leading-5'
+            value={filters.group || ''}
+            onValueChange={(value) => handleChange('group', value ?? '')}
+            onKeyDown={handleKeyDown}
+          />
+        </PortalContainerContext.Provider>
+      </div>
     </LogsFilterField>
   )
   const typeFilter = (
