@@ -40,7 +40,8 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 
 ### Testing Policy
 
-- Preserve the upstream tests already present in this repository. Across all modules, including the backend, `relaykit/`, frontend, and task plugins, do not add, modify, delete, rename, or reorganize test files or test cases. This also applies to test snapshots, fixtures, and helpers.
+- Across all modules, including the backend, `relaykit/`, frontend, and task plugins, necessary modifications to existing test files or test cases are allowed. Tests newly added upstream may also be merged and modified as needed.
+- Do not independently add new test files or test cases, including new cases in existing files; importing tests newly added upstream is the only exception. Do not delete, rename, or reorganize test files or test cases. These permissions and restrictions also apply to test snapshots, fixtures, and helpers.
 - Run relevant existing upstream tests that do not depend on a database as needed for the change. Database tests are not required and must not be a condition for completing work, including tests using in-memory SQLite, real database instances, migrations, or a cross-database matrix.
 - Report existing test failures and unverified behavior honestly. Do not change assertions or expected results, regenerate snapshots, disable tests, or alter test scripts or CI configuration to conceal failures.
 - Existing build, typecheck, lint, formatting, and manual review requirements still apply. Record only the checks actually performed and their results; do not claim unrun tests passed.
@@ -63,7 +64,7 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 
 ### Backend Rules
 
-**Modern Go conventions:** Apply these conventions to new or modified production Go code, including `relaykit/`, when they preserve behavior and improve readability. Use the Go version declared in the relevant module's `go.mod` as the compatibility baseline. Preserve existing tests unchanged.
+**Modern Go conventions:** Apply these conventions to new or modified production Go code, including `relaykit/`, when they preserve behavior and improve readability. Use the Go version declared in the relevant module's `go.mod` as the compatibility baseline. Follow the Testing Policy above for any test changes.
 
 - Use `any` instead of `interface{}`, including map values, slice elements, parameters, and return types.
 - For fixed-count loops, prefer `for i := range n`, or `for range n` when the index is unused. For slice indices, prefer `for i := range items`. Keep conventional loops when the bound changes during iteration or the loop needs a different start or step.

@@ -34,10 +34,18 @@ func TestResponsesUsageAccumulatorTerminalAccounting(t *testing.T) {
 				{Type: dto.BuildInCallFunctionCall, Name: "responses_priced_fn"},
 				{Type: dto.BuildInCallFunctionCall, Name: "responses_unpriced_fn"},
 			} {
-				accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item})
+				payload, err := common.Marshal(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item})
+				require.NoError(t, err)
+				event, err := DecodeResponsesUsageEvent(payload)
+				require.NoError(t, err)
+				accumulator.Observe(&event.ResponsesStreamResponse)
 			}
 			image := dto.ResponsesOutput{ID: "image-1", Type: dto.ResponsesOutputTypeImageGenerationCall, Status: "completed", Result: "image-data"}
-			accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &image})
+			payload, err := common.Marshal(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &image})
+			require.NoError(t, err)
+			event, err := DecodeResponsesUsageEvent(payload)
+			require.NoError(t, err)
+			accumulator.Observe(&event.ResponsesStreamResponse)
 			upstream := &dto.Usage{InputTokens: 20, OutputTokens: 5, TotalTokens: 25, InputTokensDetails: &dto.InputTokenDetails{CachedTokens: 4}}
 			upstream.BillingUsage = dto.NewOpenAIResponsesBillingUsage(upstream)
 			terminal := &dto.ResponsesStreamResponse{
@@ -46,8 +54,12 @@ func TestResponsesUsageAccumulatorTerminalAccounting(t *testing.T) {
 					Usage: upstream, Output: []dto.ResponsesOutput{image},
 				},
 			}
-			accumulator.Observe(terminal)
-			accumulator.Observe(terminal)
+			payload, err = common.Marshal(terminal)
+			require.NoError(t, err)
+			event, err = DecodeResponsesUsageEvent(payload)
+			require.NoError(t, err)
+			accumulator.Observe(&event.ResponsesStreamResponse)
+			accumulator.Observe(&event.ResponsesStreamResponse)
 			usage := accumulator.Finish()
 			assert.Equal(t, tc.eventType == "response.failed", info.StreamStatus.ResponseFailed())
 			assert.NotEmpty(t, info.StreamStatus.ResponseOutcome())
@@ -125,10 +137,10 @@ func TestObserveResponsesOutcomeRecordsProtocolFacts(t *testing.T) {
 		{"in progress is not terminal", `{"type":"response.created","response":{"status":"in_progress"}}`, relaycommon.ResponseOutcomeUnknown, "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var event dto.ResponsesStreamResponse
-			require.NoError(t, common.UnmarshalJsonStr(tc.event, &event))
+			event, err := DecodeResponsesUsageEvent([]byte(tc.event))
+			require.NoError(t, err)
 			info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
-			ObserveResponsesOutcome(info, &event)
+			ObserveResponsesOutcome(info, &event.ResponsesStreamResponse)
 			outcome := info.StreamStatus.OutcomeSnapshot()
 			assert.Equal(t, tc.wantOutcome, outcome.Response)
 			assert.Equal(t, tc.wantCode, outcome.ErrorCode)
@@ -330,7 +342,11 @@ func TestResponsesUsageAccumulatorMissingUsageEstimation(t *testing.T) {
 			info.SetEstimatePromptTokens(100)
 			accumulator := NewResponsesUsageAccumulator(info)
 			for i := range tc.events {
-				accumulator.Observe(&tc.events[i])
+				payload, err := common.Marshal(&tc.events[i])
+				require.NoError(t, err)
+				event, err := DecodeResponsesUsageEvent(payload)
+				require.NoError(t, err)
+				accumulator.Observe(&event.ResponsesStreamResponse)
 			}
 			usage := accumulator.Finish()
 			assert.Equal(t, tc.wantPrompt, usage.PromptTokens)

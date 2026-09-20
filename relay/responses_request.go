@@ -22,6 +22,12 @@ import (
 // passthrough bodies remain owned by the incoming request's BodyStorage.
 // The returned adaptor retains route/conversion state for DoRequest/DoResponse.
 func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.OpenAIResponsesRequest) (relaychannel.Adaptor, common.ReplayableBody, io.Closer, *types.NewAPIError) {
+	return prepareResponsesRequest(c, info, req, nil)
+}
+
+// finalizeJSON applies a transport envelope before the outbound body enters
+// storage, so WebSocket requests can stream that storage without reading it back.
+func prepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.OpenAIResponsesRequest, finalizeJSON func([]byte) ([]byte, error)) (relaychannel.Adaptor, common.ReplayableBody, io.Closer, *types.NewAPIError) {
 	info.InitChannelMeta(c)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact &&
 		!common.SupportsResponsesCompact(info.ChannelType, info.ApiType) {
@@ -55,47 +61,40 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		return nil, nil, nil, types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
+	var jsonData []byte
+	var err error
 	if passThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		if info.ChannelOtherSettings.ForceIncludeObfuscation == nil {
+		if info.ChannelOtherSettings.ForceIncludeObfuscation == nil && finalizeJSON == nil {
 			body := common.NewReplayableBodyReader(storage)
 			return adaptor, body, io.NopCloser(body), nil
 		}
-		jsonData, err := storage.Bytes()
+		jsonData, err = storage.Bytes()
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		jsonData, err = relaycommon.ApplyForcedResponsesSSEObfuscation(jsonData, info)
+	} else {
+		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
+		if err != nil {
+			return nil, nil, nil, newConvertRequestFailedError(c, info, err)
+		}
+		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+		jsonData, err = common.Marshal(convertedRequest)
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		return adaptor, body, closer, nil
-	}
-
-	convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
-	if err != nil {
-		return nil, nil, nil, newConvertRequestFailedError(c, info, err)
-	}
-	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
-	jsonData, err := common.Marshal(convertedRequest)
-	if err != nil {
-		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
-	if err != nil {
-		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	if len(info.ParamOverride) > 0 {
-		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
-		if err != nil {
-			return nil, nil, nil, newAPIErrorFromParamOverride(err)
+		if len(info.ParamOverride) > 0 {
+			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
+			if err != nil {
+				return nil, nil, nil, newAPIErrorFromParamOverride(err)
+			}
 		}
 	}
 	jsonData, err = relaycommon.ApplyForcedResponsesSSEObfuscation(jsonData, info)
@@ -103,7 +102,15 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 
-	logger.LogDebug(c, "requestBody: %s", jsonData)
+	if !passThrough {
+		logger.LogDebug(c, "requestBody: %s", jsonData)
+	}
+	if finalizeJSON != nil {
+		jsonData, err = finalizeJSON(jsonData)
+		if err != nil {
+			return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())

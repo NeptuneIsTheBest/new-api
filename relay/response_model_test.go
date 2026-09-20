@@ -206,8 +206,12 @@ func TestResponseModelSharedResponsesAccumulator(t *testing.T) {
 	// terminal must not erase the model declared before an interrupted stream.
 	info := &relaycommon.RelayInfo{OriginModelName: "requested", ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "mapped"}}
 	accumulator := service.NewResponsesUsageAccumulator(info)
-	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.created", Response: &dto.OpenAIResponsesResponse{Model: "returned"}})
-	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.failed", Response: &dto.OpenAIResponsesResponse{Usage: &dto.Usage{InputTokens: 2, OutputTokens: 3}}})
+	created, err := service.DecodeResponsesUsageEvent([]byte(`{"type":"response.created","response":{"model":"returned"}}`))
+	require.NoError(t, err)
+	accumulator.Observe(&created.ResponsesStreamResponse)
+	failed, err := service.DecodeResponsesUsageEvent([]byte(`{"type":"response.failed","response":{"usage":{"input_tokens":2,"output_tokens":3}}}`))
+	require.NoError(t, err)
+	accumulator.Observe(&failed.ResponsesStreamResponse)
 	assert.Equal(t, 5, accumulator.Finish().TotalTokens)
 	require.NotNil(t, info.ResponseModel)
 	assert.True(t, info.ResponseModel.Mismatch)

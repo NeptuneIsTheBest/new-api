@@ -175,6 +175,8 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 
 func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []byte, envelope responsesWSCreateEvent, streamID string, requestID string) {
 	create, parseErr := normalizeResponsesWSCreateEvent(message, envelope, streamID)
+	eventID := envelope.EventID
+	envelope = responsesWSCreateEvent{}
 	var apiErr *types.NewAPIError
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -186,7 +188,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		// the current request's release; socket close needs neither lock.
 		outgoing := state.terminal
 		if apiErr != nil {
-			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, apiErr); err == nil {
+			if body, err := buildResponsesWSErrorPayload(eventID, streamID, apiErr); err == nil {
 				outgoing = &responsesWSMessage{kind: websocket.TextMessage, body: body}
 			}
 		}
@@ -199,6 +201,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 				state.closeAfter = true
 			}
 		}
+		state.terminal = nil
 		s.current = nil
 		close(state.done)
 		s.stateMu.Unlock()
@@ -215,8 +218,16 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		if parseErr != nil {
 			return newResponsesWSInvalidRequestError(parseErr)
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
-		c.Request.ContentLength = int64(len(create.Body))
+		storage, err := common.CreateBodyStorage(create.Body)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		common.CleanupBodyStorage(c)
+		request.Body = http.NoBody
+		c.Set(common.KeyBodyStorage, storage)
+		c.Request.Body = io.NopCloser(storage)
+		c.Request.ContentLength = storage.Size()
+		create.Body = nil
 		return s.runCall(c, state, create)
 	})
 	if apiErr != nil && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
@@ -229,8 +240,12 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	modelName := create.Request.Model
 	started := time.Now()
 	var info *relaycommon.RelayInfo
+	var bodyCloser io.Closer
 	billingPrepared := false
 	defer func() {
+		if bodyCloser != nil {
+			_ = bodyCloser.Close()
+		}
 		if recovered := recover(); recovered != nil {
 			apiErr = types.NewError(fmt.Errorf("responses websocket call panic: %v", recovered), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			state.closeAfter = true
@@ -270,8 +285,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return apiErr
 		}
 		billingPrepared = true
-		var payload []byte
-		payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+		var payload common.ReplayableBody
+		payload, bodyCloser, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -282,6 +297,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	} else {
 		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
 		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
+			if bodyCloser != nil {
+				_ = bodyCloser.Close()
+				bodyCloser = nil
+			}
 			var channel *appmodel.Channel
 			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
 			if apiErr != nil {
@@ -304,8 +323,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			info.RetryIndex = retry.GetRetry()
 			policy.BeginAttempt(channel, info.UsingGroup)
-			var payload []byte
-			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			var payload common.ReplayableBody
+			payload, bodyCloser, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 			if apiErr != nil {
 				return apiErr
 			}
@@ -356,6 +375,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 	}
 
+	if bodyCloser != nil {
+		_ = bodyCloser.Close()
+		bodyCloser = nil
+	}
 	accumulator := service.NewResponsesUsageAccumulator(info)
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	info.StreamStatus.RequireTerminal()
@@ -381,11 +404,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				return nil
 			}
 			info.SetFirstResponseTime()
-			var event struct {
-				dto.ResponsesStreamResponse
-				StreamID string `json:"stream_id"`
-			}
-			if err := common.Unmarshal(incoming.body, &event); err != nil {
+			event, err := service.DecodeResponsesUsageEvent(incoming.body)
+			if err != nil {
 				info.StreamStatus.RecordError("invalid upstream websocket event")
 			} else {
 				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
@@ -468,7 +488,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				s.shutdown()
 			}
 			if accepted && pendingControl != nil {
-				if err := s.writeTarget(websocket.TextMessage, pendingControl); err != nil {
+				if err := s.writeTarget(websocket.TextMessage, bytes.NewReader(pendingControl)); err != nil {
 					s.shutdown()
 				}
 				sentControl = pendingControl
@@ -483,7 +503,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				pendingControl = control.body
 				continue
 			}
-			if err := s.writeTarget(websocket.TextMessage, control.body); err != nil {
+			if err := s.writeTarget(websocket.TextMessage, bytes.NewReader(control.body)); err != nil {
 				s.shutdown()
 			}
 			sentControl = control.body
@@ -596,21 +616,11 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	return nil
 }
 
-func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) ([]byte, *types.NewAPIError) {
-	_, body, closer, apiErr := PrepareResponsesRequest(c, info, &req)
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	defer closer.Close()
-	jsonData, err := io.ReadAll(body)
-	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
-	}
-	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
-	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	return event, nil
+func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) (common.ReplayableBody, io.Closer, *types.NewAPIError) {
+	_, body, closer, apiErr := prepareResponsesRequest(c, info, &req, func(jsonData []byte) ([]byte, error) {
+		return buildResponsesWSCreateEvent(jsonData, generate, streamID)
+	})
+	return body, closer, apiErr
 }
 
 func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
@@ -686,7 +696,7 @@ func (s *responsesWSSession) setTarget(target *websocket.Conn) bool {
 	return true
 }
 
-func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
+func (s *responsesWSSession) writeTarget(kind int, body io.Reader) error {
 	s.targetWriteMu.Lock()
 	defer s.targetWriteMu.Unlock()
 	target := s.getTarget()
@@ -696,7 +706,16 @@ func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
 	if err := target.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
 		return err
 	}
-	return target.WriteMessage(kind, message)
+	writer, err := target.NextWriter(kind)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(writer, body)
+	closeErr := writer.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func (s *responsesWSSession) writeClient(kind int, message []byte) error {
@@ -800,8 +819,8 @@ func newResponsesWSInvalidRequestError(err error) *types.NewAPIError {
 
 // normalizeResponsesWSCreateEvent builds the HTTP-shaped request body from a
 // response.create whose envelope the read loop already parsed and validated.
-// The message is decoded once more as a raw map (the body source) and once as
-// the typed request; the envelope is not parsed again.
+// Raw fields borrow the validated message until the normalized body is built;
+// only the typed request needs independent copies of large input/tool values.
 func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEvent, streamID string) (responsesWSCreateRequest, error) {
 	create := responsesWSCreateRequest{StreamID: streamID, Generate: event.Generate}
 	// Decode the wrapped request on its own so outer fields cannot enter the HTTP body.
@@ -809,13 +828,21 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 	if len(event.Request) > 0 {
 		source = event.Request
 	}
-	var raw map[string]common.RawMessage
-	if err := common.Unmarshal(source, &raw); err != nil {
+	// The envelope decoder validated the JSON; also require an object for a
+	// wrapped body, retaining the ordinary request-shape validation.
+	if len(event.Request) > 0 {
+		var object struct{}
+		if err := common.Unmarshal(source, &object); err != nil {
+			return create, err
+		}
+	}
+	raw, err := relaycommon.RawJSONObjectFields(source)
+	if err != nil {
 		return create, err
 	}
 	if len(event.Request) > 0 {
 		if len(create.Generate) == 0 {
-			create.Generate = raw["generate"]
+			create.Generate = bytes.Clone(raw["generate"])
 		}
 	} else {
 		for _, key := range []string{"type", "event_id", "background", "stream", "stream_options"} {
@@ -824,7 +851,7 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 	}
 	delete(raw, "generate")
 	delete(raw, "stream_id")
-	payload, err := common.Marshal(raw)
+	payload, err := relaycommon.MarshalRawJSONObject(raw)
 	if err != nil {
 		return create, err
 	}
@@ -841,8 +868,12 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 }
 
 func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, streamID string) ([]byte, error) {
-	var event map[string]common.RawMessage
-	if err := common.Unmarshal(jsonData, &event); err != nil {
+	var object struct{}
+	if err := common.Unmarshal(jsonData, &object); err != nil {
+		return nil, err
+	}
+	event, err := relaycommon.RawJSONObjectFields(jsonData)
+	if err != nil {
 		return nil, err
 	}
 	typeData, err := common.Marshal(responsesWSEventTypeResponseCreate)
@@ -867,7 +898,7 @@ func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, st
 	if len(generate) > 0 {
 		event["generate"] = generate
 	}
-	return common.Marshal(event)
+	return relaycommon.MarshalRawJSONObject(event)
 }
 
 func buildResponsesWSErrorPayload(eventID, streamID string, apiErr *types.NewAPIError) ([]byte, error) {

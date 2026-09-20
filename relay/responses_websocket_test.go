@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -596,8 +597,11 @@ func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
 	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
 	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
-	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+	body, closer, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 	require.Nil(t, apiErr)
+	defer closer.Close()
+	payload, err := io.ReadAll(body)
+	require.NoError(t, err)
 	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
 	storage, err := common.GetBodyStorage(c)
 	require.NoError(t, err)
@@ -639,8 +643,11 @@ func TestResponsesWSStreamIdentity(t *testing.T) {
 				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
 				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: passthrough})
 				info := relaycommon.GenRelayInfoResponses(c, &create.Request)
-				payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+				body, closer, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 				require.Nil(t, apiErr)
+				payload, err := io.ReadAll(body)
+				require.NoError(t, closer.Close())
+				require.NoError(t, err)
 				var event map[string]any
 				require.NoError(t, common.Unmarshal(payload, &event))
 				if tc.want == "" {

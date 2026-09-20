@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1119,7 +1120,7 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 		common.SysError("RemoveDisabledFields Unmarshal error :" + err.Error())
 		return jsonData, nil
 	}
-	data, err := rawJSONObjectFields(jsonData)
+	data, err := RawJSONObjectFields(jsonData)
 	if err != nil {
 		common.SysError("RemoveDisabledFields object error :" + err.Error())
 		return jsonData, nil
@@ -1153,7 +1154,7 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 	// 默认移除 stream_options.include_obfuscation，除非明确允许（避免关闭响应流混淆保护）
 	if !channelOtherSettings.AllowIncludeObfuscation {
 		if raw := data["stream_options"]; common.GetJsonType(raw) == "object" {
-			streamOptions, err := rawJSONObjectFields(raw)
+			streamOptions, err := RawJSONObjectFields(raw)
 			if err != nil {
 				common.SysError("RemoveDisabledFields stream_options Unmarshal error :" + err.Error())
 				return jsonData, nil
@@ -1163,7 +1164,7 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 			if len(streamOptions) == 0 {
 				delete(data, "stream_options")
 			} else if includeExists {
-				filtered, err := marshalRawJSONObject(streamOptions)
+				filtered, err := MarshalRawJSONObject(streamOptions)
 				if err != nil {
 					common.SysError("RemoveDisabledFields stream_options Marshal error :" + err.Error())
 					return jsonData, nil
@@ -1173,7 +1174,7 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 		}
 	}
 
-	jsonDataAfter, err := marshalRawJSONObject(data)
+	jsonDataAfter, err := MarshalRawJSONObject(data)
 	if err != nil {
 		common.SysError("RemoveDisabledFields Marshal error :" + err.Error())
 		return jsonData, nil
@@ -1181,10 +1182,11 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 	return jsonDataAfter, nil
 }
 
-// rawJSONObjectFields retains views into an already validated JSON object.
+// RawJSONObjectFields retains read-only views into an already validated JSON
+// object. The caller must keep data unchanged while using the returned fields.
 // Decode only the names so escaped keys and duplicate keys retain the host
 // codec's last-value-wins behavior, without copying the raw field payloads.
-func rawJSONObjectFields(data []byte) (map[string][]byte, error) {
+func RawJSONObjectFields(data []byte) (map[string][]byte, error) {
 	fields := make(map[string][]byte)
 	depth := 0
 	quoted, escaped := false, false
@@ -1215,9 +1217,16 @@ func rawJSONObjectFields(data []byte) (map[string][]byte, error) {
 				if keyEnd <= keyStart || valueStart < keyEnd {
 					return nil, fmt.Errorf("invalid JSON object field")
 				}
+				rawName := data[keyStart+1 : keyEnd-1]
 				var name string
-				if err := common.Unmarshal(data[keyStart:keyEnd], &name); err != nil {
-					return nil, err
+				if bytes.IndexByte(rawName, '\\') < 0 && utf8.Valid(rawName) {
+					name = string(rawName)
+				} else {
+					var decoded string
+					if err := common.Unmarshal(data[keyStart:keyEnd], &decoded); err != nil {
+						return nil, err
+					}
+					name = decoded
 				}
 				fields[name] = bytes.TrimSpace(data[valueStart:i])
 			}
@@ -1238,9 +1247,9 @@ func rawJSONObjectFields(data []byte) (map[string][]byte, error) {
 	return fields, nil
 }
 
-// marshalRawJSONObject writes validated raw values into one exactly sized
+// MarshalRawJSONObject writes validated raw values into one exactly sized
 // output buffer. Keys use the usual codec and ordering; values stay encoded.
-func marshalRawJSONObject(fields map[string][]byte) ([]byte, error) {
+func MarshalRawJSONObject(fields map[string][]byte) ([]byte, error) {
 	names := slices.Sorted(maps.Keys(fields))
 	keys := make([][]byte, len(names))
 	size := 2 + max(len(names)-1, 0)

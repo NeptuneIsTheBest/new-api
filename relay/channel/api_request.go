@@ -384,6 +384,8 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 	return resp, nil
 }
 
+var responsesWSWriteBufferPool sync.Pool
+
 // DoWssRequest dials the adaptor's upstream over WebSocket for the realtime
 // and Responses WebSocket relays. It honors the channel proxy, is bound to the
 // request context, and reports a rejected handshake as a *types.NewAPIError
@@ -410,6 +412,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	dialer := *websocket.DefaultDialer
+	if info.RelayMode == constant.RelayModeResponses {
+		dialer.WriteBufferSize = 4096
+		dialer.WriteBufferPool = &responsesWSWriteBufferPool
+	}
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {

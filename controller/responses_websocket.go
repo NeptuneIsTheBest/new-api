@@ -22,6 +22,8 @@ import (
 
 type responsesWSRequestContextKey struct{}
 
+var responsesWSWriteBufferPool sync.Pool
+
 type responsesWSRequestState struct {
 	requestID string
 	handle    func(*gin.Context) *types.NewAPIError
@@ -94,6 +96,12 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 		request.Header.Set("Content-Type", "application/json")
 		request.RemoteAddr = remoteAddr
 		response := &responsesWSResponseWriter{header: make(http.Header)}
+		defer func() {
+			// Gin retains the request in its context pool until reuse. Break the
+			// request callback's references to the session and normalized payload.
+			state.handle = nil
+			request.Body = http.NoBody
+		}()
 		responsesWSRequestEngine().ServeHTTP(response, request)
 		if state.apiError != nil {
 			return state.apiError
@@ -115,7 +123,10 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 func ResponsesWebSocket(c *gin.Context) {
 	requestID := c.GetString(common.RequestIdKey)
 	runner := newResponsesWSRequestRunner(c)
-	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	responsesUpgrader := upgrader
+	responsesUpgrader.WriteBufferSize = 4096
+	responsesUpgrader.WriteBufferPool = &responsesWSWriteBufferPool
+	ws, err := responsesUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
