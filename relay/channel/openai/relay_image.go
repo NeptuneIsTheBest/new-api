@@ -202,7 +202,7 @@ func writeOpenaiImageStreamChunk(c *gin.Context, data []byte) error {
 	}
 	_ = common.Unmarshal(data, &payload)
 	if eventName := strings.TrimSpace(payload.Type); eventName != "" {
-		return helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: eventName}, string(data))
+		return helper.ResponseChunkData(c, eventName, string(data))
 	}
 	return helper.StringData(c, string(data))
 }
@@ -337,7 +337,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 				return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			}
 		}
-		if writeErr := helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "image_generation.completed"}, string(payload)); writeErr != nil {
+		if writeErr := helper.ResponseChunkData(c, "image_generation.completed", string(payload)); writeErr != nil {
 			if info != nil && info.StreamStatus != nil {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, writeErr)
 			}

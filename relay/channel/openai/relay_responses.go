@@ -80,19 +80,27 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	accumulator := service.NewResponsesUsageAccumulator(info)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-
-		// 检查当前数据是否包含 completed 状态和 usage 信息
-		var streamResponse dto.ResponsesStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		event, err := service.DecodeResponsesUsageEvent(common.StringToByteSlice(data))
+		if err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
 		}
-		if streamResponse.Response != nil {
-			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
+		if info.GetChannelType() == constant.ChannelTypeSGLang && event.Response != nil {
+			if value := gjson.Get(data, "response.created_at"); value.Exists() {
+				var createdAt dto.IntValue
+				if err := common.UnmarshalJsonStr(value.Raw, &createdAt); err != nil {
+					logger.LogError(c, "failed to unmarshal response created_at: "+err.Error())
+					sr.Error(err)
+					return
+				}
+				if patched, err := sjson.Set(data, "response.created_at", int(createdAt)); err == nil {
+					data = patched
+				}
+			}
 		}
-		sendResponsesStreamData(c, streamResponse, data)
-		accumulator.Observe(&streamResponse)
+		_ = helper.ResponseChunkData(c, event.Type, data)
+		accumulator.Observe(&event.ResponsesStreamResponse)
 	})
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)

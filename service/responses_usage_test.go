@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -52,12 +53,17 @@ func TestResponsesUsageAccumulatorTerminalAccounting(t *testing.T) {
 				Type: tc.eventType,
 				Response: &dto.OpenAIResponsesResponse{
 					Usage: upstream, Output: []dto.ResponsesOutput{image},
+					Tools: []map[string]any{{
+						"type": "function", "name": "responses_priced_fn",
+						"description": strings.Repeat("echoed tool schema ", 1024),
+					}},
 				},
 			}
 			payload, err = common.Marshal(terminal)
 			require.NoError(t, err)
 			event, err = DecodeResponsesUsageEvent(payload)
 			require.NoError(t, err)
+			assert.Nil(t, event.Response.Tools)
 			accumulator.Observe(&event.ResponsesStreamResponse)
 			accumulator.Observe(&event.ResponsesStreamResponse)
 			usage := accumulator.Finish()

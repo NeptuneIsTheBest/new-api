@@ -341,16 +341,17 @@ func TestOaiResponsesStreamHandlerKeepsNonSGLangCreatedAt(t *testing.T) {
 		DisablePing: true,
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI, UpstreamModelName: "gpt-test"},
 	}
+	data := `{"type":"response.completed","response":{"id":"resp_1","created_at":1786588600.0,"status":"completed","output":[],"instructions":"` +
+		strings.Repeat("echoed request context ", 1024) + `","tools":[{"type":"function","name":"lookup","description":"` +
+		strings.Repeat("echoed tool schema ", 1024) + `"}],"vendor":{"integer":9007199254740993}},"obfuscation":"opaque"}`
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1786588600.0,\"status\":\"completed\",\"output\":[]}}\n\n" +
-				"data: [DONE]\n\n",
-		)),
-		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("data: " + data + "\n\ndata: [DONE]\n\n")),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 	}
 
 	_, apiErr := OaiResponsesStreamHandler(c, info, resp)
 	require.Nil(t, apiErr)
 	assert.Contains(t, w.Body.String(), `1786588600.0`)
+	assert.Contains(t, w.Body.String(), "data: "+data+"\n\n")
 }
