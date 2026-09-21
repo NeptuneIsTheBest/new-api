@@ -67,6 +67,11 @@ func Marshal(v any) ([]byte, error) {
 	return kitutil.Marshal(v)
 }
 
+// ValidJson reports whether data is a syntactically valid JSON document.
+func ValidJson(data []byte) bool {
+	return kitutil.Valid(data)
+}
+
 func IndentJson(data []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	if err := json.Indent(&buffer, data, "", "  "); err != nil {

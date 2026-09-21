@@ -111,28 +111,28 @@ jobs:
         if: matrix.target == 'linux-amd64'
         run: >-
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build
-          -ldflags "-s -w -X 'new-api/common.Version=$VERSION' -extldflags '-static'"
+          -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION' -extldflags '-static'"
           -o "release/new-api-$VERSION"
 
       - name: Build Linux arm64
         if: matrix.target == 'linux-arm64'
         run: >-
           CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build
-          -ldflags "-s -w -X 'new-api/common.Version=$VERSION' -extldflags '-static'"
+          -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION' -extldflags '-static'"
           -o "release/new-api-arm64-$VERSION"
 
       - name: Build macOS
         if: matrix.target == 'macos'
         run: >-
           go build
-          -ldflags "-X 'new-api/common.Version=$VERSION'"
+          -ldflags "-X 'github.com/QuantumNous/new-api/common.Version=$VERSION'"
           -o "release/new-api-macos-$VERSION"
 
       - name: Build Windows
         if: matrix.target == 'windows'
         run: >-
           go build
-          -ldflags "-s -w -X 'new-api/common.Version=$VERSION'"
+          -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'"
           -o "release/new-api-$VERSION.exe"
 
       - name: Upload binary
