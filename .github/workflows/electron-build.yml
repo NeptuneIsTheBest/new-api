@@ -90,7 +90,7 @@ jobs:
       - name: Build Windows binary
         run: >-
           go build
-          -ldflags "-s -w -X 'new-api/common.Version=$VERSION'"
+          -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'"
           -o new-api.exe
 
       - name: Update Electron version

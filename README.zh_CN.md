@@ -44,6 +44,7 @@
 </p>
 
 <p align="center">
+  <a href="#screenshots">项目截图</a> •
   <a href="#-快速开始">快速开始</a> •
   <a href="#-主要特性">主要特性</a> •
   <a href="#-部署">部署</a> •
@@ -60,6 +61,20 @@
 > - 使用者必须合法取得上游 API Key、账号、模型服务或接口权限，并遵守上游服务条款及适用法律法规。
 > - 使用者应确保其使用方式符合上游服务条款及适用法律法规。
 > - 面向公众提供生成式人工智能服务时，使用者应遵守[《生成式人工智能服务管理暂行办法》](http://www.cac.gov.cn/2023-07/13/c_1690898327029107.htm)等监管要求，自行完成所在司法辖区要求的备案、许可、内容安全、实名、日志留存、税务和上游授权等合规义务。
+
+---
+
+<a id="screenshots"></a>
+
+## 项目截图
+
+以下账号、渠道、插件安装状态、用量、价格和费用均为模拟数据，插件市场展示官方目录。点击图片可查看原图。
+
+| 数据看板 | 插件市场 |
+| --- | --- |
+| [![数据看板：模拟请求量、费用和性能指标](assets/screenshots/dashboard.zh-CN.jpg)](assets/screenshots/dashboard.zh-CN.jpg) | [![插件市场：官方插件目录与模拟安装状态](assets/screenshots/plugin-marketplace.zh-CN.jpg)](assets/screenshots/plugin-marketplace.zh-CN.jpg) |
+| **模型广场** | **使用日志** |
+| [![模型广场：模拟模型价格与可用状态](assets/screenshots/models.zh-CN.jpg)](assets/screenshots/models.zh-CN.jpg) | [![使用日志：模拟 Token 用量、费用和响应耗时](assets/screenshots/usage-logs.zh-CN.jpg)](assets/screenshots/usage-logs.zh-CN.jpg) |
 
 ---
 

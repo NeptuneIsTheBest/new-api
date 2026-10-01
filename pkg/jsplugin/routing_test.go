@@ -465,33 +465,44 @@ func TestRouteRetainResultDecodeAndValidation(t *testing.T) {
 }
 
 func TestRouteRequestContextClonesFormAndMultipartValuesPerDecoder(t *testing.T) {
+	// moejs isolates decoder writes lazily instead of cloning the host values.
 	tests := []struct {
 		name   string
 		body   any
-		mutate func(map[string]any)
+		decode string
+		want   map[string]any
 	}{
 		{
 			name: "form fields",
 			body: map[string]any{"kind": "form", "fields": map[string][]string{"prompt": {"original"}}},
-			mutate: func(value map[string]any) {
-				value["body"].(map[string]any)["fields"].(map[string][]string)["prompt"][0] = "mutated"
-			},
+			decode: `export function decodeJob(ctx) {
+				const prompt = ctx.body.fields.prompt[0];
+				ctx.body.fields.prompt[0] = "mutated";
+				return {prompt, params: Object.keys(ctx.params).length, query: Object.keys(ctx.query).length};
+			}`,
+			want: map[string]any{"prompt": "original", "params": int64(0), "query": int64(0)},
 		},
 		{
 			name: "multipart files",
 			body: map[string]any{"kind": "multipart", "files": []map[string]any{{"ref": "request_file:image", "filename": "safe.png"}}},
-			mutate: func(value map[string]any) {
-				value["body"].(map[string]any)["files"].([]map[string]any)[0]["filename"] = "mutated.png"
-			},
+			decode: `export function decodeJob(ctx) {
+				const filename = ctx.body.files[0].filename;
+				ctx.body.files[0].filename = "mutated.png";
+				return {filename, params: Object.keys(ctx.params).length, query: Object.keys(ctx.query).length};
+			}`,
+			want: map[string]any{"filename": "safe.png", "params": int64(0), "query": int64(0)},
 		},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
+			plugin, err := CompilePlugin(routingTestPluginSource("route-request-writes", 0, `["gpt-5.5"]`, "", testCase.decode), Options{})
+			require.NoError(t, err)
 			request := RouteRequestContext{Body: testCase.body}
-			first := request.JSValue()
-			testCase.mutate(first)
-			second := request.JSValue()
-			assert.NotEqual(t, first, second)
+			for range 2 {
+				seen, err := plugin.Engine.Call(context.Background(), "decodeJob", request.JSValue())
+				require.NoError(t, err)
+				assert.Equal(t, testCase.want, seen)
+			}
 		})
 	}
 }

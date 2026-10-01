@@ -32,10 +32,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
-import type { AccessTokenStatus } from '../../api'
-import { AccessTokenCard } from '../access-token-card'
+import type { AccessTokenList } from '../../api'
+import { AccessTokensCard } from '../access-tokens-card'
 
-let status: AccessTokenStatus
+let status: AccessTokenList
 let proofCount: number
 
 function passwordProof(scope: string) {
@@ -69,14 +69,37 @@ beforeEach(() => {
     setItem: () => undefined,
     removeItem: () => undefined,
   })
-  status = {
-    exists: false,
-    token_ref: '',
-    created_at: null,
-    last_used_at: null,
-    last_used_ip: '',
-  }
+  status = { items: [], legacy: null }
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    if (url === '/api/user/access_tokens/catalog') {
+      return {
+        data: {
+          success: true,
+          data: {
+            groups: [
+              {
+                group: 'personal',
+                resources: [
+                  {
+                    resource: 'tokens',
+                    label_key: 'API keys',
+                    actions: [
+                      {
+                        action: 'read',
+                        label_key: 'View',
+                        description_key: 'View API keys',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+            max_tokens: 20,
+            default_expiry_days: 30,
+          },
+        },
+      }
+    }
     if (url === '/api/audit/self') {
       return { data: { success: true, data: { items: [], total: 0 } } }
     }
@@ -115,7 +138,7 @@ function renderCard() {
   })
   render(
     <QueryClientProvider client={client}>
-      <AccessTokenCard />
+      <AccessTokensCard />
       <Toaster />
     </QueryClientProvider>
   )
@@ -127,7 +150,19 @@ describe('system access token management', () => {
     const post = vi.mocked(api.post)
     renderCard()
     const user = userEvent.setup()
-    await user.dblClick(await screen.findByRole('button', { name: 'Generate' }))
+    const trigger = await screen.findByRole('button', {
+      name: 'Create access token',
+    })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await user.click(trigger)
+    const form = await screen.findByRole('dialog', {
+      name: 'Create access token',
+    })
+    await user.type(within(form).getByLabelText('Token name'), 'Test script')
+    await user.click(within(form).getByRole('button', { name: 'View' }))
+    await user.dblClick(
+      within(form).getByRole('button', { name: 'Create access token' })
+    )
     await screen.findByLabelText('Password', { selector: 'input' })
     expect(post).not.toHaveBeenCalled()
     expect(
@@ -151,7 +186,19 @@ describe('system access token management', () => {
     })
     renderCard()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Generate' }))
+    const trigger = await screen.findByRole('button', {
+      name: 'Create access token',
+    })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await user.click(trigger)
+    const form = await screen.findByRole('dialog', {
+      name: 'Create access token',
+    })
+    await user.type(within(form).getByLabelText('Token name'), 'Test script')
+    await user.click(within(form).getByRole('button', { name: 'View' }))
+    await user.click(
+      within(form).getByRole('button', { name: 'Create access token' })
+    )
     await verifyPassword(user)
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith(
@@ -166,26 +213,32 @@ describe('system access token management', () => {
       await pending
     })
     expect(
-      post.mock.calls.filter(([url]) => url === '/api/user/token')
+      post.mock.calls.filter(([url]) => url === '/api/user/access_tokens')
     ).toHaveLength(0)
     expect(screen.queryByLabelText('Token')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Generate' })).toBeEnabled()
+    expect(
+      within(
+        await screen.findByRole('dialog', { name: 'Create access token' })
+      ).getByRole('button', { name: 'Create access token' })
+    ).toBeEnabled()
   })
 
   it('aborts and ignores a token response for an account that is no longer active', async () => {
     const token = 'previous-account-private-token'
-    let complete!: (value: { data: { success: boolean; data: string } }) => void
-    const pending = new Promise<{ data: { success: boolean; data: string } }>(
-      (resolve) => {
-        complete = resolve
-      }
-    )
+    let complete!: (value: {
+      data: { success: boolean; data: { token: string } }
+    }) => void
+    const pending = new Promise<{
+      data: { success: boolean; data: { token: string } }
+    }>((resolve) => {
+      complete = resolve
+    })
     let signal: { readonly aborted: boolean } | undefined
     vi.mocked(api.post).mockImplementation(async (url, data, config) => {
       if (url === '/api/verify') {
         return passwordProof((data as { scope: string }).scope)
       }
-      if (url === '/api/user/token') {
+      if (url === '/api/user/access_tokens') {
         signal = config?.signal
         return pending
       }
@@ -193,7 +246,19 @@ describe('system access token management', () => {
     })
     const client = renderCard()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Generate' }))
+    const trigger = await screen.findByRole('button', {
+      name: 'Create access token',
+    })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await user.click(trigger)
+    const form = await screen.findByRole('dialog', {
+      name: 'Create access token',
+    })
+    await user.type(within(form).getByLabelText('Token name'), 'Test script')
+    await user.click(within(form).getByRole('button', { name: 'View' }))
+    await user.click(
+      within(form).getByRole('button', { name: 'Create access token' })
+    )
     await verifyPassword(user)
     await waitFor(() => expect(signal).toBeDefined())
     await act(async () => {
@@ -203,12 +268,14 @@ describe('system access token management', () => {
     })
     expect(signal?.aborted).toBe(true)
     await act(async () => {
-      complete({ data: { success: true, data: token } })
+      complete({ data: { success: true, data: { token } } })
       await pending
     })
     expect(screen.queryByDisplayValue(token)).not.toBeInTheDocument()
     expect(
-      await screen.findByRole('button', { name: 'Generate' })
+      within(
+        await screen.findByRole('dialog', { name: 'Create access token' })
+      ).getByRole('button', { name: 'Create access token' })
     ).toBeEnabled()
     expect(
       JSON.stringify(
@@ -228,21 +295,47 @@ describe('system access token management', () => {
       }
       status = {
         ...status,
-        exists: true,
-        token_ref: 'a'.repeat(64),
-        created_at: 1700000000,
+        items: [
+          {
+            id: 1,
+            name: 'Test script',
+            token_ref: 'a'.repeat(64),
+            token_hint: 'Ab12',
+            scopes: ['tokens:read'],
+            expires_at: 0,
+            created_at: 1700000000,
+            last_used_at: 0,
+            last_used_ip: '',
+          },
+        ],
       }
-      return { data: { success: true, data: token } }
+      return { data: { success: true, data: { token, item: status.items[0] } } }
     })
     const client = renderCard()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Generate' }))
+    const trigger = await screen.findByRole('button', {
+      name: 'Create access token',
+    })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await user.click(trigger)
+    const form = await screen.findByRole('dialog', {
+      name: 'Create access token',
+    })
+    await user.type(within(form).getByLabelText('Token name'), 'Test script')
+    await user.click(within(form).getByRole('button', { name: 'View' }))
+    await user.click(
+      within(form).getByRole('button', { name: 'Create access token' })
+    )
     await verifyPassword(user)
-    const dialog = await screen.findByRole('dialog', { name: 'Access Token' })
+    const dialog = await screen.findByRole('dialog', { name: 'Access tokens' })
     expect(within(dialog).getByLabelText('Token')).toHaveValue(token)
     expect(api.post).toHaveBeenCalledWith(
-      '/api/user/token',
-      undefined,
+      '/api/user/access_tokens',
+      {
+        name: 'Test script',
+        scopes: ['tokens:read'],
+        expires_at: expect.any(Number),
+      },
       expect.objectContaining({
         headers: { 'X-Security-Proof': 'one-use-proof-1' },
         singleUseAuthorization: true,
@@ -271,14 +364,25 @@ describe('system access token management', () => {
           .map((entry) => entry.state.data)
       )
     ).not.toContain(token)
-    expect(await screen.findByText('Not used yet')).toBeVisible()
+    expect(await screen.findByText('Never used')).toBeVisible()
   })
 
   it('legacy tokens show unknown creation and usage until records exist', async () => {
-    status = { ...status, exists: true, token_ref: 'a'.repeat(64) }
+    status = {
+      ...status,
+      legacy: {
+        token_ref: 'a'.repeat(64),
+        token_hint: 'Ab12',
+        created_at: null,
+        last_used_at: null,
+        last_used_ip: '',
+        retire_at: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+      },
+    }
     renderCard()
-    expect(await screen.findAllByText('Unknown')).toHaveLength(2)
-    expect(screen.queryByText('Not used yet')).not.toBeInTheDocument()
+    expect(await screen.findByText('Created Unknown')).toBeVisible()
+    expect(screen.getByText('Unknown')).toBeVisible()
+    expect(screen.queryByText('Never used')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: 'Generate' })
     ).not.toBeInTheDocument()
@@ -288,19 +392,29 @@ describe('system access token management', () => {
     vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
     renderCard()
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Failed to load token status'
+      'Failed to load access tokens'
     )
-    expect(screen.queryByText('Not generated')).not.toBeInTheDocument()
-    expect(screen.queryByText('Not used yet')).not.toBeInTheDocument()
+    expect(screen.queryByText('No access tokens')).not.toBeInTheDocument()
+    expect(screen.queryByText('Never used')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: 'Generate' })
     ).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('Not generated')).toBeVisible()
+    expect(await screen.findByText('No access tokens')).toBeVisible()
   })
 
   it('rotation requires confirmation and verification, and failure keeps the existing token state', async () => {
-    status = { ...status, exists: true, token_ref: 'a'.repeat(64) }
+    status = {
+      ...status,
+      legacy: {
+        token_ref: 'a'.repeat(64),
+        token_hint: 'Ab12',
+        created_at: null,
+        last_used_at: null,
+        last_used_ip: '',
+        retire_at: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+      },
+    }
     const post = vi.mocked(api.post).mockImplementation(async (url, data) => {
       if (url === '/api/verify') {
         return passwordProof((data as { scope: string }).scope)
@@ -309,27 +423,53 @@ describe('system access token management', () => {
     })
     renderCard()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Regenerate' }))
-    const confirmation = await screen.findByRole('alertdialog')
+    // Legacy rotation now starts by creating a scoped replacement. Failure must
+    // leave the existing legacy token usable until replacement succeeds.
+    const trigger = await screen.findByRole('button', {
+      name: 'Create access token',
+    })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await user.click(trigger)
+    const confirmation = await screen.findByRole('dialog', {
+      name: 'Create access token',
+    })
+    await user.type(
+      within(confirmation).getByLabelText('Token name'),
+      'Replacement'
+    )
+    await user.click(within(confirmation).getByRole('button', { name: 'View' }))
     expect(post).not.toHaveBeenCalled()
     await user.click(
-      within(confirmation).getByRole('button', { name: 'Regenerate token' })
+      within(confirmation).getByRole('button', { name: 'Create access token' })
     )
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    await screen.findByLabelText('Password', { selector: 'input' })
+    expect(
+      screen.queryByRole('dialog', { name: 'Create access token' })
+    ).not.toBeInTheDocument()
     await verifyPassword(user)
     expect(await screen.findByText('Failed to generate token')).toBeVisible()
     expect(
-      screen.queryByRole('dialog', { name: 'Access Token' })
+      screen.queryByRole('dialog', { name: 'Access tokens' })
     ).not.toBeInTheDocument()
-    expect(screen.getByText('Generated')).toBeVisible()
+    expect(screen.getByText('Legacy token')).toBeVisible()
   })
 
   it('revocation failures can be retried and success restores the generate action', async () => {
-    status = { ...status, exists: true, token_ref: 'a'.repeat(64) }
+    status = {
+      ...status,
+      legacy: {
+        token_ref: 'a'.repeat(64),
+        token_hint: 'Ab12',
+        created_at: null,
+        last_used_at: null,
+        last_used_ip: '',
+        retire_at: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+      },
+    }
     vi.spyOn(api, 'delete')
       .mockResolvedValueOnce({ data: { success: false } })
       .mockImplementation(async () => {
-        status = { ...status, exists: false, token_ref: '' }
+        status = { ...status, legacy: null }
         return { data: { success: true, data: null } }
       })
     renderCard()
@@ -343,7 +483,7 @@ describe('system access token management', () => {
     await verifyPassword(user)
     expect(await screen.findByText('Failed to revoke token')).toBeVisible()
     expect(api.delete).toHaveBeenLastCalledWith(
-      '/api/user/token',
+      '/api/user/access_tokens/legacy',
       expect.objectContaining({
         headers: { 'X-Security-Proof': 'one-use-proof-1' },
       })
@@ -356,14 +496,15 @@ describe('system access token management', () => {
     )
     await verifyPassword(user)
     expect(api.delete).toHaveBeenLastCalledWith(
-      '/api/user/token',
+      '/api/user/access_tokens/legacy',
       expect.objectContaining({
         headers: { 'X-Security-Proof': 'one-use-proof-2' },
       })
     )
     expect(
-      await screen.findByRole('button', { name: 'Generate' })
+      await screen.findByRole('button', { name: 'Create access token' })
     ).toBeVisible()
+    expect(screen.queryByText('Legacy token')).not.toBeInTheDocument()
     await waitFor(() =>
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     )
