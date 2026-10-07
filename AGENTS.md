@@ -46,13 +46,21 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 - A separate function is appropriate when it represents reusable behavior, a required interface/framework callback, an exported API, a test fixture, or complex business logic that deserves direct tests.
 - If a single-use helper is kept, its name must describe a durable domain concept rather than a mechanical step extracted only to shorten the caller.
 
+### Test Changes and Execution
+
+- Do NOT add or modify tests by default. The only exceptions are minimal necessary modifications to existing tests and synchronizing test additions or modifications already made upstream. Do not independently add new test cases or test files.
+- Necessary modifications are limited to adapting existing tests to compilation, interface, or behavior changes caused by the current intended code change. Increasing coverage, opportunistic refactoring, and style-only cleanup do not qualify.
+- These limits apply repository-wide, including frontend, authentication, billing, and scoped rules. Test-quality guidance governs permitted changes only; it does not authorize additional test changes.
+- Do NOT run tests that depend on a standalone database service, including already installed or running services, remote databases, and Docker/container databases. Do not install, provision, or start database services for testing. Embedded SQLite tests that require no database service installation are allowed.
+- Run existing tests that meet these restrictions, builds, and static checks as appropriate to the change. Record the commands actually run and observed results, and identify skipped verification without claiming it passed.
+
 ### Authentication Security (OWASP Mandatory)
 
 - Any implementation, modification, or review involving authentication-related flows MUST comply with the applicable requirements of the latest stable [OWASP Application Security Verification Standard (ASVS)](https://owasp.org/www-project-application-security-verification-standard/) and the relevant [OWASP Cheat Sheet Series](https://cheatsheetseries.owasp.org/). This applies to both backend and frontend changes, including registration, login/logout, password changes and recovery, email verification, MFA, WebAuthn/Passkeys, OAuth/OIDC, account linking/unlinking, sessions, JWTs, API credentials, and re-authentication for sensitive actions.
 - Before changing these flows, read the applicable OWASP guidance, starting with the [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) and [Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html). Consult the password storage, forgot password, MFA, OAuth, and CSRF guidance when those mechanisms are involved. Identify the applicable controls before implementation; existing code is not a justification for retaining or introducing an insecure pattern.
 - Enforce security controls on the server. Apply the relevant requirements for credential storage and transport, resistance to account enumeration and brute force, CSRF and replay protection, token/challenge expiry and single use where required, protocol-specific verification, session rotation and invalidation, and re-authentication for sensitive account changes. Frontend checks MUST NOT substitute for server-side enforcement, and recovery or alternative login paths MUST NOT bypass the required authentication assurance.
 - Authentication audit events MUST exclude passwords, verification codes, recovery codes, private keys, and usable session or authentication tokens. Record enough non-secret context to investigate authentication failures and sensitive account changes.
-- Verify affected security controls with focused regression tests, including applicable failure, expiry, replay, and bypass cases, following the existing backend/frontend test conventions. Record the OWASP references (including the ASVS version and requirement IDs when used), validation performed, and any unresolved gaps in the change summary or PR description. Do not claim compliance or completion while an applicable security requirement remains unmet or unverified.
+- Verify affected security controls using existing regression tests permitted by **Test Changes and Execution**, code review, and applicable manual checks, including relevant failure, expiry, replay, and bypass cases. Test additions or modifications must follow that section. Record the OWASP references (including the ASVS version and requirement IDs when used), validation performed, and any unresolved gaps in the change summary or PR description. Do not claim compliance while an applicable security requirement remains unmet or unverified.
 
 ### Backend Rules
 
@@ -91,11 +99,11 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
 
 **Database compatibility:** All database code MUST work with SQLite, MySQL >= 5.7.8, and PostgreSQL >= 9.6 simultaneously.
 
-- Any change that can affect database behavior MUST be verified before the work is considered complete. This includes ORM/database-driver dependency changes, connection/DSN/protocol or prepared-statement configuration, models and GORM tags, migrations and `AutoMigrate`, constraints and indexes, `Scanner`/`Valuer`/serializer behavior, raw SQL, transactions, and row locking.
-- Required database verification MUST exercise real SQLite, MySQL, and PostgreSQL instances. Unit tests, mocks, a successful build, code inspection, or testing only one dialect are not substitutes. Use at least one supported version of each engine; changes that depend on version-specific behavior must also cover the minimum supported version.
-- Treat GORM core and its database dialect/driver packages as a compatible version set. Any change to one of them requires checking upstream compatibility and running the complete three-database verification matrix; do not upgrade only the core package and infer that existing drivers remain compatible.
-- Schema or migration changes MUST be tested both on a fresh database and by upgrading a representative database created by the latest released version. Run startup/migration at least twice to prove idempotency, and verify that existing data, indexes, constraints, and uniqueness guarantees are preserved. Cover the separately configured log database when the affected path is shared with or used by it.
-- Record the exact database versions, commands, and results in the final handoff or pull request. If any required database verification cannot be run, report the blocker explicitly and do not claim the change is database-compatible or complete.
+- Any change that can affect database behavior MUST be reviewed for compatibility with all supported databases and their minimum versions. This includes ORM/database-driver dependency changes, connection/DSN/protocol or prepared-statement configuration, models and GORM tags, migrations and `AutoMigrate`, constraints and indexes, `Scanner`/`Valuer`/serializer behavior, raw SQL, transactions, and row locking.
+- Use code inspection, upstream compatibility information, builds, and existing tests permitted by **Test Changes and Execution** for verification. Do NOT run a database test matrix or other tests that require standalone database services.
+- Treat GORM core and its database dialect/driver packages as a compatible version set. Any change to one of them requires checking upstream compatibility for the core and all affected dialects/drivers; do not upgrade only the core package and infer that existing drivers remain compatible.
+- For schema or migration changes, review fresh-database and upgrade behavior, migration idempotency, and preservation of existing data, indexes, constraints, and uniqueness guarantees. Include the separately configured log database when the affected path is shared with or used by it. Exercise these paths with permitted existing tests where available; do not require external database integration runs.
+- Record verification commands, observed results, and database versions when exercised in the final handoff or pull request. Explicitly identify untested databases and paths. Skipping prohibited standalone-database tests does not block completion, but builds, code review, mocks, or SQLite-only tests must not be presented as successful three-database validation.
 - Prefer GORM methods (`Create`, `Find`, `Where`, `Updates`, etc.) over raw SQL.
 - Let GORM handle primary key generation; do not use `AUTO_INCREMENT` or `SERIAL` directly.
 - Standard `SELECT ... FOR UPDATE` row locks built with GORM query methods in `model/` MUST use `lockForUpdate(tx)`. Do not use the legacy GORM v1 pattern `tx.Set("gorm:query_option", "FOR UPDATE")`, because GORM v2 silently ignores it and no lock is acquired. Do not duplicate `clause.Locking{Strength: "UPDATE"}` at call sites; the shared helper emits `FOR UPDATE` for MySQL/PostgreSQL and skips it for SQLite, where the syntax is unsupported. Dialect-specific locking with different semantics (for example, a MySQL next-key/gap lock) may use raw SQL only behind explicit database-type branches with valid fallbacks for every supported database.
@@ -106,7 +114,7 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
   - Use `common.UsingMainDatabase(...)` for primary database branches and `common.UsingLogDatabase(...)` for log database branches.
 - Do not use database-specific features without cross-DB fallback, including MySQL-only functions, PostgreSQL-only operators, SQLite-unsupported `ALTER COLUMN`, or database-specific JSON column types without a `TEXT` fallback.
 - Migrations must work on all three databases. For SQLite, use `ALTER TABLE ... ADD COLUMN` instead of `ALTER COLUMN` (see `model/main.go` for patterns).
-- Avoid GORM boolean default tags such as `gorm:"default:true"` when the default is a business rule already enforced by code. MySQL and PostgreSQL can normalize boolean defaults differently, causing GORM `AutoMigrate` to repeatedly issue `ALTER TABLE` on restart. Prefer setting these defaults in request/model normalization, hooks, constructors, or service logic; do not replace `default:true` with `default:1` unless the behavior is verified across SQLite, MySQL, and PostgreSQL.
+- Avoid GORM boolean default tags such as `gorm:"default:true"` when the default is a business rule already enforced by code. MySQL and PostgreSQL can normalize boolean defaults differently, causing GORM `AutoMigrate` to repeatedly issue `ALTER TABLE` on restart. Prefer setting these defaults in request/model normalization, hooks, constructors, or service logic; do not assume that replacing `default:true` with `default:1` resolves cross-database differences.
 
 **Relay and provider behavior:**
 
@@ -132,19 +140,19 @@ Inside `relaykit/`, use `kitutil.*` from `relaykit/relayconvert/kitutil/json.go`
 
 Tasks that touch none of these (for example unrelated frontend work, authentication, database migrations, or protocol conversion that leaves usage untouched) do not need to read it.
 
-**Backend test quality:** Backend tests must protect real behavior, API contracts, billing/accounting invariants, data compatibility, or regression paths.
+**Backend test quality:** The following rules apply only to test changes permitted by **Test Changes and Execution**. Backend tests must protect real behavior, API contracts, billing/accounting invariants, data compatibility, or regression paths.
 
-- **Do not scatter tests for a small change:** For a focused feature or fix, extend an existing suitable test file first. If a new test file is necessary, add at most one and consolidate the key regression cases there. MUST NOT create separate test files for the same small feature across `controller/`, `service/`, `setting/`, or other layers merely because its call chain crosses those layers. Do not repeat fixtures and assertions at each layer. Keep the cases compact and focused on observable behavior; the number of production files touched is not a reason to add more test files.
+- **Keep test changes minimal:** Adapt relevant existing test cases in place when necessary. New cases or files are allowed only when synchronizing upstream additions. Do not expand the imported scope or duplicate fixtures and assertions across layers merely because a call chain crosses them. The number of production files touched is not a reason to expand test changes.
 - Do not add tests that only improve coverage numbers, prove that code happens to run, or lock in implementation details without a user-visible or cross-module contract.
 - Avoid fake fuzz/stress/smoke/performance tests built from random inputs, large loop counts, sleeps, timing comparisons, or log-only assertions.
 - Avoid duplicate tests that exercise the same branch with different names but no new invariant.
 - Avoid tests that force incorrect provider/protocol semantics into production code.
 - Avoid tests that assert private constants, select-field lists, helper internals, or file layout when observable behavior is already covered elsewhere.
 - Prefer deterministic table tests with explicit inputs and exact expected outputs.
-- When tests need database, request context, user group, settings, or cache state, initialize that state explicitly inside the test fixture.
-- New or substantially rewritten Go backend tests MUST use `github.com/stretchr/testify/require` for setup and fatal assertions, and `github.com/stretchr/testify/assert` for non-fatal value checks.
+- When permitted tests need embedded database, request context, user group, settings, or cache state, initialize that state explicitly inside the test fixture.
+- Assertions written or changed within a permitted Go backend test modification MUST use `github.com/stretchr/testify/require` for setup and fatal assertions, and `github.com/stretchr/testify/assert` for non-fatal value checks. Do not rewrite untouched or imported upstream assertions solely to change style.
 - Avoid hand-written assertion helpers unless they encode a reusable project-specific invariant.
-- When cleaning tests, preserve meaningful regression coverage. If a deleted test covered a real contract indirectly, replace it with a smaller test that asserts that contract directly.
+- Preserve meaningful regression coverage during necessary modifications or upstream synchronization. Do not proactively clean up tests or weaken assertions simply to make a failure disappear.
 
 **Documentation files:**
 
