@@ -33,6 +33,7 @@ type SystemVersion = {
   stage: number
   sequence: bigint
   revision: bigint
+  forkRevision: bigint
 }
 
 const releaseStages: Record<string, number> = {
@@ -43,14 +44,14 @@ const releaseStages: Record<string, number> = {
   patch: 4,
 }
 
-/** Project tags include post-release patches and historical numeric revisions. */
+/** Project tags include post-release patches, historical numeric revisions, and fork revisions. */
 export function parseSystemVersion(
   value: string | null | undefined
 ): SystemVersion | null {
   const match = value
     ?.trim()
     .match(
-      /^v?(\d+(?:\.\d+){2,})(?:-(alpha|beta|rc|patch)(?:\.(\d+))?(?:-i18nfix\.(\d+))?)?(?:\+[\da-zA-Z.-]+)?$/
+      /^v?(\d+(?:\.\d+){2,})(?:-(alpha|beta|rc|patch)(?:\.(\d+))?(?:-i18nfix\.(\d+))?)?(?:-fork\.(\d+))?(?:\+[\da-zA-Z.-]+)?$/
     )
   if (!match || (match[4] && match[2] !== 'rc')) return null
 
@@ -62,6 +63,7 @@ export function parseSystemVersion(
     stage: releaseStages[match[2] ?? 'stable'],
     sequence: BigInt(match[3] ?? '0'),
     revision: BigInt(match[4] ?? '0'),
+    forkRevision: BigInt(match[5] ?? '0'),
   }
 }
 
@@ -81,6 +83,9 @@ export function compareSystemVersions(
   if (a.stage !== b.stage) return a.stage < b.stage ? -1 : 1
   if (a.sequence !== b.sequence) return a.sequence < b.sequence ? -1 : 1
   if (a.revision !== b.revision) return a.revision < b.revision ? -1 : 1
+  if (a.forkRevision !== b.forkRevision) {
+    return a.forkRevision < b.forkRevision ? -1 : 1
+  }
   return 0
 }
 
