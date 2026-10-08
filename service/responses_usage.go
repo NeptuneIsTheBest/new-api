@@ -41,7 +41,9 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse) 
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
 			ApplyResponsesUsage(a.usage, event.Response.Usage)
-			if a.outputText.Len() == 0 {
+			if a.usage.CompletionTokens != 0 {
+				a.outputText.Reset()
+			} else if a.outputText.Len() == 0 {
 				// Some upstreams carry the output only on the terminal event.
 				a.outputText.WriteString(relayconvert.ExtractOutputTextFromResponses(event.Response))
 			}
@@ -58,12 +60,15 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse) 
 			}
 		}
 		a.imageCounter.Commit(a.info)
+		a.imageCounter.Reset()
 		a.imageCommitted = true
 	case "response.output_text.delta", "response.function_call_arguments.delta",
 		"response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta":
 		// Every delta kind here is generated output that upstream bills as
 		// output tokens, so all of them feed the missing-usage estimate.
-		a.outputText.WriteString(event.Delta)
+		if a.usage.CompletionTokens == 0 {
+			a.outputText.WriteString(event.Delta)
+		}
 	case dto.ResponsesOutputTypeItemDone:
 		if event.Item == nil {
 			return
@@ -96,6 +101,8 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 			a.usage.CompletionTokens = CountTextToken(output, a.info.GetUpstreamModelName())
 		}
 	}
+	a.outputText.Reset()
+	a.imageCounter.Reset()
 	// Upstream bills the prompt as soon as it starts generating, so a stream
 	// that produced any event but no usage still owes its input tokens unless
 	// upstream reported an explicit failure.

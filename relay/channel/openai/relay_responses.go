@@ -23,12 +23,11 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// read response body
-	var responsesResponse dto.OpenAIResponsesResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	err = common.Unmarshal(responseBody, &responsesResponse)
+	responsesResponse, err := service.DecodeResponsesRelayResponse(responseBody)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -81,17 +80,18 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
-		// 检查当前数据是否包含 completed 状态和 usage 信息
-		var streamResponse dto.ResponsesStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		streamResponse, _, err := accumulator.DecodeEvent(common.StringToByteSlice(data), false)
+		if err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
 		}
-		if streamResponse.Response != nil {
+		if info.GetChannelType() == constant.ChannelTypeSGLang && streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+			sr.Error(err)
+		}
 		accumulator.Observe(&streamResponse)
 	})
 

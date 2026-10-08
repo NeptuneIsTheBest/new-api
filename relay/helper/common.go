@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -89,8 +90,27 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
+	// Keep CustomEvent's CR escaping and framing without formatting or copying
+	// the entire JSON payload. The stream owner serializes these writes.
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	if _, exists := c.Writer.Header()["Cache-Control"]; !exists {
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+	}
+	for _, part := range []string{"event: ", resp.Type, "\ndata: ", data, "\n\n"} {
+		for {
+			before, after, found := strings.Cut(part, "\r")
+			if _, err := c.Writer.WriteString(before); err != nil {
+				return err
+			}
+			if !found {
+				break
+			}
+			if _, err := c.Writer.WriteString("\\r"); err != nil {
+				return err
+			}
+			part = after
+		}
+	}
 	return FlushWriter(c)
 }
 

@@ -381,14 +381,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				return nil
 			}
 			info.SetFirstResponseTime()
-			var event struct {
-				dto.ResponsesStreamResponse
-				StreamID string `json:"stream_id"`
-			}
-			if err := common.Unmarshal(incoming.body, &event); err != nil {
+			event, streamID, err := accumulator.DecodeEvent(incoming.body, true)
+			if err != nil {
 				info.StreamStatus.RecordError("invalid upstream websocket event")
 			} else {
-				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
+				if event.Type != "error" && streamID != "" && streamID != create.StreamID {
 					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 						s.shutdown()
 					}
@@ -424,7 +421,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 							}
 							info.StreamStatus.MarkFailed(code, rejection.Error.Type, rejection.Status)
 						}
-						accumulator.Observe(&event.ResponsesStreamResponse)
+						accumulator.Observe(&event)
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 						s.lastResponseID = responseID
 						state.terminal, state.closeAfter = &incoming, ambiguous
@@ -452,7 +449,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						responseID = event.Response.ID
 					}
 				}
-				accumulator.Observe(&event.ResponsesStreamResponse)
+				accumulator.Observe(&event)
 			}
 			switch event.Type {
 			case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
