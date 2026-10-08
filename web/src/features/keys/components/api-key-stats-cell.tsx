@@ -72,9 +72,6 @@ export function ApiKeyStatsCell(props: {
           value: formatNumber(props.stat.output_tokens, locale),
         },
       ]}
-      description={t(
-        'Total input includes cache reads and writes. Statistics cover all matching consumption logs.'
-      )}
     >
       <span className='min-w-0 truncate text-sm tabular-nums'>{total}</span>
     </QuotaDetailsPopover>

@@ -26,7 +26,6 @@ import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
-  PopoverDescription,
   PopoverTitle,
   PopoverTrigger,
 } from '@/components/ui/popover'
@@ -154,27 +153,20 @@ export function CommonLogsStats() {
         accent='bg-primary/70'
       >
         {hasTokenStats && (
-          <>
-            <dl className='grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm'>
-              <dt className='text-muted-foreground'>{t('Total Tokens')}</dt>
-              <dd className='font-mono tabular-nums'>
-                {formatNumber(stats.total_tokens, locale)}
-              </dd>
-              <dt className='text-muted-foreground'>{t('Input Tokens')}</dt>
-              <dd className='font-mono tabular-nums'>
-                {formatNumber(stats.input_tokens, locale)}
-              </dd>
-              <dt className='text-muted-foreground'>{t('Output Tokens')}</dt>
-              <dd className='font-mono tabular-nums'>
-                {formatNumber(stats.output_tokens, locale)}
-              </dd>
-            </dl>
-            <PopoverDescription>
-              {t(
-                'Total input includes cache reads and writes. Statistics cover all matching consumption logs.'
-              )}
-            </PopoverDescription>
-          </>
+          <dl className='grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm'>
+            <dt className='text-muted-foreground'>{t('Total Tokens')}</dt>
+            <dd className='font-mono tabular-nums'>
+              {formatNumber(stats.total_tokens, locale)}
+            </dd>
+            <dt className='text-muted-foreground'>{t('Input Tokens')}</dt>
+            <dd className='font-mono tabular-nums'>
+              {formatNumber(stats.input_tokens, locale)}
+            </dd>
+            <dt className='text-muted-foreground'>{t('Output Tokens')}</dt>
+            <dd className='font-mono tabular-nums'>
+              {formatNumber(stats.output_tokens, locale)}
+            </dd>
+          </dl>
         )}
       </StatBadge>
       <StatBadge
@@ -185,25 +177,16 @@ export function CommonLogsStats() {
         accent='bg-chart-2'
       >
         {hasCacheStats && (
-          <>
-            <dl className='grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm'>
-              <dt className='text-muted-foreground'>
-                {t('Cache Read Tokens')}
-              </dt>
-              <dd className='font-mono tabular-nums'>
-                {formatNumber(stats.cache_read_tokens, locale)}
-              </dd>
-              <dt className='text-muted-foreground'>{t('Input Tokens')}</dt>
-              <dd className='font-mono tabular-nums'>
-                {formatNumber(stats.input_tokens, locale)}
-              </dd>
-            </dl>
-            <PopoverDescription>
-              {t(
-                'Cache read tokens / total input tokens. Cache writes do not count as hits. No input tokens means 0%.'
-              )}
-            </PopoverDescription>
-          </>
+          <dl className='grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-sm'>
+            <dt className='text-muted-foreground'>{t('Cache Read Tokens')}</dt>
+            <dd className='font-mono tabular-nums'>
+              {formatNumber(stats.cache_read_tokens, locale)}
+            </dd>
+            <dt className='text-muted-foreground'>{t('Input Tokens')}</dt>
+            <dd className='font-mono tabular-nums'>
+              {formatNumber(stats.input_tokens, locale)}
+            </dd>
+          </dl>
         )}
       </StatBadge>
       <StatBadge
