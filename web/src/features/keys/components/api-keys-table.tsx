@@ -393,13 +393,6 @@ export function ApiKeysTable() {
             <ApiKeyStatsFilter stats={stats} />
           </>
         ),
-        leftActions: (
-          <p className='text-muted-foreground text-xs'>
-            {t(
-              'Statistics cover retained consumption logs only. Refunds are not deducted.'
-            )}
-          </p>
-        ),
         filters: [
           {
             columnId: 'status',
