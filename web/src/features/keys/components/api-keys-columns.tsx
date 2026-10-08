@@ -155,30 +155,40 @@ export function useApiKeysColumns(
         minSize: 260,
       },
       {
-        id: 'period_tokens',
-        header: t('Tokens'),
-        cell: ({ row }) => (
-          <ApiKeyStatsCell
-            stat={statsByToken.get(row.original.id)}
-            isLoading={isStatsLoading}
-            kind='tokens'
-          />
-        ),
+        id: 'period_usage',
+        header: t('Usage'),
+        cell: ({ row }) => {
+          const stat = statsByToken.get(row.original.id)
+
+          return (
+            <div className='grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1 whitespace-normal'>
+              <span
+                data-table-text='secondary'
+                className='text-muted-foreground'
+              >
+                {t('Tokens')}
+              </span>
+              <ApiKeyStatsCell
+                stat={stat}
+                isLoading={isStatsLoading}
+                kind='tokens'
+              />
+              <span
+                data-table-text='secondary'
+                className='text-muted-foreground'
+              >
+                {t('Period consumption')}
+              </span>
+              <ApiKeyStatsCell
+                stat={stat}
+                isLoading={isStatsLoading}
+                kind='quota'
+              />
+            </div>
+          )
+        },
         enableSorting: false,
-        size: 160,
-      },
-      {
-        id: 'period_quota',
-        header: t('Period consumption'),
-        cell: ({ row }) => (
-          <ApiKeyStatsCell
-            stat={statsByToken.get(row.original.id)}
-            isLoading={isStatsLoading}
-            kind='quota'
-          />
-        ),
-        enableSorting: false,
-        size: 180,
+        size: 220,
       },
       {
         accessorKey: 'group',
