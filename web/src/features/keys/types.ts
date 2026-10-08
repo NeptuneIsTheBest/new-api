@@ -65,6 +65,20 @@ export interface GetApiKeysParams {
   size?: number
 }
 
+export interface ApiKeyUsageStat {
+  token_id: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  quota: number
+}
+
+export interface GetApiKeyStatsParams {
+  token_ids: number[]
+  start_timestamp: number
+  end_timestamp: number
+}
+
 export interface GetApiKeysResponse {
   success: boolean
   message?: string

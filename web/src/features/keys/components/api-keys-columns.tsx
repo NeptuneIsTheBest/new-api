@@ -31,9 +31,10 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { API_KEY_STATUSES } from '../constants'
-import type { ApiKey } from '../types'
+import type { ApiKey, ApiKeyUsageStat } from '../types'
 import { ApiKeyGroupCell } from './api-key-group-cell'
 import { ApiKeyQuotaCell } from './api-key-quota-cell'
+import { ApiKeyStatsCell } from './api-key-stats-cell'
 import {
   ApiKeyActivityCell,
   ApiKeyTimestampCell,
@@ -46,6 +47,7 @@ import {
 import { DataTableRowActions } from './data-table-row-actions'
 
 const EMPTY_GROUP_RATIOS: Record<string, number | string> = {}
+const EMPTY_USAGE_STATS: ReadonlyMap<number, ApiKeyUsageStat> = new Map()
 
 function useGroupRatios(): Record<string, number | string> {
   const { data } = useQuery({
@@ -67,7 +69,11 @@ function useGroupRatios(): Record<string, number | string> {
   return data ?? EMPTY_GROUP_RATIOS
 }
 
-export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
+export function useApiKeysColumns(
+  now: number,
+  statsByToken: ReadonlyMap<number, ApiKeyUsageStat> = EMPTY_USAGE_STATS,
+  isStatsLoading = false
+): ColumnDef<ApiKey>[] {
   const { t, i18n } = useTranslation()
   useSystemConfigStore((state) => state.config.currency)
   const { meta: currency } = getCurrencyDisplay()
@@ -147,6 +153,32 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         cell: ({ row }) => <ApiKeyQuotaCell apiKey={row.original} now={now} />,
         size: 260,
         minSize: 260,
+      },
+      {
+        id: 'period_tokens',
+        header: t('Tokens'),
+        cell: ({ row }) => (
+          <ApiKeyStatsCell
+            stat={statsByToken.get(row.original.id)}
+            isLoading={isStatsLoading}
+            kind='tokens'
+          />
+        ),
+        enableSorting: false,
+        size: 160,
+      },
+      {
+        id: 'period_quota',
+        header: t('Period consumption'),
+        cell: ({ row }) => (
+          <ApiKeyStatsCell
+            stat={statsByToken.get(row.original.id)}
+            isLoading={isStatsLoading}
+            kind='quota'
+          />
+        ),
+        enableSorting: false,
+        size: 180,
       },
       {
         accessorKey: 'group',
@@ -233,6 +265,16 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
         meta: { pinned: 'right' as const },
       },
     ],
-    [t, quotaUnit, now, groupRatios, shouldReduceMotion, locale, justNowLabel]
+    [
+      t,
+      quotaUnit,
+      now,
+      groupRatios,
+      shouldReduceMotion,
+      locale,
+      justNowLabel,
+      statsByToken,
+      isStatsLoading,
+    ]
   )
 }

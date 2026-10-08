@@ -40,6 +40,17 @@ type LogStatParams struct {
 	UpstreamRequestID string
 }
 
+func (stat *Stat) finalizeTokenCounts() error {
+	if stat.InputTokens < 0 || stat.OutputTokens < 0 || stat.CacheReadTokens < 0 || stat.CacheReadTokens > stat.InputTokens || stat.InputTokens > math.MaxInt64-stat.OutputTokens {
+		return errors.New("统计 Token 数量超出范围")
+	}
+	stat.TotalTokens = stat.InputTokens + stat.OutputTokens
+	if stat.InputTokens > 0 {
+		stat.CacheHitRate = float64(stat.CacheReadTokens) / float64(stat.InputTokens) * 100
+	}
+	return nil
+}
+
 func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err error) {
 	base := LOG_DB.WithContext(ctx).Table("logs").Where("type = ?", LogTypeConsume)
 	if params.UserID != nil {
@@ -73,13 +84,15 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 	}
 	period = period.Session(&gorm.Session{})
 	if params.Type == LogTypeUnknown || params.Type == LogTypeConsume {
-		err = logTokenStatQuery(period).Scan(&stat).Error
+		err = logTokenStatQuery(period, false).Scan(&stat).Error
 		var pgErr *pgconn.PgError
 		// All text-to-number casts are guarded by JSON numeric types. In this
 		// query 22P02 can only come from historical invalid JSON in other.
 		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) && errors.As(err, &pgErr) && pgErr.Code == "22P02" {
 			common.SysError("invalid historical log JSON; using streaming token statistics")
-			stat, err = streamLogTokenStats(period)
+			var grouped map[int]Stat
+			grouped, err = streamLogTokenStats(period, false)
+			stat = grouped[0]
 		}
 	} else {
 		// Preserve the existing quota/rate behavior for other log types while
@@ -90,12 +103,8 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 		common.SysError("failed to query log stat: " + sanitizeDBError(err).Error())
 		return Stat{}, errors.New("查询统计数据失败")
 	}
-	if stat.InputTokens < 0 || stat.OutputTokens < 0 || stat.CacheReadTokens < 0 || stat.CacheReadTokens > stat.InputTokens || stat.InputTokens > math.MaxInt64-stat.OutputTokens {
-		return Stat{}, errors.New("统计 Token 数量超出范围")
-	}
-	stat.TotalTokens = stat.InputTokens + stat.OutputTokens
-	if stat.InputTokens > 0 {
-		stat.CacheHitRate = float64(stat.CacheReadTokens) / float64(stat.InputTokens) * 100
+	if err := stat.finalizeTokenCounts(); err != nil {
+		return Stat{}, err
 	}
 
 	// RPM/TPM retain their current rolling 60-second window, independent
@@ -146,7 +155,7 @@ func logStatJSONNumber(key string) string {
 	}
 }
 
-func logTokenStatQuery(period *gorm.DB) *gorm.DB {
+func logTokenStatQuery(period *gorm.DB, groupByToken bool) *gorm.DB {
 	safeJSON := "CASE WHEN json_valid(other) THEN other ELSE '{}' END"
 	switch common.LogDatabaseType() {
 	case common.DatabaseTypeMySQL:
@@ -156,8 +165,8 @@ func logTokenStatQuery(period *gorm.DB) *gorm.DB {
 	case common.DatabaseTypeClickHouse:
 		safeJSON = "if(isValidJSON(logs.other), logs.other, '{}')"
 	}
-	documents := period.Select("quota, CASE WHEN prompt_tokens > 0 THEN prompt_tokens ELSE 0 END AS prompt_tokens, CASE WHEN completion_tokens > 0 THEN completion_tokens ELSE 0 END AS output_tokens, " + safeJSON + " AS other")
-	fields := []string{"quota", "prompt_tokens", "output_tokens"}
+	documents := period.Select("token_id, quota, CASE WHEN prompt_tokens > 0 THEN prompt_tokens ELSE 0 END AS prompt_tokens, CASE WHEN completion_tokens > 0 THEN completion_tokens ELSE 0 END AS output_tokens, " + safeJSON + " AS other")
+	fields := []string{"token_id", "quota", "prompt_tokens", "output_tokens"}
 	for _, key := range []string{"input_tokens_total", "cache_tokens", "cache_creation_tokens", "cache_creation_tokens_5m", "cache_creation_tokens_1h"} {
 		fields = append(fields, "COALESCE("+logStatJSONNumber(key)+", 0) AS "+key)
 	}
@@ -180,12 +189,17 @@ func logTokenStatQuery(period *gorm.DB) *gorm.DB {
 		ELSE 0 END`
 	input := "CASE WHEN input_tokens_total > 0 THEN input_tokens_total WHEN (" + anthropic + ") = 1 THEN prompt_tokens + cache_tokens + " + cacheWrite + " ELSE prompt_tokens END"
 	normalized := LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_metadata", metadata).
-		Select("quota, output_tokens, cache_tokens, " + input + " AS input_tokens")
-	return LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_tokens", normalized).
-		Select(`COALESCE(SUM(log_tokens.quota), 0) AS quota,
+		Select("token_id, quota, output_tokens, cache_tokens, " + input + " AS input_tokens")
+	selection := `COALESCE(SUM(log_tokens.quota), 0) AS quota,
 			COALESCE(SUM(log_tokens.input_tokens), 0) AS input_tokens,
 			COALESCE(SUM(log_tokens.output_tokens), 0) AS output_tokens,
-			COALESCE(SUM(CASE WHEN log_tokens.cache_tokens > log_tokens.input_tokens THEN log_tokens.input_tokens ELSE log_tokens.cache_tokens END), 0) AS cache_read_tokens`)
+			COALESCE(SUM(CASE WHEN log_tokens.cache_tokens > log_tokens.input_tokens THEN log_tokens.input_tokens ELSE log_tokens.cache_tokens END), 0) AS cache_read_tokens`
+	query := LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_tokens", normalized)
+	if groupByToken {
+		selection = "log_tokens.token_id, " + selection
+		query = query.Group("log_tokens.token_id")
+	}
+	return query.Select(selection)
 }
 
 func logMetadataTokenCount(metadata map[string]json.RawMessage, key string) (int64, bool) {
@@ -209,19 +223,24 @@ func logMetadataTokenCount(metadata map[string]json.RawMessage, key string) (int
 
 // PostgreSQL 9.6 cannot validate arbitrary JSON text without casting it. Only
 // malformed historical JSON triggers this bounded-memory fallback.
-func streamLogTokenStats(period *gorm.DB) (Stat, error) {
-	rows, err := period.Select("COALESCE(quota, 0), COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), other").Rows()
+func streamLogTokenStats(period *gorm.DB, groupByToken bool) (map[int]Stat, error) {
+	rows, err := period.Select("COALESCE(token_id, 0), COALESCE(quota, 0), COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), other").Rows()
 	if err != nil {
-		return Stat{}, err
+		return nil, err
 	}
 	defer rows.Close()
-	var stat Stat
+	grouped := make(map[int]Stat)
 	for rows.Next() {
+		var tokenID int
 		var quota, prompt, output int64
 		var other *string
-		if err := rows.Scan(&quota, &prompt, &output, &other); err != nil {
-			return Stat{}, err
+		if err := rows.Scan(&tokenID, &quota, &prompt, &output, &other); err != nil {
+			return nil, err
 		}
+		if !groupByToken {
+			tokenID = 0
+		}
+		stat := grouped[tokenID]
 		var metadata map[string]json.RawMessage
 		if other != nil && common.UnmarshalJsonStr(*other, &metadata) != nil {
 			metadata = nil
@@ -233,7 +252,7 @@ func streamLogTokenStats(period *gorm.DB) (Stat, error) {
 		creation5m, _ := logMetadataTokenCount(metadata, "cache_creation_tokens_5m")
 		creation1h, _ := logMetadataTokenCount(metadata, "cache_creation_tokens_1h")
 		if creation5m > math.MaxInt64-creation1h {
-			return Stat{}, errors.New("cache token count exceeds int64")
+			return nil, errors.New("cache token count exceeds int64")
 		}
 		if !hasWrite {
 			cacheWrite = max(creation, creation5m+creation1h)
@@ -260,7 +279,7 @@ func streamLogTokenStats(period *gorm.DB) (Stat, error) {
 			input = max(prompt, 0)
 			if anthropic {
 				if cacheRead > math.MaxInt64-cacheWrite || input > math.MaxInt64-cacheRead-cacheWrite {
-					return Stat{}, errors.New("input token count exceeds int64")
+					return nil, errors.New("input token count exceeds int64")
 				}
 				input += cacheRead + cacheWrite
 			}
@@ -269,12 +288,13 @@ func streamLogTokenStats(period *gorm.DB) (Stat, error) {
 		cacheRead = min(cacheRead, input)
 		if stat.InputTokens > math.MaxInt64-input || stat.OutputTokens > math.MaxInt64-output || stat.CacheReadTokens > math.MaxInt64-cacheRead ||
 			(quota > 0 && stat.Quota > math.MaxInt64-quota) || (quota < 0 && stat.Quota < math.MinInt64-quota) {
-			return Stat{}, errors.New("log statistics exceed int64")
+			return nil, errors.New("log statistics exceed int64")
 		}
 		stat.Quota += quota
 		stat.InputTokens += input
 		stat.OutputTokens += output
 		stat.CacheReadTokens += cacheRead
+		grouped[tokenID] = stat
 	}
-	return stat, rows.Err()
+	return grouped, rows.Err()
 }

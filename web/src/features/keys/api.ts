@@ -26,7 +26,22 @@ import type {
   SearchApiKeysParams,
   ApiKeyFormData,
   TokenAutoGroupsConfig,
+  ApiKeyUsageStat,
+  GetApiKeyStatsParams,
 } from './types'
+
+export async function getApiKeyStats(
+  params: GetApiKeyStatsParams,
+  signal?: AbortSignal
+): Promise<ApiResponse<ApiKeyUsageStat[]>> {
+  const res = await api.get('/api/token/stats', {
+    params: { ...params, token_ids: params.token_ids.join(',') },
+    // React Query owns deduplication and cancellation for this request.
+    disableDuplicate: true,
+    signal,
+  })
+  return res.data
+}
 
 // ============================================================================
 // API Key Management

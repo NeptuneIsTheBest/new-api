@@ -22,16 +22,41 @@ import z from 'zod'
 import { ApiKeys } from '@/features/keys'
 import { API_KEY_STATUS_OPTIONS } from '@/features/keys/constants'
 
-const apiKeySearchSchema = z.object({
-  page: z.number().optional().catch(1),
-  pageSize: z.number().optional().catch(undefined),
-  status: z
-    .array(z.enum(API_KEY_STATUS_OPTIONS.map((s) => s.value as `${number}`)))
-    .optional()
-    .catch([]),
-  filter: z.string().optional().catch(''),
-  token: z.string().optional().catch(''),
-})
+const apiKeySearchSchema = z
+  .object({
+    page: z.number().optional().catch(1),
+    pageSize: z.number().optional().catch(undefined),
+    status: z
+      .array(z.enum(API_KEY_STATUS_OPTIONS.map((s) => s.value as `${number}`)))
+      .optional()
+      .catch([]),
+    filter: z.string().optional().catch(''),
+    token: z.string().optional().catch(''),
+    startTime: z
+      .number()
+      .int()
+      .min(0)
+      .max(8_640_000_000_000_000)
+      .optional()
+      .catch(undefined),
+    endTime: z
+      .number()
+      .int()
+      .min(0)
+      .max(8_640_000_000_000_000)
+      .optional()
+      .catch(undefined),
+  })
+  .transform((search) => {
+    if (
+      search.startTime !== undefined &&
+      search.endTime !== undefined &&
+      search.startTime <= search.endTime
+    ) {
+      return search
+    }
+    return { ...search, startTime: undefined, endTime: undefined }
+  })
 
 export const Route = createFileRoute('/_authenticated/keys/')({
   validateSearch: apiKeySearchSchema,

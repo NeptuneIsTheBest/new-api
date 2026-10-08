@@ -51,8 +51,11 @@ import {
   API_KEY_STATUSES,
   ERROR_MESSAGES,
 } from '../constants'
-import type { ApiKey } from '../types'
+import { useApiKeyStats } from '../hooks/use-api-key-stats'
+import type { ApiKey, ApiKeyUsageStat } from '../types'
 import { ApiKeyQuotaCell } from './api-key-quota-cell'
+import { ApiKeyStatsCell } from './api-key-stats-cell'
+import { ApiKeyStatsFilter } from './api-key-stats-filter'
 import { ApiKeyActivityCell } from './api-key-timestamp-cell'
 import {
   ApiKeyCell,
@@ -102,10 +105,14 @@ function ApiKeysMobileList({
   table,
   isLoading,
   now,
+  statsByToken,
+  isStatsLoading,
 }: {
   table: TanstackTable<ApiKey>
   isLoading: boolean
   now: number
+  statsByToken: ReadonlyMap<number, ApiKeyUsageStat>
+  isStatsLoading: boolean
 }) {
   const { t } = useTranslation()
   const rows = table.getRowModel().rows
@@ -184,6 +191,26 @@ function ApiKeysMobileList({
                   )}
               </div>
               <ApiKeyQuotaCell apiKey={apiKey} now={now} variant='card' />
+              <div className='grid grid-cols-2 gap-3'>
+                <div className='min-w-0 space-y-1'>
+                  <div className='text-muted-foreground'>{t('Tokens')}</div>
+                  <ApiKeyStatsCell
+                    stat={statsByToken.get(apiKey.id)}
+                    isLoading={isStatsLoading}
+                    kind='tokens'
+                  />
+                </div>
+                <div className='min-w-0 space-y-1'>
+                  <div className='text-muted-foreground'>
+                    {t('Period consumption')}
+                  </div>
+                  <ApiKeyStatsCell
+                    stat={statsByToken.get(apiKey.id)}
+                    isLoading={isStatsLoading}
+                    kind='quota'
+                  />
+                </div>
+              </div>
             </div>
 
             <div className='flex flex-wrap items-center gap-x-5 gap-y-1'>
@@ -219,7 +246,6 @@ export function ApiKeysTable() {
   const { t } = useTranslation()
   const { refreshTrigger } = useApiKeys()
   const [now, setNow] = useState(() => Date.now())
-  const columns = useApiKeysColumns(now)
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -261,7 +287,7 @@ export function ApiKeysTable() {
 
   // Fetch data with React Query
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isPlaceholderData } = useQuery({
     queryKey: [
       'keys',
       pagination.pageIndex + 1,
@@ -303,6 +329,8 @@ export function ApiKeysTable() {
   })
 
   const apiKeys = data?.items || []
+  const stats = useApiKeyStats(apiKeys, isPlaceholderData)
+  const columns = useApiKeysColumns(now, stats.statsByToken, stats.isLoading)
 
   const { table } = useDataTable({
     data: apiKeys,
@@ -354,13 +382,23 @@ export function ApiKeysTable() {
         searchPlaceholder: t('Filter by name...'),
         searchDebounceMs: 500,
         additionalSearch: (
-          <Input
-            placeholder={t('Filter by API key...')}
-            aria-label={t('Filter by API key...')}
-            value={tokenFilterInput}
-            onChange={(e) => setTokenFilterInput(e.target.value)}
-            className='w-full sm:w-50 lg:w-60'
-          />
+          <>
+            <Input
+              placeholder={t('Filter by API key...')}
+              aria-label={t('Filter by API key...')}
+              value={tokenFilterInput}
+              onChange={(e) => setTokenFilterInput(e.target.value)}
+              className='w-full sm:w-50 lg:w-60'
+            />
+            <ApiKeyStatsFilter stats={stats} />
+          </>
+        ),
+        leftActions: (
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Statistics cover retained consumption logs only. Refunds are not deducted.'
+            )}
+          </p>
         ),
         filters: [
           {
@@ -372,7 +410,13 @@ export function ApiKeysTable() {
         ],
       }}
       mobile={
-        <ApiKeysMobileList table={table} isLoading={isLoading} now={now} />
+        <ApiKeysMobileList
+          table={table}
+          isLoading={isLoading}
+          now={now}
+          statsByToken={stats.statsByToken}
+          isStatsLoading={stats.isLoading}
+        />
       }
       getRowClassName={(row) =>
         isDisabledApiKeyRow(row.original) ? DISABLED_ROW_DESKTOP : undefined
