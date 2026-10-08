@@ -88,10 +88,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '>=1.25.1'
+          go-version: '>=1.26'
           cache-dependency-path: |
             go.sum
             relaykit/go.sum
+            tokenkit/go.sum
 
       - name: Download frontend
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -117,7 +118,8 @@ jobs:
               LDFLAGS="-X 'github.com/QuantumNous/new-api/common.Version=$VERSION'"
               ;;
           esac
-          go build -ldflags "$LDFLAGS" -o "build/$BINARY_NAME"
+          go mod download
+          go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "$LDFLAGS" -o "build/$BINARY_NAME"
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
