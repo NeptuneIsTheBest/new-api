@@ -76,10 +76,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '>=1.25.1'
+          go-version: '>=1.26'
           cache-dependency-path: |
             go.sum
             relaykit/go.sum
+            tokenkit/go.sum
 
       - name: Download frontend
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -91,7 +92,8 @@ jobs:
       - name: Build Go binary (Windows)
         run: |
           test -s web/dist/index.html
-          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'" -o new-api.exe
+          go mod download
+          go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION'" -o new-api.exe
 
       - name: Configure Electron cache paths
         run: |
