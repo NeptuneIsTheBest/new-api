@@ -211,6 +211,7 @@ import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
+import { CodexOAuthButton } from '../dialogs/codex-oauth-dialog'
 import { ConfigureModelsDialog } from '../dialogs/configure-models-dialog'
 import {
   MissingModelsConfirmationDialog,
@@ -4429,6 +4430,19 @@ export function ChannelMutateDrawer({
                       )}
                     </div>
                     <div className='flex flex-wrap items-center gap-2'>
+                      {open && canEditSensitive && (
+                        <CodexOAuthButton
+                          key={channelId ?? 'new'}
+                          proxy={currentProxy}
+                          disabled={isSubmitting || isChannelDetailLoading}
+                          onKeyGenerated={(key) => {
+                            form.setValue('key', key, {
+                              shouldDirty: true,
+                              shouldValidate: true,
+                            })
+                          }}
+                        />
+                      )}
                       {isEditing && channelId && (
                         <Button
                           type='button'

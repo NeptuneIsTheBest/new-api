@@ -2,28 +2,108 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"golang.org/x/oauth2"
 )
 
 const (
-	codexOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	codexOAuthTokenURL = "https://auth.openai.com/oauth/token"
-	codexJWTClaimPath  = "https://api.openai.com/auth"
-	defaultHTTPTimeout = 20 * time.Second
+	codexOAuthClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexOAuthTokenURL    = "https://auth.openai.com/oauth/token"
+	CodexOAuthRedirectURI = "http://localhost:1455/auth/callback"
+	codexJWTClaimPath     = "https://api.openai.com/auth"
+	defaultHTTPTimeout    = 20 * time.Second
 )
 
 type CodexOAuthTokenResult struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    time.Time
+}
+
+func CodexOAuthAuthorizationURL(state, verifier string) string {
+	query := url.Values{
+		"response_type":              {"code"},
+		"client_id":                  {codexOAuthClientID},
+		"redirect_uri":               {CodexOAuthRedirectURI},
+		"scope":                      {"openid profile email offline_access"},
+		"state":                      {state},
+		"code_challenge":             {oauth2.S256ChallengeFromVerifier(verifier)},
+		"code_challenge_method":      {"S256"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+		"originator":                 {"codex_cli_rs"},
+	}
+	return "https://auth.openai.com/oauth/authorize?" + query.Encode()
+}
+
+func ExchangeCodexAuthorizationCodeWithProxy(ctx context.Context, code, verifier, proxyURL string) (*CodexOAuthTokenResult, error) {
+	if code == "" || verifier == "" {
+		return nil, errors.New("missing codex authorization code or verifier")
+	}
+	proxy, _, err := common.ParseProxyURLRuntime(proxyURL)
+	if err != nil {
+		return nil, errors.New("invalid codex oauth proxy")
+	}
+	// Relay TLS overrides must not disable certificate verification for login.
+	client, err := newHTTPClientFromPolicy(defaultHTTPTransportPolicy(), proxy, &tls.Config{MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return nil, errors.New("invalid codex oauth proxy")
+	}
+	client.Timeout = defaultHTTPTimeout
+	defer client.CloseIdleConnections()
+	// Authorization codes and the PKCE verifier must only reach the token endpoint.
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {codexOAuthClientID},
+		"redirect_uri":  {CodexOAuthRedirectURI},
+		"code":          {code},
+		"code_verifier": {verifier},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexOAuthTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, errors.New("failed to create codex oauth request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errors.New("codex oauth exchange request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("codex oauth exchange failed: status=%d", resp.StatusCode)
+	}
+	var payload struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := common.DecodeJson(io.LimitReader(resp.Body, 1<<20), &payload); err != nil {
+		return nil, errors.New("invalid codex oauth token response")
+	}
+	payload.AccessToken = strings.TrimSpace(payload.AccessToken)
+	payload.RefreshToken = strings.TrimSpace(payload.RefreshToken)
+	if payload.AccessToken == "" || payload.RefreshToken == "" || payload.ExpiresIn <= 0 || payload.ExpiresIn > int64((1<<63-1)/time.Second) {
+		return nil, errors.New("codex oauth token response missing fields")
+	}
+	return &CodexOAuthTokenResult{
+		AccessToken:  payload.AccessToken,
+		RefreshToken: payload.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second),
+	}, nil
 }
 
 func RefreshCodexOAuthToken(ctx context.Context, refreshToken string) (*CodexOAuthTokenResult, error) {

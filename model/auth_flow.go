@@ -12,10 +12,12 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 const (
 	AuthFlowPurposeOAuth             = "oauth"
+	AuthFlowPurposeCodexOAuth        = "codex_oauth"
 	AuthFlowPurposeTwoFALogin        = "2fa_login"
 	AuthFlowPurposeLoginVerification = "login_verification"
 	AuthFlowPurposeLoginPasskey      = "login_passkey"
@@ -167,7 +169,13 @@ func createAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow,
 		Payload:   input.Payload,
 		ExpiresAt: input.ExpiresAt,
 	}
-	if err := tx.Create(flow).Error; err != nil {
+	query := tx
+	if input.Purpose == AuthFlowPurposeCodexOAuth {
+		// The payload holds the PKCE verifier and may include proxy credentials.
+		// Keep it out of SQL error/slow-query logs, including debug mode.
+		query = tx.Session(&gorm.Session{Logger: logger.Discard})
+	}
+	if err := query.Create(flow).Error; err != nil {
 		return "", nil, err
 	}
 	return token, flow, nil

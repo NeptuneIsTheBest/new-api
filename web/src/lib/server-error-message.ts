@@ -23,6 +23,14 @@ import i18next from 'i18next'
 export const safeServerErrorMessage = Symbol('safeServerErrorMessage')
 
 const serverErrorMessageKeys = {
+  CODEX_OAUTH_START_FAILED:
+    'Failed to start Codex authorization. Please try again.',
+  CODEX_OAUTH_PROXY_INVALID: 'Invalid proxy URL.',
+  CODEX_OAUTH_CALLBACK_INVALID:
+    'Paste the complete callback URL with code and state.',
+  CODEX_OAUTH_FLOW_INVALID:
+    'Codex authorization expired or was already used. Start again.',
+  CODEX_OAUTH_EXCHANGE_FAILED: 'Codex authorization failed. Start again.',
   TELEGRAM_OAUTH_NOT_CONFIGURED:
     'Telegram OAuth is not configured or enabled. Please contact your administrator.',
   TELEGRAM_OAUTH_CONFLICT:

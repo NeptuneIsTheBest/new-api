@@ -49,6 +49,17 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 		controller.GetChannelKey,
 	)
 
+	for _, operation := range []struct {
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{"/codex/oauth/start", controller.StartCodexOAuth},
+		{"/codex/oauth/complete", controller.CompleteCodexOAuth},
+	} {
+		handlePermissionRoute(channelRoute, http.MethodPost, operation.path, authz.ChannelSensitiveWrite,
+			middleware.CriticalRateLimit(), middleware.DisableCache(), operation.handler)
+	}
+
 	for _, route := range channelPermissionRoutes {
 		handlePermissionRoute(channelRoute, route.method, route.path, route.permission, route.handler)
 	}
