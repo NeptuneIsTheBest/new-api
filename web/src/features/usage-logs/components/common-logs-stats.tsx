@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -32,15 +31,12 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatLogQuota, formatNumber } from '@/lib/format'
-import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
-import { getLogStats, getUserLogStats } from '../api'
-import { DEFAULT_LOG_STATS } from '../constants'
-import { buildApiParams } from '../lib/utils'
+import { logStatsQueryOptions } from '../lib/log-stats'
+import type { GetLogStatsParams } from '../types'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
-
-const route = getRouteApi('/_authenticated/usage-logs/$section')
 
 function StatBadge(props: {
   label: string
@@ -93,37 +89,18 @@ function StatBadge(props: {
   )
 }
 
-export function CommonLogsStats() {
+export function CommonLogsStats(props: { params: GetLogStatsParams }) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { isAdminView: isAdmin } = useLogsViewScope()
-  const searchParams = route.useSearch()
+  const userId = useAuthStore((state) => state.auth.user?.id)
   const { sensitiveVisible } = useUsageLogsContext()
 
   const {
     data: stats,
     isLoading,
     isError,
-  } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
-    queryFn: async () => {
-      const params = buildApiParams({
-        page: 1,
-        pageSize: 1,
-        searchParams,
-        columnFilters: [],
-        isAdmin,
-      })
-
-      const result = isAdmin
-        ? requireServerSuccess(await getLogStats(params))
-        : requireServerSuccess(await getUserLogStats(params))
-
-      return result.success
-        ? result.data || DEFAULT_LOG_STATS
-        : DEFAULT_LOG_STATS
-    },
-  })
+  } = useQuery(logStatsQueryOptions(userId, isAdmin, props.params))
 
   if (isLoading) {
     return (

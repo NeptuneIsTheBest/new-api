@@ -16,7 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
+import {
+  hashKey,
+  useQueryClient,
+  useIsFetching,
+  useQuery,
+} from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
@@ -43,9 +48,11 @@ import { getGroups } from '@/features/users/api'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
 import { buildSearchParams } from '../lib/filter'
+import { buildLogStatsParams, logStatsQueryOptions } from '../lib/log-stats'
 import { getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
@@ -123,6 +130,8 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
+  const userId = useAuthStore((state) => state.auth.user?.id)
+  const [defaultTimeRange] = useState(getDefaultTimeRange)
   const { isAdminView: isAdmin } = useLogsViewScope()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
@@ -146,7 +155,7 @@ export function CommonLogsFilterBar<TData>(
   }, [isAdmin, adminGroups, userGroups])
 
   const searchState = useMemo<CommonLogDraft>(() => {
-    const { start, end } = getDefaultTimeRange()
+    const { start, end } = defaultTimeRange
     const sourceValues = {
       startTime: searchParams.startTime,
       endTime: searchParams.endTime,
@@ -178,6 +187,7 @@ export function CommonLogsFilterBar<TData>(
       logType: getLogTypeValue(searchParams.type),
     }
   }, [
+    defaultTimeRange,
     searchParams.startTime,
     searchParams.endTime,
     searchParams.channel,
@@ -194,6 +204,24 @@ export function CommonLogsFilterBar<TData>(
     draft.sourceKey === searchState.sourceKey ? draft : searchState
   const filters = activeDraft.filters
   const logType = activeDraft.logType
+  const statsParams = useMemo(() => {
+    const committedSearch = buildSearchParams(searchState.filters, 'common')
+    // A URL with only one time bound must keep the other bound unrestricted.
+    if (searchParams.startTime ?? searchParams.endTime) {
+      committedSearch.startTime = searchParams.startTime
+      committedSearch.endTime = searchParams.endTime
+    }
+    return buildLogStatsParams(
+      { ...committedSearch, type: searchParams.type },
+      isAdmin
+    )
+  }, [
+    isAdmin,
+    searchState.filters,
+    searchParams.startTime,
+    searchParams.endTime,
+    searchParams.type,
+  ])
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
@@ -210,22 +238,55 @@ export function CommonLogsFilterBar<TData>(
     [searchState]
   )
 
-  const handleApply = useCallback(
-    (nextFilters: CommonLogFilters = filters) => {
-      const filterParams = buildSearchParams(nextFilters, 'common')
-      navigate({
+  const applySearch = useCallback(
+    (nextSearch: Record<string, unknown>) => {
+      const nextStats = logStatsQueryOptions(
+        userId,
+        isAdmin,
+        buildLogStatsParams(nextSearch, isAdmin)
+      )
+      const currentStats = logStatsQueryOptions(userId, isAdmin, statsParams)
+      const search = { ...nextSearch, page: 1 }
+      // Mark the destination stale without starting another query for the old
+      // filters. A changed query key will fetch it when navigation commits.
+      void queryClient.invalidateQueries({
+        queryKey: nextStats.queryKey,
+        exact: true,
+        refetchType: 'none',
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ['logs', 'common'],
+        refetchType: 'none',
+      })
+      void navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
-        search: {
-          ...filterParams,
-          type: [logType],
-          page: 1,
-        },
+        search,
       })
-      queryClient.invalidateQueries({ queryKey: ['logs'] })
-      queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      if (hashKey(nextStats.queryKey) === hashKey(currentStats.queryKey)) {
+        void queryClient.refetchQueries(
+          { queryKey: nextStats.queryKey, exact: true, type: 'active' },
+          { cancelRefetch: false }
+        )
+      }
+      if (hashKey([search]) === hashKey([searchParams])) {
+        void queryClient.refetchQueries(
+          { queryKey: ['logs', 'common'], type: 'active' },
+          { cancelRefetch: false }
+        )
+      }
     },
-    [filters, logType, navigate, queryClient]
+    [isAdmin, navigate, queryClient, searchParams, statsParams, userId]
+  )
+
+  const handleApply = useCallback(
+    (nextFilters: CommonLogFilters = filters) => {
+      applySearch({
+        ...buildSearchParams(nextFilters, 'common'),
+        type: [logType],
+      })
+    },
+    [applySearch, filters, logType]
   )
 
   const handleReset = useCallback(() => {
@@ -242,17 +303,8 @@ export function CommonLogsFilterBar<TData>(
       logType: LOG_TYPE_ALL_VALUE,
     })
 
-    navigate({
-      to: '/usage-logs/$section',
-      params: { section: 'common' },
-      search: {
-        page: 1,
-        ...resetSearch,
-      },
-    })
-    queryClient.invalidateQueries({ queryKey: ['logs'] })
-    queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [navigate, queryClient])
+    applySearch(resetSearch)
+  }, [applySearch])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -296,7 +348,7 @@ export function CommonLogsFilterBar<TData>(
     'Only used to find historical logs. New records are available in Audit Logs.'
   )
 
-  const statsBar = <CommonLogsStats />
+  const statsBar = <CommonLogsStats params={statsParams} />
   const sensitiveToggle = (
     <Tooltip>
       <TooltipTrigger

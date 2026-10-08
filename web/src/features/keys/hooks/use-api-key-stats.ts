@@ -57,7 +57,10 @@ export function useApiKeyStats(apiKeys: ApiKey[], isPlaceholderData: boolean) {
     }
   }, [defaultRange, navigate, search.startTime, search.endTime])
 
-  const tokenIDs = apiKeys.map((key) => key.id).sort((a, b) => a - b)
+  const tokenIDs = useMemo(
+    () => apiKeys.map((key) => key.id).sort((a, b) => a - b),
+    [apiKeys]
+  )
   const startTimestamp = Math.floor(startTime / 1000)
   const endTimestamp = Math.floor(endTime / 1000)
   const enabled = Boolean(userID) && tokenIDs.length > 0 && !isPlaceholderData
