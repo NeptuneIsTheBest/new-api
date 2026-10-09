@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -128,11 +129,58 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 	return stat, nil
 }
 
+func logStatSupportsJSONTable(db *gorm.DB) bool {
+	if !common.UsingLogDatabase(common.DatabaseTypeMySQL) {
+		return false
+	}
+	var config *mysql.Config
+	switch dialector := db.Dialector.(type) {
+	case mysqlMigrationDialector:
+		config = dialector.Config
+	case *mysqlMigrationDialector:
+		if dialector != nil {
+			config = dialector.Config
+		}
+	case mysql.Dialector:
+		config = dialector.Config
+	case *mysql.Dialector:
+		if dialector != nil {
+			config = dialector.Config
+		}
+	}
+	if config == nil {
+		return false
+	}
+	version := strings.ToLower(config.ServerVersion)
+	if strings.Contains(version, "mariadb") || strings.Contains(version, "tidb") {
+		return false
+	}
+	version, _, _ = strings.Cut(version, "-")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	var numbers [3]int
+	for i, part := range parts {
+		number, err := strconv.Atoi(part)
+		if err != nil || number < 0 {
+			return false
+		}
+		numbers[i] = number
+	}
+	// Earlier JSON_TABLE versions reject JSON null instead of returning SQL NULL.
+	return numbers[0] > 8 || numbers[0] == 8 && (numbers[1] > 0 || numbers[2] >= 21)
+}
+
 // logStatJSONText only receives fixed metadata paths, never user input.
-func logStatJSONText(keys ...string) string {
+func logStatJSONText(useJSONTable bool, keys ...string) string {
 	switch common.LogDatabaseType() {
 	case common.DatabaseTypeMySQL:
-		return "NULLIF(JSON_UNQUOTE(JSON_EXTRACT(other, '$." + strings.Join(keys, ".") + "')), 'null')"
+		value := "JSON_EXTRACT(other, '$." + strings.Join(keys, ".") + "')"
+		if useJSONTable {
+			value = "log_metadata." + strings.Join(keys, "_")
+		}
+		return "NULLIF(JSON_UNQUOTE(" + value + "), 'null')"
 	case common.DatabaseTypePostgreSQL:
 		return "(other::json #>> '{" + strings.Join(keys, ",") + "}')"
 	case common.DatabaseTypeClickHouse:
@@ -147,11 +195,15 @@ func logStatJSONText(keys ...string) string {
 
 // Missing/non-numeric fields remain NULL so an explicit zero cache-write total
 // takes precedence over old cache creation breakdowns.
-func logStatJSONNumber(key string) string {
-	value := logStatJSONText(key)
+func logStatJSONNumber(useJSONTable bool, key string) string {
+	value := logStatJSONText(useJSONTable, key)
 	switch common.LogDatabaseType() {
 	case common.DatabaseTypeMySQL:
-		return fmt.Sprintf("CASE WHEN JSON_TYPE(JSON_EXTRACT(other, '$.%s')) IN ('INTEGER', 'DOUBLE') THEN GREATEST(0, CAST(%s AS SIGNED)) END", key, value)
+		raw := "JSON_EXTRACT(other, '$." + key + "')"
+		if useJSONTable {
+			raw = "log_metadata." + key
+		}
+		return fmt.Sprintf("CASE WHEN JSON_TYPE(%s) IN ('INTEGER', 'DOUBLE') THEN GREATEST(0, CAST(%s AS SIGNED)) END", raw, value)
 	case common.DatabaseTypePostgreSQL:
 		return fmt.Sprintf("CASE WHEN json_typeof(other::json -> '%s') = 'number' THEN GREATEST(0, TRUNC((%s)::numeric)) END", key, value)
 	case common.DatabaseTypeClickHouse:
@@ -180,12 +232,13 @@ func logTokenStatQuery(period *gorm.DB, options logTokenStatOptions) *gorm.DB {
 	if common.UsingLogDatabase(common.DatabaseTypeSQLite) {
 		least, greatest = "min", "max"
 	}
-	inputTotal := "NULLIF(" + logStatJSONNumber("input_tokens_total") + ", 0)"
-	cacheRead := "COALESCE(" + logStatJSONNumber("cache_tokens") + ", 0)"
-	creation := "COALESCE(" + logStatJSONNumber("cache_creation_tokens") + ", 0)"
-	creation5m := "COALESCE(" + logStatJSONNumber("cache_creation_tokens_5m") + ", 0)"
-	creation1h := "COALESCE(" + logStatJSONNumber("cache_creation_tokens_1h") + ", 0)"
-	cacheWrite := "COALESCE(" + logStatJSONNumber("cache_write_tokens") + ", " + greatest + "(" + creation + ", " + creation5m + " + " + creation1h + "))"
+	useJSONTable := logStatSupportsJSONTable(period)
+	inputTotal := "NULLIF(" + logStatJSONNumber(useJSONTable, "input_tokens_total") + ", 0)"
+	cacheRead := "COALESCE(" + logStatJSONNumber(useJSONTable, "cache_tokens") + ", 0)"
+	creation := "COALESCE(" + logStatJSONNumber(useJSONTable, "cache_creation_tokens") + ", 0)"
+	creation5m := "COALESCE(" + logStatJSONNumber(useJSONTable, "cache_creation_tokens_5m") + ", 0)"
+	creation1h := "COALESCE(" + logStatJSONNumber(useJSONTable, "cache_creation_tokens_1h") + ", 0)"
+	cacheWrite := "COALESCE(" + logStatJSONNumber(useJSONTable, "cache_write_tokens") + ", " + greatest + "(" + creation + ", " + creation5m + " + " + creation1h + "))"
 	// The explicit billing semantic wins over the transport's claude flag.
 	// Old Claude-to-OpenAI conversions can only be recognized by split writes.
 	anthropic := fmt.Sprintf(`CASE COALESCE(%s, '')
@@ -199,7 +252,7 @@ func logTokenStatQuery(period *gorm.DB, options logTokenStatOptions) *gorm.DB {
 			WHEN 'billing-usage-gemini-estimated' THEN 0
 			ELSE CASE WHEN %s IN ('true', '1') OR %s > 0 OR %s > 0 THEN 1 ELSE 0 END
 		END
-		ELSE 0 END`, logStatJSONText("usage_semantic"), logStatJSONText("admin_info", "usage_billing_path"), logStatJSONText("claude"), creation5m, creation1h)
+		ELSE 0 END`, logStatJSONText(useJSONTable, "usage_semantic"), logStatJSONText(useJSONTable, "admin_info", "usage_billing_path"), logStatJSONText(useJSONTable, "claude"), creation5m, creation1h)
 	// Keep historical metadata inside the fallback expressions: a derived-table
 	// alias alone does not prevent the optimizer from repeating JSON extraction.
 	input := "COALESCE(" + inputTotal + ", prompt_tokens + CASE WHEN (" + anthropic + ") = 1 THEN " + cacheRead + " + " + cacheWrite + " ELSE 0 END)"
@@ -218,6 +271,21 @@ func logTokenStatQuery(period *gorm.DB, options logTokenStatOptions) *gorm.DB {
 		fields = "token_id, " + fields
 	}
 	normalized := LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_documents", documents).Select(fields)
+	if useJSONTable {
+		// JSON columns preserve numeric types and explicit zero values. The root
+		// path and left join keep exactly one row per log, including JSON null.
+		normalized = normalized.Joins(`LEFT JOIN JSON_TABLE(log_documents.other, '$' COLUMNS (
+			input_tokens_total JSON PATH '$.input_tokens_total' NULL ON EMPTY NULL ON ERROR,
+			cache_tokens JSON PATH '$.cache_tokens' NULL ON EMPTY NULL ON ERROR,
+			cache_creation_tokens JSON PATH '$.cache_creation_tokens' NULL ON EMPTY NULL ON ERROR,
+			cache_creation_tokens_5m JSON PATH '$.cache_creation_tokens_5m' NULL ON EMPTY NULL ON ERROR,
+			cache_creation_tokens_1h JSON PATH '$.cache_creation_tokens_1h' NULL ON EMPTY NULL ON ERROR,
+			cache_write_tokens JSON PATH '$.cache_write_tokens' NULL ON EMPTY NULL ON ERROR,
+			usage_semantic JSON PATH '$.usage_semantic' NULL ON EMPTY NULL ON ERROR,
+			admin_info_usage_billing_path JSON PATH '$.admin_info.usage_billing_path' NULL ON EMPTY NULL ON ERROR,
+			claude JSON PATH '$.claude' NULL ON EMPTY NULL ON ERROR
+		)) AS log_metadata ON TRUE`)
+	}
 	query := LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_tokens", normalized)
 	if options.GroupByToken {
 		selection = "log_tokens.token_id, " + selection
