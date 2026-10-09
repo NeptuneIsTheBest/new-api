@@ -21,7 +21,6 @@ import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -70,17 +69,13 @@ function StatBadge(props: {
 
   return (
     <Popover>
-      <PopoverTrigger
-        render={
-          <Button
-            variant='outline'
-            size='sm'
-            className='gap-2 max-sm:min-h-11'
-          />
-        }
+      <Badge
+        variant='outline'
+        className='h-7 gap-2 rounded-md px-2.5 shadow-xs max-sm:min-h-11'
+        render={<PopoverTrigger />}
       >
         {content}
-      </PopoverTrigger>
+      </Badge>
       <PopoverContent align='start'>
         <PopoverTitle>{props.label}</PopoverTitle>
         {props.children}
