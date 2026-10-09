@@ -272,9 +272,10 @@ func logTokenStatQuery(period *gorm.DB, options logTokenStatOptions) *gorm.DB {
 	}
 	normalized := LOG_DB.WithContext(period.Statement.Context).Table("(?) AS log_documents", documents).Select(fields)
 	if useJSONTable {
+		// Cast the derived-table source to avoid MySQL JSON_TABLE error 1210.
 		// JSON columns preserve numeric types and explicit zero values. The root
 		// path and left join keep exactly one row per log, including JSON null.
-		normalized = normalized.Joins(`LEFT JOIN JSON_TABLE(log_documents.other, '$' COLUMNS (
+		normalized = normalized.Joins(`LEFT JOIN JSON_TABLE(CAST(log_documents.other AS JSON), '$' COLUMNS (
 			input_tokens_total JSON PATH '$.input_tokens_total' NULL ON EMPTY NULL ON ERROR,
 			cache_tokens JSON PATH '$.cache_tokens' NULL ON EMPTY NULL ON ERROR,
 			cache_creation_tokens JSON PATH '$.cache_creation_tokens' NULL ON EMPTY NULL ON ERROR,
