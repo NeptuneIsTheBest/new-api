@@ -71,7 +71,7 @@ function StatBadge(props: {
     <Popover>
       <Badge
         variant='outline'
-        className='h-7 gap-2 rounded-md px-2.5 shadow-xs max-sm:min-h-11'
+        className='h-7 gap-2 rounded-md px-2.5 shadow-xs'
         render={<PopoverTrigger />}
       >
         {content}
