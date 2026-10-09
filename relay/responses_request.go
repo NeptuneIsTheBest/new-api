@@ -33,9 +33,18 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		)
 	}
 
-	request, err := common.DeepCopy(req)
-	if err != nil {
-		return nil, nil, nil, types.NewError(fmt.Errorf("failed to copy responses request: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	if req == nil {
+		return nil, nil, nil, types.NewError(fmt.Errorf("failed to copy responses request: copy source cannot be nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
+	passThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled
+	var request *dto.OpenAIResponsesRequest
+	if passThrough {
+		// Model mapping only changes this local model name; reasoning suffix
+		// processing is a no-op in passthrough mode and the original body is sent.
+		local := *req
+		request = &local
+	} else {
+		request = req.Clone()
 	}
 	if err := helper.ModelMappedHelper(c, info, request); err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
@@ -49,7 +58,7 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		return nil, nil, nil, types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	if passThrough {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())

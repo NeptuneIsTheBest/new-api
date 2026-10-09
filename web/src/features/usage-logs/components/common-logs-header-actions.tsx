@@ -26,6 +26,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
+import type { GetLogStatsParams } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
 import { useUsageLogsContext } from './usage-logs-provider'
 
@@ -36,13 +37,13 @@ import { useUsageLogsContext } from './usage-logs-provider'
  * header so the toolbar below stays focused on filter inputs and form
  * actions only.
  */
-export function CommonLogsHeaderActions() {
+export function CommonLogsHeaderActions(props: { params: GetLogStatsParams }) {
   const { t } = useTranslation()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
 
   return (
     <div className='flex flex-wrap items-center gap-2'>
-      <CommonLogsStats />
+      <CommonLogsStats params={props.params} />
       <Tooltip>
         <TooltipTrigger
           render={

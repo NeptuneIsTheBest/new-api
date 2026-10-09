@@ -166,16 +166,23 @@ func (c *ImageGenerationCallCounter) Observe(item *dto.ResponsesOutput, outputIn
 	if outputIndex != nil && *outputIndex >= 0 {
 		aliases = append(aliases, fmt.Sprintf("index:%d", *outputIndex))
 	}
-	sum := sha256.Sum256([]byte(item.Result))
-	aliases = append(aliases, "result:"+hex.EncodeToString(sum[:]))
-
-	if c.seen == nil {
-		c.seen = make(map[string]struct{})
-	}
+	// Terminal responses repeat completed items. Check their cheap identities
+	// before hashing a potentially multi-megabyte image result.
 	for _, alias := range aliases {
 		if _, ok := c.seen[alias]; ok {
 			return
 		}
+	}
+	// Sum256 only reads its input and does not retain it.
+	sum := sha256.Sum256(common.StringToByteSlice(item.Result))
+	resultAlias := "result:" + hex.EncodeToString(sum[:])
+	if _, ok := c.seen[resultAlias]; ok {
+		return
+	}
+	aliases = append(aliases, resultAlias)
+
+	if c.seen == nil {
+		c.seen = make(map[string]struct{})
 	}
 	for _, alias := range aliases {
 		c.seen[alias] = struct{}{}
@@ -189,6 +196,15 @@ func (c *ImageGenerationCallCounter) Count() int {
 		return 0
 	}
 	return c.count
+}
+
+// Reset releases observations after their billable count has been committed.
+func (c *ImageGenerationCallCounter) Reset() {
+	if c == nil {
+		return
+	}
+	c.seen = nil
+	c.count = 0
 }
 
 // Commit writes the capped completed-output count into RelayInfo once.

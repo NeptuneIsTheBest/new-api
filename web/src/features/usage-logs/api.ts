@@ -58,13 +58,18 @@ async function fetchLogs<T>(
 async function fetchLogStats<T>(
   endpoint: string,
   params: T,
-  isAdmin: boolean
+  isAdmin: boolean,
+  signal?: AbortSignal
 ): Promise<GetLogStatsResponse> {
   const queryParams = buildQueryParams(
     params as unknown as Record<string, unknown>
   )
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}/stat?${queryParams}`)
+  const res = await api.get(`${path}/stat?${queryParams}`, {
+    // React Query owns deduplication and cancellation for statistics.
+    disableDuplicate: true,
+    signal,
+  })
   return res.data
 }
 
@@ -79,12 +84,15 @@ export const getUserLogs = (
   params: Omit<GetLogsParams, 'username' | 'channel'> = {}
 ) => fetchLogs('/api/log', params, false)
 
-export const getLogStats = (params: GetLogStatsParams = {}) =>
-  fetchLogStats('/api/log', params, true)
+export const getLogStats = (
+  params: GetLogStatsParams = {},
+  signal?: AbortSignal
+) => fetchLogStats('/api/log', params, true, signal)
 
 export const getUserLogStats = (
-  params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
-) => fetchLogStats('/api/log', params, false)
+  params: Omit<GetLogStatsParams, 'username' | 'channel'> = {},
+  signal?: AbortSignal
+) => fetchLogStats('/api/log', params, false, signal)
 
 export async function getUserInfo(
   userId: number

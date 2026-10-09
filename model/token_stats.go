@@ -42,12 +42,13 @@ func GetTokenUsageStats(ctx context.Context, userID int, tokenIDs []int, startTi
 		TokenID int
 		Stat
 	}
-	err = logTokenStatQuery(period, true).Scan(&rows).Error
+	options := logTokenStatOptions{GroupByToken: true}
+	err = logTokenStatQuery(period, options).Scan(&rows).Error
 	grouped := make(map[int]Stat, len(rows))
 	var pgErr *pgconn.PgError
 	if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) && errors.As(err, &pgErr) && pgErr.Code == "22P02" {
 		common.SysError("invalid historical log JSON; using streaming token statistics")
-		grouped, err = streamLogTokenStats(period, true)
+		grouped, err = streamLogTokenStats(period, options)
 	} else if err == nil {
 		for _, row := range rows {
 			grouped[row.TokenID] = row.Stat
