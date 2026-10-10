@@ -1,177 +1,162 @@
 package common
 
 import (
-	"sync"
-	"sync/atomic"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
 )
 
-// DiskCacheConfig 磁盘缓存配置（由 performance_setting 包更新）
 type DiskCacheConfig struct {
-	// Enabled 是否启用磁盘缓存
-	Enabled bool
-	// ThresholdMB 触发磁盘缓存的请求体大小阈值（MB）
-	ThresholdMB int
-	// MaxSizeMB 磁盘缓存最大总大小（MB）
-	MaxSizeMB int
-	// Path 磁盘缓存目录
-	Path string
+	Enabled       bool
+	ThresholdMB   int
+	MaxSizeMB     int
+	Path          string
+	directoryPath string
 }
 
-// 全局磁盘缓存配置
-var diskCacheConfig = DiskCacheConfig{
-	Enabled:     false,
-	ThresholdMB: 10,
-	MaxSizeMB:   1024,
-	Path:        "",
-}
-var diskCacheConfigMu sync.RWMutex
+// Config, reservations, file ownership and stats share the manager's lock.
+var diskCacheConfig = DiskCacheConfig{ThresholdMB: 10, MaxSizeMB: 1024, directoryPath: resolveDiskCacheDirectory("")}
 
-// GetDiskCacheConfig 获取磁盘缓存配置
+// Resolve existing ancestors as well as existing cache directories so aliases
+// such as /tmp and /private/tmp cannot register or clean the same files twice.
+// Resolution happens only when applying configuration, not on stats reads.
+func resolveDiskCacheDirectory(path string) string {
+	if path == "" {
+		path = os.TempDir()
+	}
+	dir := filepath.Join(path, diskCacheDir)
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	ancestor := dir
+	suffix := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+			return filepath.Join(resolved, suffix)
+		} else if !os.IsNotExist(err) {
+			return dir
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return dir
+		}
+		suffix = filepath.Join(filepath.Base(ancestor), suffix)
+		ancestor = parent
+	}
+}
+
+func (c DiskCacheConfig) limits() (threshold, capacity int64, valid bool) {
+	if c.ThresholdMB < 0 || int64(c.ThresholdMB) > math.MaxInt64>>20 ||
+		c.MaxSizeMB <= 0 || int64(c.MaxSizeMB) > math.MaxInt64>>20 {
+		return 0, 0, false
+	}
+	return int64(c.ThresholdMB) << 20, int64(c.MaxSizeMB) << 20, true
+}
+
 func GetDiskCacheConfig() DiskCacheConfig {
-	diskCacheConfigMu.RLock()
-	defer diskCacheConfigMu.RUnlock()
+	diskCache.Lock()
+	defer diskCache.Unlock()
 	return diskCacheConfig
 }
 
-// SetDiskCacheConfig 设置磁盘缓存配置
 func SetDiskCacheConfig(config DiskCacheConfig) {
-	diskCacheConfigMu.Lock()
-	defer diskCacheConfigMu.Unlock()
+	config.directoryPath = resolveDiskCacheDirectory(config.Path)
+	diskCache.Lock()
+	// Symlink resolution does not normalize case on case-insensitive volumes.
+	// Reuse the registered directory identity before discovering any files.
+	if diskCache.directories[config.directoryPath] == nil {
+		if info, err := os.Stat(config.directoryPath); err == nil {
+			for path := range diskCache.directories {
+				if registered, err := os.Stat(path); err == nil && os.SameFile(info, registered) {
+					config.directoryPath = path
+					break
+				}
+			}
+		}
+	}
+	changed := diskCacheConfig != config
 	diskCacheConfig = config
+	dir := config.directory()
+	var scanErr error
+	// Options load individually at startup. Do not adopt the default or an
+	// intermediate directory before startup cleanup (or the first cache write)
+	// establishes the actual configured directory owned by this instance.
+	if diskCache.initialized && config.Enabled {
+		if directory := diskCache.directories[dir]; directory == nil || !directory.initialized {
+			scanErr = scanDiskCacheDirectory(dir)
+		}
+	}
+	diskCache.Unlock()
+	if changed {
+		if _, _, valid := config.limits(); !valid {
+			SysError("invalid disk cache limits; new cache data will use memory")
+		}
+	}
+	if scanErr != nil {
+		SysError(fmt.Sprintf("failed to scan disk cache directory: %v", scanErr))
+	}
 }
 
-// IsDiskCacheEnabled 是否启用磁盘缓存
 func IsDiskCacheEnabled() bool {
-	diskCacheConfigMu.RLock()
-	defer diskCacheConfigMu.RUnlock()
-	return diskCacheConfig.Enabled
+	config := GetDiskCacheConfig()
+	_, _, valid := config.limits()
+	return config.Enabled && valid
 }
 
-// GetDiskCacheThresholdBytes 获取磁盘缓存阈值（字节）
 func GetDiskCacheThresholdBytes() int64 {
-	diskCacheConfigMu.RLock()
-	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.ThresholdMB) << 20
+	threshold, _, _ := GetDiskCacheConfig().limits()
+	return threshold
 }
 
-// GetDiskCacheMaxSizeBytes 获取磁盘缓存最大大小（字节）
 func GetDiskCacheMaxSizeBytes() int64 {
-	diskCacheConfigMu.RLock()
-	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.MaxSizeMB) << 20
+	_, capacity, _ := GetDiskCacheConfig().limits()
+	return capacity
 }
 
-// GetDiskCachePath 获取磁盘缓存目录
-func GetDiskCachePath() string {
-	diskCacheConfigMu.RLock()
-	defer diskCacheConfigMu.RUnlock()
-	return diskCacheConfig.Path
-}
+func GetDiskCachePath() string { return GetDiskCacheConfig().Path }
 
-// DiskCacheStats 磁盘缓存统计信息
 type DiskCacheStats struct {
-	// 当前活跃的磁盘缓存文件数
-	ActiveDiskFiles int64 `json:"active_disk_files"`
-	// 当前磁盘缓存总大小（字节）
-	CurrentDiskUsageBytes int64 `json:"current_disk_usage_bytes"`
-	// 当前内存缓存数量
-	ActiveMemoryBuffers int64 `json:"active_memory_buffers"`
-	// 当前内存缓存总大小（字节）
+	ActiveDiskFiles         int64 `json:"active_disk_files"`
+	CurrentDiskUsageBytes   int64 `json:"current_disk_usage_bytes"`
+	ActiveMemoryBuffers     int64 `json:"active_memory_buffers"`
 	CurrentMemoryUsageBytes int64 `json:"current_memory_usage_bytes"`
-	// 磁盘缓存命中次数
-	DiskCacheHits int64 `json:"disk_cache_hits"`
-	// 内存缓存命中次数
-	MemoryCacheHits int64 `json:"memory_cache_hits"`
-	// 磁盘缓存最大限制（字节）
-	DiskCacheMaxBytes int64 `json:"disk_cache_max_bytes"`
-	// 磁盘缓存阈值（字节）
+	DiskCacheHits           int64 `json:"disk_cache_hits"`
+	MemoryCacheHits         int64 `json:"memory_cache_hits"`
+	DiskCacheMaxBytes       int64 `json:"disk_cache_max_bytes"`
 	DiskCacheThresholdBytes int64 `json:"disk_cache_threshold_bytes"`
 }
 
 var diskCacheStats DiskCacheStats
 
-// GetDiskCacheStats 获取缓存统计信息
 func GetDiskCacheStats() DiskCacheStats {
-	stats := DiskCacheStats{
-		ActiveDiskFiles:         atomic.LoadInt64(&diskCacheStats.ActiveDiskFiles),
-		CurrentDiskUsageBytes:   atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes),
-		ActiveMemoryBuffers:     atomic.LoadInt64(&diskCacheStats.ActiveMemoryBuffers),
-		CurrentMemoryUsageBytes: atomic.LoadInt64(&diskCacheStats.CurrentMemoryUsageBytes),
-		DiskCacheHits:           atomic.LoadInt64(&diskCacheStats.DiskCacheHits),
-		MemoryCacheHits:         atomic.LoadInt64(&diskCacheStats.MemoryCacheHits),
-		DiskCacheMaxBytes:       GetDiskCacheMaxSizeBytes(),
-		DiskCacheThresholdBytes: GetDiskCacheThresholdBytes(),
-	}
+	diskCache.Lock()
+	defer diskCache.Unlock()
+	stats := diskCacheStats
+	stats.DiskCacheThresholdBytes, stats.DiskCacheMaxBytes, _ = diskCacheConfig.limits()
 	return stats
 }
 
-// IncrementDiskFiles 增加磁盘文件计数
-func IncrementDiskFiles(size int64) {
-	atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, 1)
-	atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, size)
-}
-
-// DecrementDiskFiles 减少磁盘文件计数
-func DecrementDiskFiles(size int64) {
-	if atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, -1) < 0 {
-		atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, 0)
-	}
-	if atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, -size) < 0 {
-		atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, 0)
-	}
-}
-
-// IncrementMemoryBuffers 增加内存缓存计数
+// IncrementMemoryBuffers records one successful memory cache creation.
 func IncrementMemoryBuffers(size int64) {
-	atomic.AddInt64(&diskCacheStats.ActiveMemoryBuffers, 1)
-	atomic.AddInt64(&diskCacheStats.CurrentMemoryUsageBytes, size)
+	diskCache.Lock()
+	defer diskCache.Unlock()
+	diskCacheStats.ActiveMemoryBuffers++
+	diskCacheStats.CurrentMemoryUsageBytes += size
+	diskCacheStats.MemoryCacheHits++
 }
 
-// DecrementMemoryBuffers 减少内存缓存计数
 func DecrementMemoryBuffers(size int64) {
-	atomic.AddInt64(&diskCacheStats.ActiveMemoryBuffers, -1)
-	atomic.AddInt64(&diskCacheStats.CurrentMemoryUsageBytes, -size)
+	diskCache.Lock()
+	defer diskCache.Unlock()
+	diskCacheStats.ActiveMemoryBuffers--
+	diskCacheStats.CurrentMemoryUsageBytes -= size
 }
 
-// IncrementDiskCacheHits 增加磁盘缓存命中次数
-func IncrementDiskCacheHits() {
-	atomic.AddInt64(&diskCacheStats.DiskCacheHits, 1)
-}
-
-// IncrementMemoryCacheHits 增加内存缓存命中次数
-func IncrementMemoryCacheHits() {
-	atomic.AddInt64(&diskCacheStats.MemoryCacheHits, 1)
-}
-
-// ResetDiskCacheStats 重置命中统计信息（不重置当前使用量）
+// ResetDiskCacheStats never clears live usage or outstanding reservations.
 func ResetDiskCacheStats() {
-	atomic.StoreInt64(&diskCacheStats.DiskCacheHits, 0)
-	atomic.StoreInt64(&diskCacheStats.MemoryCacheHits, 0)
-}
-
-// ResetDiskCacheUsage 重置磁盘缓存使用量统计（用于清理缓存后）
-func ResetDiskCacheUsage() {
-	atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, 0)
-	atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, 0)
-}
-
-// SyncDiskCacheStats 从实际磁盘状态同步统计信息
-// 用于修正统计与实际不符的情况
-func SyncDiskCacheStats() {
-	fileCount, totalSize, err := GetDiskCacheInfo()
-	if err != nil {
-		return
-	}
-	atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, int64(fileCount))
-	atomic.StoreInt64(&diskCacheStats.CurrentDiskUsageBytes, totalSize)
-}
-
-// IsDiskCacheAvailable 检查是否可以创建新的磁盘缓存
-func IsDiskCacheAvailable(requestSize int64) bool {
-	if !IsDiskCacheEnabled() {
-		return false
-	}
-	maxBytes := GetDiskCacheMaxSizeBytes()
-	currentUsage := atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes)
-	return currentUsage+requestSize <= maxBytes
+	diskCache.Lock()
+	defer diskCache.Unlock()
+	diskCacheStats.DiskCacheHits = 0
+	diskCacheStats.MemoryCacheHits = 0
 }

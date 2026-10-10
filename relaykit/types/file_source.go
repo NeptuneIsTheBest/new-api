@@ -150,13 +150,16 @@ type CachedFileData struct {
 	ImageConfig *image.Config // 图片配置（如果是图片）
 	ImageFormat string        // 图片格式（如果是图片）
 
-	diskPath        string     // 磁盘缓存文件路径（大文件）
-	isDisk          bool       // 是否使用磁盘缓存
-	diskMu          sync.Mutex // 磁盘操作锁（保护磁盘文件的读取和删除）
-	diskClosed      bool       // 是否已关闭/清理
-	statDecremented bool       // 是否已扣减统计
+	diskPath   string     // 磁盘缓存文件路径（大文件）
+	isDisk     bool       // 是否使用磁盘缓存
+	diskMu     sync.Mutex // 磁盘操作锁（保护磁盘文件的读取和删除）
+	diskClosed bool       // 是否已关闭/清理
+	closeErr   error
 
 	OnClose func(size int64)
+	// Release optionally delegates resource disposal to the host. It runs once
+	// for memory and disk caches; without it disk files are removed locally.
+	Release func() error
 }
 
 func NewMemoryCachedData(base64Data string, mimeType string, size int64) *CachedFileData {
@@ -178,12 +181,12 @@ func NewDiskCachedData(diskPath string, mimeType string, size int64) *CachedFile
 }
 
 func (c *CachedFileData) GetBase64Data() (string, error) {
+	c.diskMu.Lock()
+	defer c.diskMu.Unlock()
+
 	if !c.isDisk {
 		return c.base64Data, nil
 	}
-
-	c.diskMu.Lock()
-	defer c.diskMu.Unlock()
 
 	if c.diskClosed {
 		return "", fmt.Errorf("disk cache already closed")
@@ -197,7 +200,9 @@ func (c *CachedFileData) GetBase64Data() (string, error) {
 }
 
 func (c *CachedFileData) SetBase64Data(data string) {
-	if !c.isDisk {
+	c.diskMu.Lock()
+	defer c.diskMu.Unlock()
+	if !c.isDisk && !c.diskClosed {
 		c.base64Data = data
 	}
 }
@@ -207,26 +212,25 @@ func (c *CachedFileData) IsDisk() bool {
 }
 
 func (c *CachedFileData) Close() error {
-	if !c.isDisk {
-		c.base64Data = ""
-		return nil
-	}
-
 	c.diskMu.Lock()
 	defer c.diskMu.Unlock()
 
 	if c.diskClosed {
-		return nil
+		return c.closeErr
 	}
 
 	c.diskClosed = true
-	if c.diskPath != "" {
-		err := os.Remove(c.diskPath)
-		if err == nil && !c.statDecremented && c.OnClose != nil {
-			c.OnClose(c.DiskSize)
-			c.statDecremented = true
+	c.base64Data = ""
+	if c.Release != nil {
+		c.closeErr = c.Release()
+	} else if c.isDisk && c.diskPath != "" {
+		c.closeErr = os.Remove(c.diskPath)
+		if os.IsNotExist(c.closeErr) {
+			c.closeErr = nil
 		}
-		return err
 	}
-	return nil
+	if c.isDisk && c.closeErr == nil && c.OnClose != nil {
+		c.OnClose(c.DiskSize)
+	}
+	return c.closeErr
 }

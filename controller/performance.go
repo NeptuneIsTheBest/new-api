@@ -45,16 +45,7 @@ type MemoryStats struct {
 }
 
 // DiskCacheInfo 磁盘缓存目录信息
-type DiskCacheInfo struct {
-	// 缓存目录路径
-	Path string `json:"path"`
-	// 目录是否存在
-	Exists bool `json:"exists"`
-	// 文件数量
-	FileCount int `json:"file_count"`
-	// 总大小（字节）
-	TotalSize int64 `json:"total_size"`
-}
+type DiskCacheInfo = common.DiskCacheDirectoryInfo
 
 // PerformanceConfig 性能配置
 type PerformanceConfig struct {
@@ -81,8 +72,7 @@ type PerformanceConfig struct {
 
 // GetPerformanceStats 获取性能统计信息
 func GetPerformanceStats(c *gin.Context) {
-	// 不再每次获取统计都全量扫描磁盘，依赖原子计数器保证性能
-	// 仅在系统启动或显式清理时同步
+	// 读取缓存管理器维护的统计快照，不在监控请求中扫描目录。
 	cacheStats := common.GetDiskCacheStats()
 
 	// 获取内存统计
@@ -90,7 +80,7 @@ func GetPerformanceStats(c *gin.Context) {
 	runtime.ReadMemStats(&memStats)
 
 	// 获取磁盘缓存目录信息
-	diskCacheInfo := getDiskCacheInfo()
+	diskCacheInfo := common.GetDiskCacheDirectoryInfo()
 
 	// 获取配置信息
 	diskConfig := common.GetDiskCacheConfig()
@@ -141,8 +131,7 @@ func GetPerformanceStats(c *gin.Context) {
 
 // ClearDiskCache 清理不活跃的磁盘缓存
 func ClearDiskCache(c *gin.Context) {
-	// 清理超过 10 分钟未使用的缓存文件
-	// 10 分钟是一个安全的阈值，确保正在进行的请求不会被误删
+	// 活跃缓存由引用保护；仅删除过期遗留文件或重试已关闭文件的删除
 	err := common.CleanupOldDiskCacheFiles(10 * time.Minute)
 	if err != nil {
 		common.ApiError(c, err)
@@ -350,36 +339,4 @@ func CleanupLogFiles(c *gin.Context) {
 		"message": "",
 		"data":    result,
 	})
-}
-
-// getDiskCacheInfo 获取磁盘缓存目录信息
-func getDiskCacheInfo() DiskCacheInfo {
-	// 使用统一的缓存目录
-	dir := common.GetDiskCacheDir()
-
-	info := DiskCacheInfo{
-		Path:   dir,
-		Exists: false,
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return info
-	}
-
-	info.Exists = true
-	info.FileCount = 0
-	info.TotalSize = 0
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info.FileCount++
-		if fileInfo, err := entry.Info(); err == nil {
-			info.TotalSize += fileInfo.Size()
-		}
-	}
-
-	return info
 }

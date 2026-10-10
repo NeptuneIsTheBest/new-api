@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -144,7 +146,8 @@ func registerSourceForCleanup(c *gin.Context, source types.FileSource) {
 func CleanupFileSources(c *gin.Context) {
 	key := string(constant.ContextKeyFileSourcesToCleanup)
 	if sources, exists := c.Get(key); exists {
-		for _, source := range sources.([]types.FileSource) {
+		registered, _ := sources.([]types.FileSource)
+		for _, source := range registered {
 			if cache := source.GetCache(); cache != nil {
 				cache.Close()
 			}
@@ -183,38 +186,8 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
 	}
 
-	// 转换为 base64
-	base64Data := base64.StdEncoding.EncodeToString(fileBytes)
-
-	// 智能获取 MIME 类型
 	mimeType := smartDetectMimeType(resp, url, fileBytes)
-
-	// 判断是否使用磁盘缓存
-	base64Size := int64(len(base64Data))
-	var cachedData *types.CachedFileData
-
-	if shouldUseDiskCache(base64Size) {
-		// 使用磁盘缓存
-		diskPath, err := writeToDiskCache(base64Data)
-		if err != nil {
-			// 磁盘缓存失败，回退到内存
-			logger.LogWarn(c, fmt.Sprintf("Failed to write to disk cache, falling back to memory: %v", err))
-			cachedData = types.NewMemoryCachedData(base64Data, mimeType, int64(len(fileBytes)))
-		} else {
-			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(fileBytes)))
-			cachedData.DiskSize = base64Size
-			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
-			}
-			common.IncrementDiskFiles(base64Size)
-			if common.DebugEnabled {
-				logger.LogDebug(c, "File cached to disk: %s, size: %d bytes", diskPath, base64Size)
-			}
-		}
-	} else {
-		// 使用内存缓存
-		cachedData = types.NewMemoryCachedData(base64Data, mimeType, int64(len(fileBytes)))
-	}
+	cachedData := cacheFileData(fileBytes, "", mimeType)
 
 	// 如果是图片，尝试获取图片配置
 	if strings.HasPrefix(mimeType, "image/") {
@@ -235,14 +208,52 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 	return cachedData, nil
 }
 
-// shouldUseDiskCache 判断是否应该使用磁盘缓存
-func shouldUseDiskCache(dataSize int64) bool {
-	return common.ShouldUseDiskCache(dataSize)
-}
-
-// writeToDiskCache 将数据写入磁盘缓存
-func writeToDiskCache(base64Data string) (string, error) {
-	return common.WriteDiskCacheFileString(common.DiskCacheTypeFile, base64Data)
+// cacheFileData accepts existing Base64 verbatim, or encodes raw data directly
+// into a managed file. Raw bytes remain available for metadata and safe fallback.
+func cacheFileData(rawData []byte, encodedData string, mimeType string) *types.CachedFileData {
+	encodedSize := int64(len(encodedData))
+	if encodedData == "" {
+		encodedSize = int64(base64.StdEncoding.EncodedLen(len(rawData)))
+	}
+	file, err := common.CreateDiskCacheFile(common.DiskCacheTypeFile, encodedSize)
+	if err == nil {
+		if encodedData != "" {
+			_, err = file.WriteString(encodedData)
+		} else {
+			buffered := bufio.NewWriterSize(file, 32*1024)
+			encoder := base64.NewEncoder(base64.StdEncoding, buffered)
+			_, err = encoder.Write(rawData)
+			if err == nil {
+				err = encoder.Close()
+			}
+			if err == nil {
+				err = buffered.Flush()
+			}
+		}
+		if err == nil {
+			err = file.Seal()
+		}
+		if err == nil {
+			cached := types.NewDiskCachedData(file.Path(), mimeType, int64(len(rawData)))
+			cached.DiskSize = file.Size()
+			cached.Release = file.Close
+			return cached
+		}
+		file.Close()
+	}
+	if !errors.Is(err, common.ErrDiskCacheUnavailable) {
+		common.SysError(fmt.Sprintf("failed to cache file, falling back to memory: %v", err))
+	}
+	if encodedData == "" {
+		encodedData = base64.StdEncoding.EncodeToString(rawData)
+	}
+	cached := types.NewMemoryCachedData(encodedData, mimeType, int64(len(rawData)))
+	common.IncrementMemoryBuffers(encodedSize)
+	cached.Release = func() error {
+		common.DecrementMemoryBuffers(encodedSize)
+		return nil
+	}
+	return cached
 }
 
 // smartDetectMimeType 智能检测 MIME 类型
@@ -350,24 +361,7 @@ func loadFromBase64(base64String string, providedMimeType string) (*types.Cached
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
 
-	base64Size := int64(len(cleanBase64))
-	var cachedData *types.CachedFileData
-
-	if shouldUseDiskCache(base64Size) {
-		diskPath, err := writeToDiskCache(cleanBase64)
-		if err != nil {
-			cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
-		} else {
-			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(decodedData)))
-			cachedData.DiskSize = base64Size
-			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
-			}
-			common.IncrementDiskFiles(base64Size)
-		}
-	} else {
-		cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
-	}
+	cachedData := cacheFileData(decodedData, cleanBase64, mimeType)
 
 	if mimeType == "" || strings.HasPrefix(mimeType, "image/") {
 		config, format, err := decodeImageConfig(decodedData)
