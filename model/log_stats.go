@@ -48,7 +48,7 @@ type logTokenStatOptions struct {
 
 func (stat *Stat) finalizeTokenCounts() error {
 	if stat.InputTokens < 0 || stat.OutputTokens < 0 || stat.CacheReadTokens < 0 || stat.CacheReadTokens > stat.InputTokens || stat.InputTokens > math.MaxInt64-stat.OutputTokens {
-		return errors.New("统计 Token 数量超出范围")
+		return common.NewMessage("Token statistics are out of range")
 	}
 	stat.TotalTokens = stat.InputTokens + stat.OutputTokens
 	return nil
@@ -93,7 +93,7 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 		// All text-to-number casts are guarded by JSON numeric types. In this
 		// query 22P02 can only come from historical invalid JSON in other.
 		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) && errors.As(err, &pgErr) && pgErr.Code == "22P02" {
-			common.SysError("invalid historical log JSON; using streaming token statistics")
+			common.SysError(common.LogText("invalid historical log JSON; using streaming token statistics"))
 			var grouped map[int]Stat
 			grouped, err = streamLogTokenStats(period, options)
 			stat = grouped[0]
@@ -104,8 +104,8 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 		err = period.Select("COALESCE(SUM(quota), 0) AS quota").Scan(&stat).Error
 	}
 	if err != nil {
-		common.SysError("failed to query log stat: " + sanitizeDBError(err).Error())
-		return Stat{}, errors.New("查询统计数据失败")
+		common.SysError(common.LogText("failed to query log stat: %s", sanitizeDBError(err).Error()))
+		return Stat{}, common.NewMessage("Failed to query statistics")
 	}
 	if err := stat.finalizeTokenCounts(); err != nil {
 		return Stat{}, err
@@ -122,8 +122,8 @@ func SumUsedQuota(ctx context.Context, params LogStatParams) (stat Stat, err err
 		Select("COUNT(*) AS rpm, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) AS tpm").
 		Scan(&rateStat).Error
 	if err != nil {
-		common.SysError("failed to query rpm/tpm stat: " + sanitizeDBError(err).Error())
-		return Stat{}, errors.New("查询统计数据失败")
+		common.SysError(common.LogText("failed to query rpm/tpm stat: %s", sanitizeDBError(err).Error()))
+		return Stat{}, common.NewMessage("Failed to query statistics")
 	}
 	stat.Rpm, stat.Tpm = rateStat.Rpm, rateStat.Tpm
 	return stat, nil

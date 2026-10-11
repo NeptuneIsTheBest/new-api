@@ -242,7 +242,7 @@ func cacheFileData(rawData []byte, encodedData string, mimeType string) *types.C
 		file.Close()
 	}
 	if !errors.Is(err, common.ErrDiskCacheUnavailable) {
-		common.SysError(fmt.Sprintf("failed to cache file, falling back to memory: %v", err))
+		common.SysError(common.LogText("failed to cache file, falling back to memory: %v", err))
 	}
 	if encodedData == "" {
 		encodedData = base64.StdEncoding.EncodeToString(rawData)

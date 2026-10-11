@@ -17,7 +17,7 @@ func GetTokenStats(c *gin.Context) {
 	endTimestamp, endErr := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	ids := c.Query("token_ids")
 	if startErr != nil || endErr != nil || startTimestamp < 0 || endTimestamp < startTimestamp || ids == "" || strings.Count(ids, ",") >= 100 {
-		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
 	tokenIDs := make([]int, 0)
@@ -25,7 +25,7 @@ func GetTokenStats(c *gin.Context) {
 	for value := range strings.SplitSeq(ids, ",") {
 		id, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || id <= 0 {
-			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			common.ApiErrorT(c, "Invalid parameters")
 			return
 		}
 		if _, exists := seen[id]; exists {

@@ -27,8 +27,8 @@ func GetTokenUsageStats(ctx context.Context, userID int, tokenIDs []int, startTi
 	err := DB.WithContext(ctx).Model(&Token{}).
 		Where("user_id = ? AND id IN ?", userID, tokenIDs).Pluck("id", &ownedIDs).Error
 	if err != nil {
-		common.SysError("failed to check token statistics ownership: " + sanitizeDBError(err).Error())
-		return nil, errors.New("查询统计数据失败")
+		common.SysError(common.LogText("failed to check token statistics ownership: %s", sanitizeDBError(err).Error()))
+		return nil, common.NewMessage("Failed to query statistics")
 	}
 	if len(ownedIDs) != len(tokenIDs) {
 		return nil, gorm.ErrRecordNotFound
@@ -47,7 +47,7 @@ func GetTokenUsageStats(ctx context.Context, userID int, tokenIDs []int, startTi
 	grouped := make(map[int]Stat, len(rows))
 	var pgErr *pgconn.PgError
 	if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) && errors.As(err, &pgErr) && pgErr.Code == "22P02" {
-		common.SysError("invalid historical log JSON; using streaming token statistics")
+		common.SysError(common.LogText("invalid historical log JSON; using streaming token statistics"))
 		grouped, err = streamLogTokenStats(period, options)
 	} else if err == nil {
 		for _, row := range rows {
@@ -55,8 +55,8 @@ func GetTokenUsageStats(ctx context.Context, userID int, tokenIDs []int, startTi
 		}
 	}
 	if err != nil {
-		common.SysError("failed to query token statistics: " + sanitizeDBError(err).Error())
-		return nil, errors.New("查询统计数据失败")
+		common.SysError(common.LogText("failed to query token statistics: %s", sanitizeDBError(err).Error()))
+		return nil, common.NewMessage("Failed to query statistics")
 	}
 
 	stats := make([]TokenUsageStat, 0, len(tokenIDs))

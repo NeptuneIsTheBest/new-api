@@ -173,7 +173,7 @@ func CreateBodyStorage(data []byte) (BodyStorage, error) {
 			file.Close()
 		}
 		if !errors.Is(err, ErrDiskCacheUnavailable) {
-			SysError(fmt.Sprintf("failed to cache request body, falling back to memory: %v", err))
+			SysError(LogText("failed to cache request body, falling back to memory: %v", err))
 		}
 	}
 	return newMemoryStorage(data), nil
@@ -202,7 +202,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		if err != nil {
 			diskAllowed = false
 			if !errors.Is(err, ErrDiskCacheUnavailable) {
-				SysError(fmt.Sprintf("failed to create body cache, falling back to memory: %v", err))
+				SysError(LogText("failed to create body cache, falling back to memory: %v", err))
 			}
 		}
 	}
@@ -253,7 +253,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 				if err != nil {
 					diskAllowed = false
 					if !errors.Is(err, ErrDiskCacheUnavailable) {
-						SysError(fmt.Sprintf("failed to spill body cache, falling back to memory: %v", err))
+						SysError(LogText("failed to spill body cache, falling back to memory: %v", err))
 					}
 				}
 			}
@@ -269,7 +269,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 					disk.Close()
 					disk = nil
 					diskAllowed = false
-					SysError(fmt.Sprintf("body cache write failed, restored to memory: %v", err))
+					SysError(LogText("body cache write failed, restored to memory: %v", err))
 				}
 			} else {
 				memory.Write(buffer[:n])
@@ -290,7 +290,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		if restoreErr != nil {
 			return nil, fmt.Errorf("failed to restore body cache: %w", errors.Join(err, restoreErr))
 		}
-		SysError(fmt.Sprintf("failed to seal body cache, restored to memory: %v", err))
+		SysError(LogText("failed to seal body cache, restored to memory: %v", err))
 		return newMemoryStorage(data), nil
 	}
 	completed = true
