@@ -43,14 +43,17 @@ const releaseStages: Record<string, number> = {
   patch: 4,
 }
 
-/** Project tags include post-release patches and historical numeric revisions. */
+/**
+ * Project tags include post-release patches and historical numeric revisions.
+ * Fork suffixes are accepted but ignored when comparing upstream versions.
+ */
 export function parseSystemVersion(
   value: string | null | undefined
 ): SystemVersion | null {
   const match = value
     ?.trim()
     .match(
-      /^v?(\d+(?:\.\d+){2,})(?:-(alpha|beta|rc|patch)(?:\.(\d+))?(?:-i18nfix\.(\d+))?)?(?:\+[\da-zA-Z.-]+)?$/
+      /^v?(\d+(?:\.\d+){2,})(?:-(alpha|beta|rc|patch)(?:\.(\d+))?(?:-i18nfix\.(\d+))?)?(?:-fork\.\d+)?(?:\+[\da-zA-Z.-]+)?$/
     )
   if (!match || (match[4] && match[2] !== 'rc')) return null
 

@@ -242,6 +242,57 @@ describe('administrator update entry', () => {
     ).toHaveLength(2)
   })
 
+  test.each([
+    ['v1.0.0-fork.1', 'v1.0.0', false, false],
+    ['v1.0.0-rc.45-fork.1', 'v1.0.0-rc.46-fork.2', true, true],
+    ['v1.0.0-fork.1', 'v1.0.0-rc.45-fork.1', false, true],
+    ['v1.0.0-rc.45-fork.1', 'v1.0.0-fork.1', true, false],
+  ])(
+    'compares upstream bases for %s and %s while preserving fork release details',
+    async (version, tag, hasUpdate, isPrerelease) => {
+      const user = userEvent.setup()
+      client.setQueryData(STATUS_QUERY_KEY, { version })
+      vi.mocked(api.get).mockResolvedValue({
+        data: { success: true, data: { version } },
+      })
+      fetchMock.mockResolvedValue(
+        new Response(
+          JSON.stringify([{ ...release, tag_name: tag, prerelease: false }])
+        )
+      )
+      render(<SystemUpdateAction presentation='version' />, {
+        wrapper: Wrapper,
+      })
+      const trigger = screen.getByRole('button', {
+        name: `System updates, current version: ${version}`,
+      })
+      await waitFor(() => expect(trigger).toHaveAttribute('aria-busy', 'false'))
+      expect(within(trigger).getByText(version)).toBeInTheDocument()
+      await user.click(trigger)
+      const dialog = screen.getByRole('dialog')
+      expect(within(dialog).getByText(version)).toBeInTheDocument()
+      expect(within(dialog).getByText(tag)).toBeInTheDocument()
+      expect(within(dialog).getByRole('status')).toHaveTextContent(
+        hasUpdate
+          ? `New version available: ${tag}`
+          : 'No newer version available.'
+      )
+      expect(
+        within(dialog).getByRole('link', { name: 'Go to GitHub' })
+      ).toHaveAttribute(
+        'href',
+        `https://github.com/QuantumNous/new-api/releases/tag/${tag}`
+      )
+      if (isPrerelease) {
+        expect(within(dialog).getByText('Pre-release')).toBeInTheDocument()
+      } else {
+        expect(
+          within(dialog).queryByText('Pre-release')
+        ).not.toBeInTheDocument()
+      }
+    }
+  )
+
   test.each(['', 'v0.0.0'])(
     'shows an unknown current version for %s and allows ignoring the fetched release',
     async (version) => {

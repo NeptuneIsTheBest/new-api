@@ -35,6 +35,21 @@ describe('system release ordering', () => {
     ['v0.8.8.3.2', 'v0.8.8.3.3', -1],
     ['v0.9.3.0', 'v0.9.3', 0],
     ['v1.0.0+build.1', '1.0.0+build.2', 0],
+    ['v1.0.0-fork.1', 'v1.0.0', 0],
+    ['v1.0.0-rc.45-fork.1', 'v1.0.0-rc.45', 0],
+    ['v1.0.0-fork.0', 'v1.0.0-fork.99', 0],
+    ['v1.0.0-rc.45-fork.1', 'v1.0.0-rc.45-fork.10', 0],
+    ['v1.0.0-alpha.1-fork.1', 'v1.0.0-alpha.1', 0],
+    ['v1.0.0-beta.1-fork.1', 'v1.0.0-beta.1', 0],
+    ['v1.0.0-patch.1-fork.1', 'v1.0.0-patch.1', 0],
+    ['v1.0.0-rc.19-i18nfix.2-fork.1', 'v1.0.0-rc.19-i18nfix.2', 0],
+    ['v0.8.8.3.2-fork.1', 'v0.8.8.3.2', 0],
+    ['v1.0.0-fork.1+build.1', 'v1.0.0+build.2', 0],
+    [' 1.0.0-rc.45-fork.1+build.1 ', 'v1.0.0-rc.45+build.2', 0],
+    ['v1.0.0-fork.1', 'v1.0.1', -1],
+    ['v1.0.0-rc.45-fork.99', 'v1.0.0-rc.46', -1],
+    ['v1.0.0-rc.45-fork.99', 'v1.0.0', -1],
+    ['v1.0.0-rc.46-fork.1', 'v1.0.0-rc.45', 1],
     ['v1.0.0-rc.37', 'v1.0.0-rc.36', 1],
     ['v1.0.0', 'v1.0.0', 0],
     ['v0.0.0', 'v1.0.0', null],
@@ -42,6 +57,14 @@ describe('system release ordering', () => {
     ['', 'v1.0.0', null],
     ['v1.0.0-custom.1', 'v1.0.0', null],
     ['v1.0.0-rc.36-2-gabcdef', 'v1.0.0', null],
+    ['v1.0.0-fork', 'v1.0.0', null],
+    ['v1.0.0-fork.', 'v1.0.0', null],
+    ['v1.0.0-fork.one', 'v1.0.0', null],
+    ['v1.0.0-fork.-1', 'v1.0.0', null],
+    ['v1.0.0-fork.1-fork.2', 'v1.0.0', null],
+    ['v1.0.0-custom.1-fork.1', 'v1.0.0', null],
+    ['v1.0.0-beta.1-i18nfix.1-fork.1', 'v1.0.0', null],
+    ['v0.0.0-fork.1', 'v1.0.0', null],
   ])('compares %s against %s as %s', (current, latest, expected) => {
     expect(compareSystemVersions(current, latest)).toBe(expected)
   })
@@ -56,6 +79,20 @@ describe('system release ordering', () => {
     ]
     expect(selectLatestRelease(releases)?.tag_name).toBe('v1.0.0-rc.36')
   })
+
+  test.each(['v1.0.0-rc.46-fork.1', 'v1.0.0-fork.1'])(
+    'selects %s by its upstream base and preserves its full tag',
+    (tag) => {
+      const releases = [
+        { tag_name: tag, draft: false, prerelease: false },
+        { tag_name: 'v1.0.0-rc.45-fork.99', draft: false, prerelease: true },
+        { tag_name: 'v1.0.0-rc.45', draft: false, prerelease: true },
+        { tag_name: 'v2.0.0-fork.1', draft: true, prerelease: false },
+        { tag_name: 'v2.0.0-fork.invalid', draft: false, prerelease: false },
+      ]
+      expect(selectLatestRelease(releases)?.tag_name).toBe(tag)
+    }
+  )
 
   test('returns no release for an empty list or a list containing only drafts', () => {
     expect(selectLatestRelease([])).toBeNull()
