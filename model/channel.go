@@ -398,6 +398,48 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
+// GetChannelsByTags loads channels for distinct tags, preserving the supplied
+// tag order and database equality rules before ordering channels within each tag.
+func GetChannelsByTags(query *gorm.DB, tags []*string, sortOptions ChannelSortOptions) ([]*Channel, error) {
+	channels := make([]*Channel, 0)
+	tagValues := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag != nil && *tag != "" {
+			tagValues = append(tagValues, *tag)
+		}
+	}
+	if len(tagValues) == 0 {
+		return channels, nil
+	}
+
+	query = sortOptions.Apply(query.Session(&gorm.Session{})).Omit("key")
+	channelOrder := query.Statement.Clauses["ORDER BY"]
+	// Embed the existing sort expression without a second ORDER BY keyword.
+	channelOrder.Name = ""
+	for _, batch := range lo.Chunk(tagValues, 200) {
+		var tagOrder strings.Builder
+		tagOrder.WriteString("CASE ?")
+		args := []any{clause.Column{Name: "tag"}}
+		for i, tag := range batch {
+			fmt.Fprintf(&tagOrder, " WHEN ? THEN %d", i)
+			args = append(args, tag)
+		}
+		tagOrder.WriteString(" END, ?")
+		args = append(args, channelOrder)
+
+		var batchChannels []*Channel
+		err := query.Session(&gorm.Session{}).
+			Where("tag IN ?", batch).
+			Clauses(clause.OrderBy{Expression: clause.Expr{SQL: tagOrder.String(), Vars: args}}).
+			Find(&batchChannels).Error
+		if err != nil {
+			return nil, err
+		}
+		channels = append(channels, batchChannels...)
+	}
+	return channels, nil
+}
+
 func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	modelsCol := "`models`"

@@ -3,9 +3,11 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -21,7 +23,249 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestChannelTagListsDatabaseMatrix(t *testing.T) {
+	previousGinMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(previousGinMode) })
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			database, dsn := newAuditTestDatabase(t, dialect.kind, os.Getenv(dialect.env))
+			connection, err := database.DB()
+			require.NoError(t, err)
+			require.NoError(t, connection.Close())
+			previousDB, previousLogDB := model.DB, model.LOG_DB
+			previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+			previousMaster, previousSQLite := common.IsMasterNode, common.SQLitePath
+			common.IsMasterNode = false
+			if dialect.kind == "sqlite" {
+				common.SQLitePath, dsn = dsn, "local"
+			}
+			t.Setenv("SQL_DSN", dsn)
+			t.Setenv("LOG_SQL_DSN", "")
+			t.Cleanup(func() {
+				common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite
+				common.SetDatabaseTypes(previousMain, previousLog)
+				model.DB, model.LOG_DB = previousDB, previousLogDB
+			})
+			require.NoError(t, model.InitDB())
+			db := model.DB
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(1)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			require.NoError(t, db.AutoMigrate(&model.Channel{}))
+			var version string
+			versionQuery := "SELECT version()"
+			if dialect.kind == "sqlite" {
+				versionQuery = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+
+			queries, failAt := 0, 0
+			require.NoError(t, db.Callback().Query().Before("gorm:query").Register("channel_tag_queries", func(tx *gorm.DB) {
+				if tx.DryRun {
+					return
+				}
+				queries++
+				if failAt > 0 && queries == failAt {
+					tx.AddError(errors.New("tag channel query failed"))
+				}
+			}))
+
+			t.Run("filters_sorting_and_pagination", func(t *testing.T) {
+				channels := []model.Channel{
+					{Name: "match alpha", Tag: common.GetPointer("Alpha"), Priority: common.GetPointer(int64(10)), Group: "default,vip", Models: "model-a", Type: 1},
+					{Name: "alpha second", Tag: common.GetPointer("Alpha"), Priority: common.GetPointer(int64(20)), Group: "default", Models: "other", Type: 1},
+					{Name: "alpha first", Tag: common.GetPointer("Alpha"), Priority: common.GetPointer(int64(20)), Group: "default", Type: 2},
+					{Name: "match beta", Tag: common.GetPointer("Beta"), Priority: common.GetPointer(int64(5)), Group: "default", Models: "model-a", Type: 1},
+					{Name: "beta manual", Tag: common.GetPointer("Beta"), Priority: common.GetPointer(int64(99)), Group: "default", Status: common.ChannelStatusManuallyDisabled, Type: 1},
+					{Name: "beta auto", Tag: common.GetPointer("Beta"), Priority: common.GetPointer(int64(90)), Group: "default", Status: common.ChannelStatusAutoDisabled, Type: 2},
+					{Name: "match outside", Tag: common.GetPointer("Beta"), Priority: common.GetPointer(int64(100)), Group: "default-extra", Models: "model-a", Type: 1},
+					{Name: "gamma", Tag: common.GetPointer("Gamma"), Group: "default", Type: 1},
+					{Name: "untagged", Group: "default", Type: 1},
+					{Name: "empty tag", Tag: common.GetPointer(""), Group: "default", Type: 1},
+				}
+				for i := range channels {
+					channels[i].Key = "secret-channel-key"
+					channels[i].ChannelInfo = model.ChannelInfo{
+						IsMultiKey: true, MultiKeySize: 2,
+						MultiKeyStatusList:     map[int]int{1: common.ChannelStatusAutoDisabled},
+						MultiKeyDisabledReason: map[int]string{1: "private reason"},
+						MultiKeyDisabledTime:   map[int]int64{1: 123},
+					}
+				}
+				require.NoError(t, db.Create(&channels).Error)
+				t.Cleanup(func() { require.NoError(t, db.Where("id > 0").Delete(&model.Channel{}).Error) })
+
+				// SearchTags has its own database-defined order; preserve it when expanding tags.
+				tags, err := model.SearchTags("match", "default", "model-a", false)
+				require.NoError(t, err)
+				require.Len(t, tags, 2)
+				searchOrder := make([]int, 0, 3)
+				searchChannelsByTag := map[string][]int{"Alpha": {1, 0}, "Beta": {3}}
+				for _, tag := range tags {
+					searchOrder = append(searchOrder, searchChannelsByTag[*tag]...)
+				}
+				allCounts := map[int]int{1: 7, 2: 2}
+				enabledCounts := map[int]int{1: 6, 2: 1}
+				for _, tc := range []struct {
+					name, query string
+					search      bool
+					indices     []int
+					total       int
+					counts      map[int]int
+					queries     int
+				}{
+					{"default", "", false, []int{2, 1, 0, 4, 5, 3, 7}, 3, allCounts, 4},
+					{"id sort", "&id_sort=true", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
+					{"name sort", "&sort_by=name&sort_order=asc", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
+					{"priority asc", "&sort_by=priority&sort_order=asc", false, []int{0, 2, 1, 3, 5, 4, 7}, 3, allCounts, 4},
+					{"tag page", "&p=2&page_size=1", false, []int{4, 5, 3}, 3, allCounts, 4},
+					{"past last tag", "&p=4&page_size=1", false, []int{}, 3, allCounts, 3},
+					{"enabled type", "&status=enabled&type=1", false, []int{1, 0, 3, 7}, 3, enabledCounts, 4},
+					{"both disabled statuses", "&status=disabled", false, []int{4, 5}, 1, map[int]int{1: 1, 2: 1}, 4},
+					{"no matching type", "&type=999", false, []int{}, 0, allCounts, 3},
+					{"search expands matching tags", "&keyword=match&model=model-a&status=enabled&type=1", true, searchOrder, 3, map[int]int{1: 3, 2: 1}, 2},
+					{"search channel page", "&keyword=match&model=model-a&status=enabled&type=1&p=2&page_size=1", true, searchOrder[1:2], 3, map[int]int{1: 3, 2: 1}, 2},
+					{"search empty", "&keyword=absent", true, []int{}, 0, map[int]int{}, 1},
+					{"search name sort", "&keyword=match+alpha&sort_by=name&sort_order=desc", true, []int{0, 1, 2}, 3, map[int]int{1: 2, 2: 1}, 2},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						queries = 0
+						response := requestChannelTagList(t, tc.search, "tag_mode=true&group=default"+tc.query)
+						require.True(t, response.Success, response.Message)
+						assert.Equal(t, tc.queries, queries)
+						assert.Equal(t, tc.total, response.Data.Total)
+						assert.Equal(t, tc.counts, response.Data.TypeCounts)
+						expectedIDs := make([]int, 0, len(tc.indices))
+						for _, index := range tc.indices {
+							expectedIDs = append(expectedIDs, channels[index].Id)
+						}
+						assert.Equal(t, expectedIDs, channelIDsFromChannels(response.Data.Items))
+						require.NotNil(t, response.Data.Items)
+						for _, channel := range response.Data.Items {
+							assert.Empty(t, channel.Key)
+							assert.Nil(t, channel.ChannelInfo.MultiKeyDisabledReason)
+							assert.Nil(t, channel.ChannelInfo.MultiKeyDisabledTime)
+							assert.Equal(t, channels[0].ChannelInfo.MultiKeyStatusList, channel.ChannelInfo.MultiKeyStatusList)
+						}
+					})
+				}
+				for _, search := range []bool{false, true} {
+					queries, failAt = 0, 3
+					expectedMessage := "Failed to fetch channels with this tag. Please try again later"
+					if search {
+						failAt, expectedMessage = 2, "tag channel query failed"
+					}
+					response := requestChannelTagList(t, search, "tag_mode=true&group=default")
+					assert.False(t, response.Success)
+					assert.Equal(t, expectedMessage, response.Message)
+					assert.Nil(t, response.Data.Items)
+					failAt = 0
+				}
+			})
+
+			t.Run("batch_boundary", func(t *testing.T) {
+				channels := make([]model.Channel, 201)
+				for i := range channels {
+					channels[i] = model.Channel{Name: "batch", Tag: common.GetPointer(fmt.Sprintf("batch-%03d", i)), Group: "default"}
+				}
+				require.NoError(t, db.CreateInBatches(&channels, 20).Error)
+				t.Cleanup(func() { require.NoError(t, db.Where("id > 0").Delete(&model.Channel{}).Error) })
+				tags, err := model.SearchTags("batch", "default", "", false)
+				require.NoError(t, err)
+				require.Len(t, tags, 201)
+				queries = 0
+				response := requestChannelTagList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
+				require.True(t, response.Success, response.Message)
+				assert.Equal(t, 3, queries)
+				assert.Equal(t, 201, response.Data.Total)
+				require.Len(t, response.Data.Items, 201)
+				for i, tag := range tags {
+					assert.Equal(t, tag, response.Data.Items[i].Tag)
+				}
+				queries, failAt = 0, 3
+				response = requestChannelTagList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
+				assert.False(t, response.Success)
+				assert.Equal(t, "tag channel query failed", response.Message)
+				assert.Equal(t, 3, queries)
+				assert.Nil(t, response.Data.Items, "a later batch failure must not return partial results")
+				failAt = 0
+			})
+
+			t.Run("tag_order_and_collation", func(t *testing.T) {
+				query := db.Table("collation_channels")
+				if dialect.kind == "sqlite" {
+					require.NoError(t, query.AutoMigrate(&struct {
+						model.Channel
+						Tag *string `gorm:"type:text COLLATE NOCASE"`
+					}{}))
+				} else {
+					require.NoError(t, query.AutoMigrate(&model.Channel{}))
+				}
+				channels := []model.Channel{
+					{Tag: common.GetPointer("Alpha"), Key: "private", Priority: common.GetPointer(int64(10))},
+					{Tag: common.GetPointer("alpha"), Key: "private", Priority: common.GetPointer(int64(20))},
+					{Tag: common.GetPointer("quoted'tag"), Key: "private"},
+				}
+				require.NoError(t, query.Create(&channels).Error)
+				tags := []*string{nil, common.GetPointer(""), channels[2].Tag, channels[0].Tag}
+				order := model.NewChannelSortOptions("", "", false)
+				expectedIDs := []int{channels[2].Id, channels[1].Id, channels[0].Id}
+				if dialect.kind == "postgres" {
+					expectedIDs = []int{channels[2].Id, channels[0].Id}
+				}
+				queries = 0
+				result, err := model.GetChannelsByTags(db.Table("collation_channels").Model(&model.Channel{}), tags, order)
+				require.NoError(t, err)
+				assert.Equal(t, expectedIDs, channelIDsFromChannels(result))
+				assert.Equal(t, 1, queries)
+				for _, channel := range result {
+					assert.Empty(t, channel.Key)
+				}
+				queries = 0
+				result, err = model.GetChannelsByTags(db.Model(&model.Channel{}), tags[:2], order)
+				require.NoError(t, err)
+				assert.NotNil(t, result)
+				assert.Empty(t, result)
+				assert.Zero(t, queries)
+			})
+		})
+	}
+}
+
+type channelTagListResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		Items      []*model.Channel `json:"items"`
+		Total      int              `json:"total"`
+		TypeCounts map[int]int      `json:"type_counts"`
+	} `json:"data"`
+}
+
+func requestChannelTagList(t *testing.T, search bool, query string) channelTagListResponse {
+	t.Helper()
+	path, handler := "/api/channel/", GetAllChannels
+	if search {
+		path, handler = "/api/channel/search", SearchChannels
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, path+"?"+query, nil)
+	handler(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response channelTagListResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return response
+}
 
 func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
 	originalBaseURLs := constant.ChannelBaseURLs

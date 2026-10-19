@@ -222,20 +222,11 @@ func GetAllChannels(c *gin.Context) {
 			common.ApiErrorT(c, "Failed to count tags. Please try again later")
 			return
 		}
-		for _, tag := range tags {
-			if tag == nil || *tag == "" {
-				continue
-			}
-			var tagChannels []*model.Channel
-			err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter).Where("tag = ?", *tag)).
-				Omit("key").
-				Find(&tagChannels).Error
-			if err != nil {
-				common.SysError(common.LogText("failed to get channels by tag: %s", err.Error()))
-				common.ApiErrorT(c, "Failed to fetch channels with this tag. Please try again later")
-				return
-			}
-			channelData = append(channelData, tagChannels...)
+		channelData, err = model.GetChannelsByTags(buildChannelListQuery(groupFilter, statusFilter, typeFilter), tags, sortOptions)
+		if err != nil {
+			common.SysError(common.LogText("failed to get channels by tag: %s", err.Error()))
+			common.ApiErrorT(c, "Failed to fetch channels with this tag. Please try again later")
+			return
 		}
 	} else {
 		if err := buildChannelListQuery(groupFilter, statusFilter, typeFilter).Count(&total).Error; err != nil {
@@ -376,18 +367,10 @@ func SearchChannels(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		for _, tag := range tags {
-			if tag != nil && *tag != "" {
-				var tagChannels []*model.Channel
-				err := sortOptions.Apply(buildChannelListQuery(group, -1, -1).Where("tag = ?", *tag)).
-					Omit("key").
-					Find(&tagChannels).Error
-				if err != nil {
-					common.ApiError(c, err)
-					return
-				}
-				channelData = append(channelData, tagChannels...)
-			}
+		channelData, err = model.GetChannelsByTags(buildChannelListQuery(group, -1, -1), tags, sortOptions)
+		if err != nil {
+			common.ApiError(c, err)
+			return
 		}
 	} else {
 		channels, err := model.SearchChannels(keyword, group, modelKeyword, idSort, sortOptions)
