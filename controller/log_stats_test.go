@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,10 +177,18 @@ func TestLogStatsDatabaseMatrix(t *testing.T) {
 			if database.kind != "clickhouse" {
 				t.Run("historical null columns", func(t *testing.T) {
 					require.NoError(t, model.LOG_DB.Create(&model.Log{Type: model.LogTypeConsume, RequestId: "nullable"}).Error)
-					require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("request_id = ?", "nullable").Updates(map[string]any{"prompt_tokens": nil, "completion_tokens": nil, "other": nil}).Error)
+					require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("request_id = ?", "nullable").Updates(map[string]any{"quota": nil, "prompt_tokens": nil, "completion_tokens": nil, "other": nil}).Error)
 					stat := requestLogStats(t, GetLogsStat, 3, common.RoleAdminUser, "request_id=nullable")
+					assert.Zero(t, stat.Quota)
 					assert.Zero(t, stat.TotalTokens)
 					assert.Zero(t, stat.CacheHitRate)
+				})
+			}
+			if database.kind == "mysql" {
+				t.Run("quota accumulation with separate main database", func(t *testing.T) {
+					mainDB, _ := newAuditTestDatabase(t, "sqlite", "")
+					useLogExportDatabases(t, mainDB, model.LOG_DB, common.DatabaseTypeSQLite, common.DatabaseTypeMySQL)
+					verifyLogStatsMySQLQuota(t)
 				})
 			}
 			t.Run("canceled request fails statistics", func(t *testing.T) {
@@ -188,6 +197,41 @@ func TestLogStatsDatabaseMatrix(t *testing.T) {
 				_, err := model.SumUsedQuota(ctx, 0, model.LogFilter{})
 				require.Error(t, err)
 			})
+		})
+	}
+}
+
+func verifyLogStatsMySQLQuota(t *testing.T) {
+	t.Helper()
+	for i, tc := range []struct {
+		name    string
+		quotas  []int
+		want    int
+		wantErr bool
+	}{
+		{"exact large integer", []int{math.MaxInt / 2, 2}, math.MaxInt/2 + 2, false},
+		{"upper int bound", []int{math.MaxInt - 1, 1}, math.MaxInt, false},
+		{"lower int bound", []int{math.MinInt + 1, -1}, math.MinInt, false},
+		{"positive final overflow", []int{math.MaxInt, 1}, 0, true},
+		{"negative final overflow", []int{math.MinInt, -1}, 0, true},
+		{"positive intermediate overflow cancels", []int{math.MaxInt, 1, -1}, math.MaxInt, false},
+		{"negative intermediate overflow cancels", []int{math.MinInt, -1, 1}, math.MinInt, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := fmt.Sprintf("quota-%d", i)
+			for _, quota := range tc.quotas {
+				require.NoError(t, model.LOG_DB.Create(&model.Log{
+					Type: model.LogTypeConsume, ModelName: name, Quota: quota,
+				}).Error)
+			}
+			stat, err := model.SumUsedQuota(context.Background(), 0, model.LogFilter{ModelName: name})
+			if tc.wantErr {
+				require.EqualError(t, err, "Failed to query statistics")
+				assert.Zero(t, stat.Quota, "an overflowing quota must not be returned")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stat.Quota)
 		})
 	}
 }

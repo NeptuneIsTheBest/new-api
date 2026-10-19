@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -733,9 +734,12 @@ func SumUsedQuota(ctx context.Context, userId int, filter LogFilter) (stat Stat,
 		return stat, err
 	}
 	tx = tx.Session(&gorm.Session{})
-	if err := tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error; err != nil {
-		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
-		return stat, common.NewMessage("Failed to query statistics")
+	isMySQL := common.UsingLogDatabase(common.DatabaseTypeMySQL)
+	if !isMySQL {
+		if err := tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error; err != nil {
+			common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+			return stat, common.NewMessage("Failed to query statistics")
+		}
 	}
 
 	// Rates retain their rolling 60-second window, independent of the selected dates.
@@ -759,19 +763,29 @@ func SumUsedQuota(ctx context.Context, userId int, filter LogFilter) (stat Stat,
 
 	// Parse metadata in Go so historical JSON and all log database dialects use
 	// the same token semantics, without loading the matching logs into memory.
-	rows, err := tx.Select("prompt_tokens, completion_tokens, other").Rows()
+	columns := "prompt_tokens, completion_tokens, other"
+	var promptTokens, completionTokens, quota sql.NullInt64
+	var other sql.NullString
+	scanDest := []any{&promptTokens, &completionTokens, &other}
+	if isMySQL {
+		columns += ", quota"
+		scanDest = append(scanDest, &quota)
+	}
+	rows, err := tx.Select(columns).Rows()
 	if err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
 		return stat, common.NewMessage("Failed to query statistics")
 	}
 	defer rows.Close()
 	var inputTotal, cacheTotal int64
+	var quotaTotal, quotaValue big.Int
 	for rows.Next() {
-		var promptTokens, completionTokens sql.NullInt64
-		var other sql.NullString
-		if err := rows.Scan(&promptTokens, &completionTokens, &other); err != nil {
+		if err := rows.Scan(scanDest...); err != nil {
 			common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
 			return stat, common.NewMessage("Failed to query statistics")
+		}
+		if isMySQL {
+			quotaTotal.Add(&quotaTotal, quotaValue.SetInt64(quota.Int64))
 		}
 		inputTokens, cacheTokens := logInputTokenUsage(promptTokens.Int64, other.String)
 		inputTotal = sumLogTokens(inputTotal, inputTokens)
@@ -781,6 +795,15 @@ func SumUsedQuota(ctx context.Context, userId int, filter LogFilter) (stat Stat,
 	if err := rows.Err(); err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
 		return stat, common.NewMessage("Failed to query statistics")
+	}
+	if isMySQL {
+		// Historical negative quotas may bring an intermediate overflow back
+		// into range, so validate only the exact final sum.
+		if quotaTotal.Cmp(big.NewInt(int64(math.MinInt))) < 0 || quotaTotal.Cmp(big.NewInt(int64(math.MaxInt))) > 0 {
+			common.SysError(common.LogText("failed to query log stat: %s", "quota sum is outside int range"))
+			return stat, common.NewMessage("Failed to query statistics")
+		}
+		stat.Quota = int(quotaTotal.Int64())
 	}
 	if inputTotal > 0 {
 		stat.CacheHitRate = min(float64(cacheTotal)/float64(inputTotal)*100, 100)
