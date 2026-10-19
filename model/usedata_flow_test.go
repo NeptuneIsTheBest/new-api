@@ -1,11 +1,14 @@
 package model
 
 import (
+	"bytes"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -14,6 +17,19 @@ import (
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
 	t.Helper()
 	require.NoError(t, DB.Create(&quotaData).Error)
+}
+
+func resetFlowQuotaDataCache(t *testing.T) {
+	t.Helper()
+	CacheQuotaDataLock.Lock()
+	previousCache := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+	t.Cleanup(func() {
+		CacheQuotaDataLock.Lock()
+		CacheQuotaData = previousCache
+		CacheQuotaDataLock.Unlock()
+	})
 }
 
 func seedFlowLookupData(t *testing.T) {
@@ -138,9 +154,7 @@ func TestGetFlowQuotaDataUsesQuotaDataRoleSpecificDimensions(t *testing.T) {
 
 func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	truncateTables(t)
-	CacheQuotaDataLock.Lock()
-	CacheQuotaData = make(map[string]*QuotaData)
-	CacheQuotaDataLock.Unlock()
+	resetFlowQuotaDataCache(t)
 
 	LogQuotaData(QuotaDataLogParams{
 		UserID:    1,
@@ -196,6 +210,174 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 25, rows[1].Quota)
 }
 
+func TestSaveQuotaDataCacheWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		existing      bool
+		noChange      bool
+		failAt        string
+		afterCommit   bool
+		anotherBucket bool
+		wantOps       []string
+		wantRows      int
+		wantSaved     int
+		wantTotals    [3]int
+	}{
+		{name: "existing bucket", existing: true, wantOps: []string{"UPDATE"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{3, 150, 60}},
+		{name: "new bucket", wantOps: []string{"UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{1, 50, 20}},
+		{name: "unchanged bucket with zero affected rows", existing: true, noChange: true, wantOps: []string{"UPDATE", "SELECT"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{2, 100, 40}},
+		{name: "new bucket with zero increment", noChange: true, wantOps: []string{"UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantSaved: 1},
+		{name: "update error", failAt: "UPDATE", wantOps: []string{"UPDATE"}},
+		{name: "existence query error", failAt: "SELECT", wantOps: []string{"UPDATE", "SELECT"}},
+		{name: "insert error", failAt: "INSERT", wantOps: []string{"UPDATE", "SELECT", "INSERT"}},
+		{name: "update committed but result unknown", existing: true, failAt: "UPDATE", afterCommit: true, wantOps: []string{"UPDATE"}, wantRows: 1, wantTotals: [3]int{3, 150, 60}},
+		{name: "insert committed but result unknown", failAt: "INSERT", afterCommit: true, wantOps: []string{"UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantTotals: [3]int{1, 50, 20}},
+		{name: "continue after a bucket fails", failAt: "UPDATE", anotherBucket: true, wantOps: []string{"UPDATE", "UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{1, 50, 20}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetFlowQuotaDataCache(t)
+			bucket := QuotaData{
+				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3600,
+				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+				Count: 2, Quota: 100, TokenUsed: 40,
+			}
+			if tc.existing {
+				seedFlowQuotaData(t, bucket)
+			}
+			bucket.Count, bucket.Quota, bucket.TokenUsed = 1, 50, 20
+			if tc.noChange {
+				bucket.Count, bucket.Quota, bucket.TokenUsed = 0, 0, 0
+			}
+			CacheQuotaDataLock.Lock()
+			logQuotaDataCache(&bucket)
+			if tc.anotherBucket {
+				next := bucket
+				next.ModelName = "gpt-b"
+				logQuotaDataCache(&next)
+			}
+			CacheQuotaDataLock.Unlock()
+
+			var output bytes.Buffer
+			common.LogWriterMu.Lock()
+			previousWriter, previousErrorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+			gin.DefaultWriter, gin.DefaultErrorWriter = &output, &output
+			common.LogWriterMu.Unlock()
+			t.Cleanup(func() {
+				common.LogWriterMu.Lock()
+				gin.DefaultWriter, gin.DefaultErrorWriter = previousWriter, previousErrorWriter
+				common.LogWriterMu.Unlock()
+			})
+
+			var operations []string
+			recording, failed := true, false
+			forcedError := errors.New("forced quota data failure")
+			for _, callback := range []struct {
+				operation string
+				before    func(string, func(*gorm.DB)) error
+				after     func(string, func(*gorm.DB)) error
+				remove    func(string) error
+			}{
+				{"UPDATE", DB.Callback().Update().Before("gorm:update").Register, DB.Callback().Update().After("gorm:commit_or_rollback_transaction").Register, DB.Callback().Update().Remove},
+				{"SELECT", DB.Callback().Query().Before("gorm:query").Register, DB.Callback().Query().After("gorm:query").Register, DB.Callback().Query().Remove},
+				{"INSERT", DB.Callback().Create().Before("gorm:create").Register, DB.Callback().Create().After("gorm:commit_or_rollback_transaction").Register, DB.Callback().Create().Remove},
+			} {
+				beforeName := "test:quota_data_before_" + callback.operation
+				afterName := "test:quota_data_after_" + callback.operation
+				t.Cleanup(func() {
+					require.NoError(t, callback.remove(beforeName))
+					require.NoError(t, callback.remove(afterName))
+				})
+				require.NoError(t, callback.before(beforeName, func(tx *gorm.DB) {
+					if !recording || tx.Statement.Table != "quota_data" {
+						return
+					}
+					operations = append(operations, callback.operation)
+					if tc.failAt == callback.operation && !tc.afterCommit && !failed {
+						failed = true
+						tx.AddError(forcedError)
+					}
+				}))
+				require.NoError(t, callback.after(afterName, func(tx *gorm.DB) {
+					if !recording || tx.Statement.Table != "quota_data" {
+						return
+					}
+					if tc.noChange && callback.operation == "UPDATE" {
+						// Exercise MySQL's changed-row semantics on SQLite too.
+						tx.RowsAffected = 0
+					}
+					if tc.failAt == callback.operation && tc.afterCommit && !failed {
+						failed = true
+						tx.AddError(forcedError)
+					}
+				}))
+			}
+
+			SaveQuotaDataCache()
+			assert.Equal(t, tc.wantOps, operations)
+			assert.Contains(t, output.String(), common.LogText("saved dashboard data, %d records", tc.wantSaved))
+			if tc.failAt != "" {
+				assert.Contains(t, output.String(), common.LogText("failed to save dashboard data (%s): %s", tc.failAt, forcedError))
+			}
+			SaveQuotaDataCache()
+			assert.Equal(t, tc.wantOps, operations, "flushing again must not replay the batch")
+			recording = false
+			var rows []QuotaData
+			require.NoError(t, DB.Find(&rows).Error)
+			require.Len(t, rows, tc.wantRows)
+			for _, row := range rows {
+				assert.Equal(t, tc.wantTotals, [3]int{row.Count, row.Quota, row.TokenUsed})
+			}
+		})
+	}
+}
+
+func TestSaveQuotaDataCacheDimensionsAndDuplicates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  QuotaData
+	}{
+		{"user", QuotaData{UserID: 1}},
+		{"username", QuotaData{Username: "alice"}},
+		{"model", QuotaData{ModelName: "gpt-a"}},
+		{"hour", QuotaData{CreatedAt: 7200}},
+		{"group", QuotaData{UseGroup: "vip"}},
+		{"token", QuotaData{TokenID: 11}},
+		{"channel", QuotaData{ChannelID: 1}},
+		{"node", QuotaData{NodeName: "node-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetFlowQuotaDataCache(t)
+			neighbor := tc.row
+			if neighbor.CreatedAt == 0 {
+				neighbor.CreatedAt = 3600
+			}
+			neighbor.Count, neighbor.Quota, neighbor.TokenUsed = 4, 200, 80
+			require.NoError(t, DB.Create(&neighbor).Error)
+			params := QuotaDataLogParams{CreatedAt: 3600, Quota: 50, TokenUsed: 20}
+			LogQuotaData(params)
+			SaveQuotaDataCache()
+
+			var rows []QuotaData
+			require.NoError(t, DB.Order("id").Find(&rows).Error)
+			require.Len(t, rows, 2)
+			assert.Equal(t, neighbor, rows[0])
+			assert.Equal(t, QuotaData{Id: rows[1].Id, CreatedAt: 3600, Count: 1, Quota: 50, TokenUsed: 20}, rows[1])
+
+			duplicate := QuotaData{CreatedAt: 3600, Count: 2, Quota: 100, TokenUsed: 40}
+			require.NoError(t, DB.Create(&duplicate).Error)
+			LogQuotaData(params)
+			SaveQuotaDataCache()
+			require.NoError(t, DB.Order("id").Find(&rows).Error)
+			require.Len(t, rows, 3)
+			assert.Equal(t, neighbor, rows[0])
+			assert.Equal(t, QuotaData{Id: rows[1].Id, CreatedAt: 3600, Count: 2, Quota: 100, TokenUsed: 40}, rows[1])
+			assert.Equal(t, QuotaData{Id: duplicate.Id, CreatedAt: 3600, Count: 3, Quota: 150, TokenUsed: 60}, rows[2])
+		})
+	}
+}
+
 func TestSaveQuotaDataCacheConcurrentBatches(t *testing.T) {
 	var version string
 	require.NoError(t, DB.Raw("SELECT sqlite_version()").Scan(&version).Error)
@@ -210,33 +392,25 @@ func TestSaveQuotaDataCacheConcurrentBatches(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			truncateTables(t)
-			CacheQuotaDataLock.Lock()
-			previousCache := CacheQuotaData
-			CacheQuotaData = make(map[string]*QuotaData)
-			CacheQuotaDataLock.Unlock()
-			t.Cleanup(func() {
-				CacheQuotaDataLock.Lock()
-				CacheQuotaData = previousCache
-				CacheQuotaDataLock.Unlock()
-			})
+			resetFlowQuotaDataCache(t)
 
-			queryStarted := make(chan struct{}, 3)
-			releaseQueries := make(chan struct{})
-			release := sync.OnceFunc(func() { close(releaseQueries) })
+			updateStarted := make(chan struct{}, 3)
+			releaseUpdates := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseUpdates) })
 			var workers sync.WaitGroup
 			const callbackName = "test:block_quota_data_flush"
-			require.NoError(t, DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
-				// Block the flush's per-row lookups, leaving assertion queries free to run.
-				if _, ok := tx.Statement.Dest.(*QuotaData); !ok || tx.Statement.Table != "quota_data" {
+			require.NoError(t, DB.Callback().Update().Before("gorm:begin_transaction").Register(callbackName, func(tx *gorm.DB) {
+				// Block before acquiring a connection so assertion queries can still run.
+				if tx.Statement.Table != "quota_data" {
 					return
 				}
-				queryStarted <- struct{}{}
-				<-releaseQueries
+				updateStarted <- struct{}{}
+				<-releaseUpdates
 			}))
 			t.Cleanup(func() {
 				release()
 				workers.Wait()
-				require.NoError(t, DB.Callback().Query().Remove(callbackName))
+				require.NoError(t, DB.Callback().Update().Remove(callbackName))
 			})
 
 			params := QuotaDataLogParams{
@@ -251,7 +425,7 @@ func TestSaveQuotaDataCacheConcurrentBatches(t *testing.T) {
 				close(firstDone)
 			})
 			select {
-			case <-queryStarted:
+			case <-updateStarted:
 			case <-time.After(5 * time.Second):
 				require.FailNow(t, "first flush did not reach the database")
 			}
@@ -283,15 +457,15 @@ func TestSaveQuotaDataCacheConcurrentBatches(t *testing.T) {
 			})
 			<-secondStarted
 			select {
-			case <-queryStarted:
+			case <-updateStarted:
 				require.FailNow(t, "second flush reached the database before the first finished")
 			case <-secondDone:
 				require.FailNow(t, "second flush returned before the first finished")
 			case <-time.After(100 * time.Millisecond):
 			}
 
-			// Complete only the first lookup; the second batch remains blocked.
-			releaseQueries <- struct{}{}
+			// Complete only the first update; the second batch remains blocked.
+			releaseUpdates <- struct{}{}
 			select {
 			case <-firstDone:
 			case <-time.After(5 * time.Second):
