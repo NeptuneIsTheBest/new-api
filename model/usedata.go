@@ -50,6 +50,7 @@ func UpdateQuotaData() {
 
 var CacheQuotaData = make(map[string]*QuotaData)
 var CacheQuotaDataLock = sync.Mutex{}
+var quotaDataFlushLock sync.Mutex
 
 func logQuotaDataCache(quotaData *QuotaData) {
 	key := fmt.Sprintf("%d\x00%s\x00%s\x00%d\x00%s\x00%d\x00%d\x00%s",
@@ -98,14 +99,21 @@ func LogQuotaData(params QuotaDataLogParams) {
 }
 
 func SaveQuotaDataCache() {
+	// Serialize periodic and shutdown flushes, including empty batches.
+	quotaDataFlushLock.Lock()
+	defer quotaDataFlushLock.Unlock()
+
 	CacheQuotaDataLock.Lock()
-	defer CacheQuotaDataLock.Unlock()
-	size := len(CacheQuotaData)
+	snapshot := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+
+	size := len(snapshot)
 	// 如果缓存中有数据，就保存到数据库中
 	// 1. 先查询数据库中是否有数据
 	// 2. 如果有数据，就更新数据
 	// 3. 如果没有数据，就插入数据
-	for _, quotaData := range CacheQuotaData {
+	for _, quotaData := range snapshot {
 		quotaDataDB := &QuotaData{}
 		DB.Table("quota_data").
 			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
@@ -120,7 +128,6 @@ func SaveQuotaDataCache() {
 			DB.Table("quota_data").Create(quotaData)
 		}
 	}
-	CacheQuotaData = make(map[string]*QuotaData)
 	common.SysLog(common.LogText("saved dashboard data, %d records", size))
 }
 

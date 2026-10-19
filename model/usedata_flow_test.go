@@ -1,10 +1,14 @@
 package model
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
@@ -190,4 +194,141 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 60, rows[0].TokenUsed)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+}
+
+func TestSaveQuotaDataCacheConcurrentBatches(t *testing.T) {
+	var version string
+	require.NoError(t, DB.Raw("SELECT sqlite_version()").Scan(&version).Error)
+	t.Logf("SQLite version: %s", version)
+
+	for _, tc := range []struct {
+		name      string
+		nextBatch bool
+	}{
+		{name: "new data waits for the next batch", nextBatch: true},
+		{name: "empty cache waits for the active flush"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			CacheQuotaDataLock.Lock()
+			previousCache := CacheQuotaData
+			CacheQuotaData = make(map[string]*QuotaData)
+			CacheQuotaDataLock.Unlock()
+			t.Cleanup(func() {
+				CacheQuotaDataLock.Lock()
+				CacheQuotaData = previousCache
+				CacheQuotaDataLock.Unlock()
+			})
+
+			queryStarted := make(chan struct{}, 3)
+			releaseQueries := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseQueries) })
+			var workers sync.WaitGroup
+			const callbackName = "test:block_quota_data_flush"
+			require.NoError(t, DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+				// Block the flush's per-row lookups, leaving assertion queries free to run.
+				if _, ok := tx.Statement.Dest.(*QuotaData); !ok || tx.Statement.Table != "quota_data" {
+					return
+				}
+				queryStarted <- struct{}{}
+				<-releaseQueries
+			}))
+			t.Cleanup(func() {
+				release()
+				workers.Wait()
+				require.NoError(t, DB.Callback().Query().Remove(callbackName))
+			})
+
+			params := QuotaDataLogParams{
+				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
+				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+				Quota: 100, TokenUsed: 40,
+			}
+			LogQuotaData(params)
+			firstDone := make(chan struct{})
+			workers.Go(func() {
+				SaveQuotaDataCache()
+				close(firstDone)
+			})
+			select {
+			case <-queryStarted:
+			case <-time.After(5 * time.Second):
+				require.FailNow(t, "first flush did not reach the database")
+			}
+
+			if tc.nextBatch {
+				logged := make(chan struct{})
+				workers.Go(func() {
+					next := params
+					next.Quota, next.TokenUsed = 50, 20
+					LogQuotaData(next)
+					next.ModelName = "gpt-b"
+					next.Quota, next.TokenUsed = 25, 10
+					LogQuotaData(next)
+					close(logged)
+				})
+				select {
+				case <-logged:
+				case <-time.After(5 * time.Second):
+					require.FailNow(t, "cache writes blocked on the database flush")
+				}
+			}
+
+			secondStarted := make(chan struct{})
+			secondDone := make(chan struct{})
+			workers.Go(func() {
+				close(secondStarted)
+				SaveQuotaDataCache()
+				close(secondDone)
+			})
+			<-secondStarted
+			select {
+			case <-queryStarted:
+				require.FailNow(t, "second flush reached the database before the first finished")
+			case <-secondDone:
+				require.FailNow(t, "second flush returned before the first finished")
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			// Complete only the first lookup; the second batch remains blocked.
+			releaseQueries <- struct{}{}
+			select {
+			case <-firstDone:
+			case <-time.After(5 * time.Second):
+				require.FailNow(t, "first flush did not finish")
+			}
+			var rows []QuotaData
+			require.NoError(t, DB.Order("model_name").Find(&rows).Error)
+			require.Len(t, rows, 1)
+			assert.Equal(t, "gpt-a", rows[0].ModelName)
+			assert.Equal(t, 1, rows[0].Count)
+			assert.Equal(t, 100, rows[0].Quota)
+			assert.Equal(t, 40, rows[0].TokenUsed)
+
+			release()
+			select {
+			case <-secondDone:
+			case <-time.After(5 * time.Second):
+				require.FailNow(t, "second flush did not finish")
+			}
+			SaveQuotaDataCache()
+			require.NoError(t, DB.Order("model_name").Find(&rows).Error)
+			if tc.nextBatch {
+				require.Len(t, rows, 2)
+				assert.Equal(t, "gpt-a", rows[0].ModelName)
+				assert.Equal(t, 2, rows[0].Count)
+				assert.Equal(t, 150, rows[0].Quota)
+				assert.Equal(t, 60, rows[0].TokenUsed)
+				assert.Equal(t, "gpt-b", rows[1].ModelName)
+				assert.Equal(t, 1, rows[1].Count)
+				assert.Equal(t, 25, rows[1].Quota)
+				assert.Equal(t, 10, rows[1].TokenUsed)
+			} else {
+				require.Len(t, rows, 1)
+				assert.Equal(t, 1, rows[0].Count)
+				assert.Equal(t, 100, rows[0].Quota)
+				assert.Equal(t, 40, rows[0].TokenUsed)
+			}
+		})
+	}
 }
