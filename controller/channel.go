@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -229,12 +230,6 @@ func GetAllChannels(c *gin.Context) {
 			return
 		}
 	} else {
-		if err := buildChannelListQuery(groupFilter, statusFilter, typeFilter).Count(&total).Error; err != nil {
-			common.SysError(common.LogText("failed to count channels: %s", err.Error()))
-			common.ApiErrorT(c, "Failed to count channels. Please try again later")
-			return
-		}
-
 		err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter)).
 			Limit(pageInfo.GetPageSize()).
 			Offset(pageInfo.GetStartIdx()).
@@ -253,7 +248,7 @@ func GetAllChannels(c *gin.Context) {
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
 	var results []struct {
-		Type  int64
+		Type  sql.NullInt64
 		Count int64
 	}
 	if err := countQuery.Select("type, count(*) as count").Group("type").Find(&results).Error; err != nil {
@@ -263,7 +258,11 @@ func GetAllChannels(c *gin.Context) {
 	}
 	typeCounts := make(map[int64]int64)
 	for _, r := range results {
-		typeCounts[r.Type] = r.Count
+		typeCounts[r.Type.Int64] = r.Count
+		// Count from the aggregate rows to keep NULL distinct from type 0.
+		if !enableTagMode && (typeFilter < 0 || r.Type.Valid && r.Type.Int64 == int64(typeFilter)) {
+			total += r.Count
+		}
 	}
 	common.ApiSuccess(c, gin.H{
 		"items":       channelData,

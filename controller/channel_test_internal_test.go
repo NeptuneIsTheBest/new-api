@@ -26,7 +26,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestChannelTagListsDatabaseMatrix(t *testing.T) {
+func TestChannelListsDatabaseMatrix(t *testing.T) {
 	previousGinMode := gin.Mode()
 	gin.SetMode(gin.TestMode)
 	t.Cleanup(func() { gin.SetMode(previousGinMode) })
@@ -115,6 +115,7 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 				}
 				allCounts := map[int]int{1: 7, 2: 2}
 				enabledCounts := map[int]int{1: 6, 2: 1}
+				tagQuery := "tag_mode=true&group=default"
 				for _, tc := range []struct {
 					name, query string
 					search      bool
@@ -123,23 +124,34 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 					counts      map[int]int
 					queries     int
 				}{
-					{"default", "", false, []int{2, 1, 0, 4, 5, 3, 7}, 3, allCounts, 4},
-					{"id sort", "&id_sort=true", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
-					{"name sort", "&sort_by=name&sort_order=asc", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
-					{"priority asc", "&sort_by=priority&sort_order=asc", false, []int{0, 2, 1, 3, 5, 4, 7}, 3, allCounts, 4},
-					{"tag page", "&p=2&page_size=1", false, []int{4, 5, 3}, 3, allCounts, 4},
-					{"past last tag", "&p=4&page_size=1", false, []int{}, 3, allCounts, 3},
-					{"enabled type", "&status=enabled&type=1", false, []int{1, 0, 3, 7}, 3, enabledCounts, 4},
-					{"both disabled statuses", "&status=disabled", false, []int{4, 5}, 1, map[int]int{1: 1, 2: 1}, 4},
-					{"no matching type", "&type=999", false, []int{}, 0, allCounts, 3},
-					{"search expands matching tags", "&keyword=match&model=model-a&status=enabled&type=1", true, searchOrder, 3, map[int]int{1: 3, 2: 1}, 2},
-					{"search channel page", "&keyword=match&model=model-a&status=enabled&type=1&p=2&page_size=1", true, searchOrder[1:2], 3, map[int]int{1: 3, 2: 1}, 2},
-					{"search empty", "&keyword=absent", true, []int{}, 0, map[int]int{}, 1},
-					{"search name sort", "&keyword=match+alpha&sort_by=name&sort_order=desc", true, []int{0, 1, 2}, 3, map[int]int{1: 2, 2: 1}, 2},
+					{"default", tagQuery, false, []int{2, 1, 0, 4, 5, 3, 7}, 3, allCounts, 4},
+					{"id sort", tagQuery + "&id_sort=true", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
+					{"name sort", tagQuery + "&sort_by=name&sort_order=asc", false, []int{2, 1, 0, 5, 4, 3, 7}, 3, allCounts, 4},
+					{"priority asc", tagQuery + "&sort_by=priority&sort_order=asc", false, []int{0, 2, 1, 3, 5, 4, 7}, 3, allCounts, 4},
+					{"tag page", tagQuery + "&p=2&page_size=1", false, []int{4, 5, 3}, 3, allCounts, 4},
+					{"past last tag", tagQuery + "&p=4&page_size=1", false, []int{}, 3, allCounts, 3},
+					{"enabled type", tagQuery + "&status=enabled&type=1", false, []int{1, 0, 3, 7}, 3, enabledCounts, 4},
+					{"both disabled statuses", tagQuery + "&status=disabled", false, []int{4, 5}, 1, map[int]int{1: 1, 2: 1}, 4},
+					{"no matching type", tagQuery + "&type=999", false, []int{}, 0, allCounts, 3},
+					{"search expands matching tags", tagQuery + "&keyword=match&model=model-a&status=enabled&type=1", true, searchOrder, 3, map[int]int{1: 3, 2: 1}, 2},
+					{"search channel page", tagQuery + "&keyword=match&model=model-a&status=enabled&type=1&p=2&page_size=1", true, searchOrder[1:2], 3, map[int]int{1: 3, 2: 1}, 2},
+					{"search empty", tagQuery + "&keyword=absent", true, []int{}, 0, map[int]int{}, 1},
+					{"search name sort", tagQuery + "&keyword=match+alpha&sort_by=name&sort_order=desc", true, []int{0, 1, 2}, 3, map[int]int{1: 2, 2: 1}, 2},
+					{"ordinary all groups", "", false, []int{6, 4, 5, 2, 1, 0, 3, 9, 8, 7}, 10, map[int]int{1: 8, 2: 2}, 2},
+					{"ordinary group", "group=default", false, []int{4, 5, 2, 1, 0, 3, 9, 8, 7}, 9, allCounts, 2},
+					{"ordinary multi group", "group=vip", false, []int{0}, 1, map[int]int{1: 1}, 2},
+					{"ordinary enabled", "group=default&status=enabled", false, []int{2, 1, 0, 3, 9, 8, 7}, 7, enabledCounts, 2},
+					{"ordinary enabled type", "group=default&status=enabled&type=1", false, []int{1, 0, 3, 9, 8, 7}, 6, enabledCounts, 2},
+					{"ordinary both disabled statuses", "group=default&status=disabled", false, []int{4, 5}, 2, map[int]int{1: 1, 2: 1}, 2},
+					{"ordinary disabled type", "group=default&status=disabled&type=2", false, []int{5}, 1, map[int]int{1: 1, 2: 1}, 2},
+					{"ordinary no matching type", "group=default&type=999", false, []int{}, 0, allCounts, 2},
+					{"ordinary no matching group", "group=absent", false, []int{}, 0, map[int]int{}, 2},
+					{"ordinary sorted page", "group=default&sort_by=name&sort_order=asc&p=2&page_size=2", false, []int{5, 4}, 9, allCounts, 2},
+					{"ordinary past last page", "group=default&p=10&page_size=1", false, []int{}, 9, allCounts, 2},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						queries = 0
-						response := requestChannelTagList(t, tc.search, "tag_mode=true&group=default"+tc.query)
+						response := requestChannelList(t, tc.search, tc.query)
 						require.True(t, response.Success, response.Message)
 						assert.Equal(t, tc.queries, queries)
 						assert.Equal(t, tc.total, response.Data.Total)
@@ -164,12 +176,57 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 					if search {
 						failAt, expectedMessage = 2, "tag channel query failed"
 					}
-					response := requestChannelTagList(t, search, "tag_mode=true&group=default")
+					response := requestChannelList(t, search, "tag_mode=true&group=default")
 					assert.False(t, response.Success)
 					assert.Equal(t, expectedMessage, response.Message)
 					assert.Nil(t, response.Data.Items)
 					failAt = 0
 				}
+				queries, failAt = 0, 2
+				response := requestChannelList(t, false, "group=default")
+				assert.False(t, response.Success)
+				assert.Equal(t, "Failed to count channel types. Please try again later", response.Message)
+				assert.Equal(t, 2, queries)
+				assert.Nil(t, response.Data.Items)
+				failAt = 0
+			})
+
+			t.Run("nullable_types", func(t *testing.T) {
+				channels := []model.Channel{
+					{Name: "null type", Key: "test-key", Group: "default"},
+					{Name: "zero type", Key: "test-key", Group: "default"},
+					{Name: "typed", Key: "test-key", Group: "default", Type: 1},
+				}
+				require.NoError(t, db.Create(&channels).Error)
+				t.Cleanup(func() { require.NoError(t, db.Where("id > 0").Delete(&model.Channel{}).Error) })
+				require.NoError(t, db.Model(&channels[0]).Update("type", nil).Error)
+				for _, tc := range []struct {
+					name, query string
+					ids         []int
+				}{
+					{"all types", "", []int{channels[2].Id, channels[1].Id, channels[0].Id}},
+					{"zero type", "&type=0", []int{channels[1].Id}},
+					{"nonzero type", "&type=1", []int{channels[2].Id}},
+					{"negative type is unfiltered", "&type=-2", []int{channels[2].Id, channels[1].Id, channels[0].Id}},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						queries = 0
+						response := requestChannelList(t, false, "group=default"+tc.query)
+						require.True(t, response.Success, response.Message)
+						assert.Equal(t, len(tc.ids), response.Data.Total)
+						assert.Equal(t, tc.ids, channelIDsFromChannels(response.Data.Items))
+						assert.Equal(t, map[int]int{0: 1, 1: 1}, response.Data.TypeCounts)
+						assert.Equal(t, 2, queries)
+					})
+				}
+				require.NoError(t, db.Model(&channels[1]).Update("type", 1).Error)
+				queries = 0
+				response := requestChannelList(t, false, "group=default&type=0")
+				require.True(t, response.Success, response.Message)
+				assert.Zero(t, response.Data.Total, "a NULL type does not match type=0")
+				assert.Empty(t, response.Data.Items)
+				assert.Equal(t, map[int]int{0: 1, 1: 2}, response.Data.TypeCounts)
+				assert.Equal(t, 2, queries)
 			})
 
 			t.Run("batch_boundary", func(t *testing.T) {
@@ -183,7 +240,7 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, tags, 201)
 				queries = 0
-				response := requestChannelTagList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
+				response := requestChannelList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
 				require.True(t, response.Success, response.Message)
 				assert.Equal(t, 3, queries)
 				assert.Equal(t, 201, response.Data.Total)
@@ -192,7 +249,7 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 					assert.Equal(t, tag, response.Data.Items[i].Tag)
 				}
 				queries, failAt = 0, 3
-				response = requestChannelTagList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
+				response = requestChannelList(t, true, "tag_mode=true&group=default&keyword=batch&page_size=201")
 				assert.False(t, response.Success)
 				assert.Equal(t, "tag channel query failed", response.Message)
 				assert.Equal(t, 3, queries)
@@ -241,7 +298,7 @@ func TestChannelTagListsDatabaseMatrix(t *testing.T) {
 	}
 }
 
-type channelTagListResponse struct {
+type channelListResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	Data    struct {
@@ -251,7 +308,7 @@ type channelTagListResponse struct {
 	} `json:"data"`
 }
 
-func requestChannelTagList(t *testing.T, search bool, query string) channelTagListResponse {
+func requestChannelList(t *testing.T, search bool, query string) channelListResponse {
 	t.Helper()
 	path, handler := "/api/channel/", GetAllChannels
 	if search {
@@ -262,7 +319,7 @@ func requestChannelTagList(t *testing.T, search bool, query string) channelTagLi
 	c.Request = httptest.NewRequest(http.MethodGet, path+"?"+query, nil)
 	handler(c)
 	require.Equal(t, http.StatusOK, recorder.Code)
-	var response channelTagListResponse
+	var response channelListResponse
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	return response
 }
