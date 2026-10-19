@@ -54,8 +54,9 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 ### Test Execution and Changes
 
 - Reuse existing tests by default. Do NOT add or modify permanent tests unless necessary, needed to address a test failure, or needed to synchronize tests added or updated upstream. Necessary means existing tests cannot adequately protect important behavior or a specific regression path affected by the change. A feature, bug fix, UI adjustment, or coverage target alone does not require permanent test changes.
-- Existing tests or one-off temporary tests may satisfy verification requirements. Temporary tests are allowed, must be cleaned up after verification, and must not be included in commits. They are subject to the same database dependency limits as permanent tests.
-- Do NOT run database tests that require additional dependency installation or downloads, including database servers, clients, test dependencies, or container images. Use only the existing environment; skip checks that require these additions and report the reason and unverified scope. This restriction applies to all database verification, including compatibility and migration checks.
+- Existing tests or one-off temporary tests may satisfy verification requirements. Temporary tests are allowed, must be cleaned up after verification, and must not be included in commits. They follow the same test execution rules as permanent tests.
+- The dependency restriction applies only to database-related tests and verification, including compatibility and migration checks. Skip these checks only when they require additional dependency installation or downloads, including database servers, clients, test dependencies, or container images, and report the reason and unverified scope. When the required environment and dependencies are already available, run the applicable database checks normally.
+- Run applicable non-database tests normally. Installing or downloading dependencies needed for these tests is allowed; the database dependency restriction does not apply to them.
 
 ### Authentication Security (OWASP Mandatory)
 

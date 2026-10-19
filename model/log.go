@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"database/sql"
+	"math"
 	"strings"
 	"time"
 
@@ -672,70 +674,117 @@ func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota        int     `json:"quota"`
+	Rpm          int     `json:"rpm"`
+	Tpm          int     `json:"tpm"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
+// sumLogTokens keeps invalid historical counts from making statistics negative.
+func sumLogTokens(counts ...int64) int64 {
+	var total int64
+	for _, count := range counts {
+		total += min(max(count, 0), math.MaxInt64-total)
+	}
+	return total
+}
 
-	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
+func logInputTokenUsage(promptTokens int64, otherJSON string) (inputTokens, cacheTokens int64) {
+	inputTokens = max(promptTokens, 0)
+	var other struct {
+		InputTokensTotal    *int64 `json:"input_tokens_total"`
+		CacheTokens         int64  `json:"cache_tokens"`
+		CacheWriteTokens    *int64 `json:"cache_write_tokens"`
+		CacheCreationTokens int64  `json:"cache_creation_tokens"`
+		CacheCreation5m     int64  `json:"cache_creation_tokens_5m"`
+		CacheCreation1h     int64  `json:"cache_creation_tokens_1h"`
+		UsageSemantic       string `json:"usage_semantic"`
+		Claude              bool   `json:"claude"`
+	}
+	if otherJSON == "" || common.UnmarshalJsonStr(otherJSON, &other) != nil {
+		return inputTokens, 0
+	}
+	cacheTokens = max(other.CacheTokens, 0)
+	if other.InputTokensTotal != nil && *other.InputTokensTotal >= 0 {
+		return *other.InputTokensTotal, cacheTokens
+	}
+	// OpenAI prompt tokens already include cache reads and writes. Historical
+	// Claude logs record them separately and may predate usage_semantic.
+	if other.UsageSemantic != "anthropic" && !(other.UsageSemantic == "" && other.Claude) {
+		return inputTokens, cacheTokens
+	}
+	cacheWriteTokens := max(other.CacheCreationTokens, sumLogTokens(other.CacheCreation5m, other.CacheCreation1h))
+	if other.CacheWriteTokens != nil {
+		cacheWriteTokens = max(*other.CacheWriteTokens, 0)
+	}
+	return sumLogTokens(inputTokens, cacheTokens, cacheWriteTokens), cacheTokens
+}
 
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
+func SumUsedQuota(ctx context.Context, userId int, filter LogFilter) (stat Stat, err error) {
+	base := LOG_DB.WithContext(ctx).Model(&Log{})
+	if userId != 0 {
+		base = base.Where("logs.user_id = ?", userId)
+	}
+	base = base.Session(&gorm.Session{})
+	filter.Type = LogTypeConsume
+	tx, err := filter.apply(base)
+	if err != nil {
 		return stat, err
 	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
-		return stat, err
-	}
-	if tokenName != "" {
-		tx = tx.Where("token_name = ?", tokenName)
-		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", endTimestamp)
-	}
-	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if channel != 0 {
-		tx = tx.Where("channel_id = ?", channel)
-		rpmTpmQuery = rpmTpmQuery.Where("channel_id = ?", channel)
-	}
-	if group != "" {
-		tx = tx.Where(logGroupCol+" = ?", group)
-		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
-	}
-
-	tx = tx.Where("type = ?", LogTypeConsume)
-	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
-
-	// 只统计最近60秒的rpm和tpm
-	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
-
-	// 执行查询
-	if err := tx.Scan(&stat).Error; err != nil {
+	tx = tx.Session(&gorm.Session{})
+	if err := tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error; err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
 		return stat, common.NewMessage("Failed to query statistics")
+	}
+
+	// Rates retain their rolling 60-second window, independent of the selected dates.
+	rateFilter := filter
+	rateFilter.StartTimestamp = time.Now().Add(-60 * time.Second).Unix()
+	rateFilter.EndTimestamp = 0
+	rpmTpmQuery, err := rateFilter.apply(base)
+	if err != nil {
+		return stat, err
 	}
 	var rateStat struct {
 		Rpm int
 		Tpm int
 	}
-	if err := rpmTpmQuery.Scan(&rateStat).Error; err != nil {
+	if err := rpmTpmQuery.Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm").Scan(&rateStat).Error; err != nil {
 		common.SysError(common.LogText("failed to query rpm/tpm stat: %s", err.Error()))
 		return stat, common.NewMessage("Failed to query statistics")
 	}
 	stat.Rpm = rateStat.Rpm
 	stat.Tpm = rateStat.Tpm
 
+	// Parse metadata in Go so historical JSON and all log database dialects use
+	// the same token semantics, without loading the matching logs into memory.
+	rows, err := tx.Select("prompt_tokens, completion_tokens, other").Rows()
+	if err != nil {
+		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+		return stat, common.NewMessage("Failed to query statistics")
+	}
+	defer rows.Close()
+	var inputTotal, cacheTotal int64
+	for rows.Next() {
+		var promptTokens, completionTokens sql.NullInt64
+		var other sql.NullString
+		if err := rows.Scan(&promptTokens, &completionTokens, &other); err != nil {
+			common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+			return stat, common.NewMessage("Failed to query statistics")
+		}
+		inputTokens, cacheTokens := logInputTokenUsage(promptTokens.Int64, other.String)
+		inputTotal = sumLogTokens(inputTotal, inputTokens)
+		cacheTotal = sumLogTokens(cacheTotal, cacheTokens)
+		stat.TotalTokens = sumLogTokens(stat.TotalTokens, inputTokens, completionTokens.Int64)
+	}
+	if err := rows.Err(); err != nil {
+		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+		return stat, common.NewMessage("Failed to query statistics")
+	}
+	if inputTotal > 0 {
+		stat.CacheHitRate = min(float64(cacheTotal)/float64(inputTotal)*100, 100)
+	}
 	return stat, nil
 }
 
