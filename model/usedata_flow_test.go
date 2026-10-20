@@ -212,19 +212,23 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 
 func TestSaveQuotaDataCacheWrites(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		existing      bool
-		noChange      bool
-		failAt        string
-		afterCommit   bool
-		anotherBucket bool
-		wantOps       []string
-		wantRows      int
-		wantSaved     int
-		wantTotals    [3]int
+		name             string
+		existing         bool
+		concurrentInsert bool
+		noChange         bool
+		failAt           string
+		afterCommit      bool
+		anotherBucket    bool
+		wantOps          []string
+		wantRows         int
+		wantSaved        int
+		wantTotals       [3]int
 	}{
 		{name: "existing bucket", existing: true, wantOps: []string{"UPDATE"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{3, 150, 60}},
 		{name: "new bucket", wantOps: []string{"UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{1, 50, 20}},
+		{name: "concurrent bucket creation", concurrentInsert: true, wantOps: []string{"UPDATE", "SELECT", "UPDATE"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{2, 150, 60}},
+		{name: "concurrent bucket update error", concurrentInsert: true, failAt: "UPDATE", wantOps: []string{"UPDATE", "SELECT", "UPDATE"}, wantRows: 1, wantTotals: [3]int{1, 100, 40}},
+		{name: "concurrent bucket update committed but result unknown", concurrentInsert: true, failAt: "UPDATE", afterCommit: true, wantOps: []string{"UPDATE", "SELECT", "UPDATE"}, wantRows: 1, wantTotals: [3]int{2, 150, 60}},
 		{name: "unchanged bucket with zero affected rows", existing: true, noChange: true, wantOps: []string{"UPDATE", "SELECT"}, wantRows: 1, wantSaved: 1, wantTotals: [3]int{2, 100, 40}},
 		{name: "new bucket with zero increment", noChange: true, wantOps: []string{"UPDATE", "SELECT", "INSERT"}, wantRows: 1, wantSaved: 1},
 		{name: "update error", failAt: "UPDATE", wantOps: []string{"UPDATE"}},
@@ -271,6 +275,7 @@ func TestSaveQuotaDataCacheWrites(t *testing.T) {
 
 			var operations []string
 			recording, failed := true, false
+			inserted := false
 			forcedError := errors.New("forced quota data failure")
 			for _, callback := range []struct {
 				operation string
@@ -293,13 +298,25 @@ func TestSaveQuotaDataCacheWrites(t *testing.T) {
 						return
 					}
 					operations = append(operations, callback.operation)
-					if tc.failAt == callback.operation && !tc.afterCommit && !failed {
+					if tc.failAt == callback.operation && !tc.afterCommit && !failed && (!tc.concurrentInsert || inserted) {
 						failed = true
 						tx.AddError(forcedError)
 					}
 				}))
 				require.NoError(t, callback.after(afterName, func(tx *gorm.DB) {
 					if !recording || tx.Statement.Table != "quota_data" {
+						return
+					}
+					if tc.concurrentInsert && callback.operation == "UPDATE" && !inserted {
+						require.NoError(t, tx.Error)
+						require.Zero(t, tx.RowsAffected)
+						// Simulate another instance creating the bucket after the missed update commits.
+						concurrentBucket := bucket
+						concurrentBucket.Count, concurrentBucket.Quota, concurrentBucket.TokenUsed = 1, 100, 40
+						inserted = true
+						recording = false
+						seedFlowQuotaData(t, concurrentBucket)
+						recording = true
 						return
 					}
 					if tc.noChange && callback.operation == "UPDATE" {

@@ -1,12 +1,16 @@
 package common
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,12 +62,14 @@ func useDiskCache(t *testing.T, threshold, capacity int) string {
 		reserved:    diskCache.reserved,
 		files:       diskCache.files,
 		directories: diskCache.directories,
+		roots:       diskCache.roots,
 	}
 	diskCache.initialized = false
 	diskCache.stats = DiskCacheStats{}
 	diskCache.reserved = 0
 	diskCache.files = make(map[string]*diskCacheEntry)
 	diskCache.directories = make(map[string]*diskCacheDirectory)
+	diskCache.roots = make(map[string]error)
 	diskCache.mu.Unlock()
 	base := t.TempDir()
 	SetDiskCacheConfig(DiskCacheConfig{Enabled: true, ThresholdMB: threshold, MaxSizeMB: capacity, Path: base})
@@ -73,12 +80,18 @@ func useDiskCache(t *testing.T, threshold, capacity int) string {
 		assert.Zero(t, stats.ActiveMemoryBuffers, "memory owners must be released")
 		assert.Zero(t, stats.CurrentMemoryUsageBytes, "memory usage must be released")
 		diskCache.mu.Lock()
+		for _, directory := range diskCache.directories {
+			if directory.owner != nil {
+				assert.NoError(t, closeDiskCacheLock(directory.owner))
+			}
+		}
 		diskCache.initialized = previous.initialized
 		diskCache.config = previous.config
 		diskCache.stats = previous.stats
 		diskCache.reserved = previous.reserved
 		diskCache.files = previous.files
 		diskCache.directories = previous.directories
+		diskCache.roots = previous.roots
 		diskCache.mu.Unlock()
 	})
 	return base
@@ -252,9 +265,12 @@ func TestCacheReadersRetainStorageUntilLastClose(t *testing.T) {
 			if useDisk {
 				entries, err := os.ReadDir(GetDiskCacheDir())
 				require.NoError(t, err)
-				require.Len(t, entries, 1)
 				old := time.Now().Add(-time.Hour)
-				require.NoError(t, os.Chtimes(filepath.Join(GetDiskCacheDir(), entries[0].Name()), old, old))
+				for _, entry := range entries {
+					if diskCacheName.MatchString(entry.Name()) {
+						require.NoError(t, os.Chtimes(filepath.Join(GetDiskCacheDir(), entry.Name()), old, old))
+					}
+				}
 			}
 			require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
 			partial := make([]byte, 5)
@@ -376,41 +392,173 @@ func TestDiskCacheDeleteFailureRetainsUsage(t *testing.T) {
 }
 
 func TestDiskCacheOrphanCleanup(t *testing.T) {
-	base := useDiskCache(t, 0, 1)
-	config := GetDiskCacheConfig()
-	config.Path = filepath.Join(base, "startup")
-	dir := filepath.Join(config.Path, diskCacheDir)
-	require.NoError(t, os.MkdirAll(dir, 0700))
-	old := filepath.Join(dir, "body-deadbeef-1.tmp")
-	recent := filepath.Join(dir, "file-decafbad-2.tmp")
-	unrelated := filepath.Join(dir, "body-not-a-cache.tmp")
-	target := filepath.Join(base, "target")
-	link := filepath.Join(dir, "body-deadbeef-3.tmp")
-	for _, path := range []string{old, recent, unrelated, target} {
-		require.NoError(t, os.WriteFile(path, []byte("abc"), 0600))
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
+			base := useDiskCache(t, 0, 1)
+			config := GetDiskCacheConfig()
+			config.Path = filepath.Join(base, "startup")
+			dir := config.directory()
+			if foreign {
+				dir = filepath.Join(filepath.Dir(dir), "process-"+uuid.NewString())
+			}
+			require.NoError(t, os.MkdirAll(dir, 0700))
+			if foreign {
+				lease, err := acquireDiskCacheLock(filepath.Join(dir, diskCacheOwnerLock), true, true)
+				require.NoError(t, err)
+				require.NotNil(t, lease)
+				require.NoError(t, closeDiskCacheLock(lease))
+			}
+			old := filepath.Join(dir, "body-deadbeef-1.tmp")
+			recent := filepath.Join(dir, "file-decafbad-2.tmp")
+			unrelated := filepath.Join(dir, "body-not-a-cache.tmp")
+			outside := filepath.Join(base, "outside")
+			require.NoError(t, os.Mkdir(outside, 0700))
+			target := filepath.Join(outside, "body-deadbeef-3.tmp")
+			require.NoError(t, os.WriteFile(filepath.Join(outside, diskCacheOwnerLock), nil, 0600))
+			link := filepath.Join(dir, "body-deadbeef-3.tmp")
+			for _, path := range []string{old, recent, unrelated, target} {
+				require.NoError(t, os.WriteFile(path, []byte("abc"), 0600))
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symbolic links are unavailable: %v", err)
+			}
+			directoryLink := filepath.Join(filepath.Dir(dir), "process-"+uuid.NewString())
+			require.NoError(t, os.Symlink(outside, directoryLink))
+			past := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(old, past, past))
+			require.NoError(t, os.Chtimes(target, past, past))
+			SetDiskCacheConfig(config)
+			SyncDiskCacheStats()
+			stats := GetDiskCacheStats()
+			assert.EqualValues(t, 6, stats.CurrentDiskUsageBytes)
+			assert.Zero(t, stats.ActiveDiskFiles)
+			if foreign {
+				assert.Zero(t, GetDiskCacheDirectoryInfo().FileCount)
+			} else {
+				assert.Equal(t, 2, GetDiskCacheDirectoryInfo().FileCount)
+			}
+			require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+			assert.NoFileExists(t, old)
+			assert.FileExists(t, recent)
+			assert.FileExists(t, unrelated)
+			assert.FileExists(t, target)
+			_, err := os.Lstat(link)
+			require.NoError(t, err)
+			require.NoError(t, CleanupOldDiskCacheFiles(-time.Second))
+			assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+			assert.FileExists(t, target)
+			assert.FileExists(t, unrelated)
+			assert.FileExists(t, filepath.Join(dir, diskCacheOwnerLock), "unknown contents must retain their directory marker")
+		})
 	}
-	require.NoError(t, os.Symlink(target, link))
-	past := time.Now().Add(-time.Hour)
-	require.NoError(t, os.Chtimes(old, past, past))
-	SetDiskCacheConfig(config)
-	SyncDiskCacheStats()
-	stats := GetDiskCacheStats()
-	assert.EqualValues(t, 6, stats.CurrentDiskUsageBytes)
-	assert.Zero(t, stats.ActiveDiskFiles)
-	assert.Equal(t, 2, GetDiskCacheDirectoryInfo().FileCount)
-	require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
-	assert.NoFileExists(t, old)
-	assert.FileExists(t, recent)
-	assert.FileExists(t, unrelated)
-	assert.FileExists(t, target)
-	_, err := os.Lstat(link)
+}
+
+func TestDiskCacheProcessIsolation(t *testing.T) {
+	if enabled := os.Getenv("NEW_API_TEST_CACHE_CLEANER_ENABLED"); enabled != "" {
+		SetDiskCacheConfig(DiskCacheConfig{
+			Enabled:   enabled == "true",
+			MaxSizeMB: 1,
+			Path:      os.Getenv("NEW_API_TEST_CACHE_PATH"),
+		})
+		require.NoError(t, EnsureDiskCacheDir())
+		orphan := filepath.Join(GetDiskCacheDir(), "file-decafbad-2.tmp")
+		for _, startup := range []bool{true, false} {
+			require.NoError(t, os.WriteFile(orphan, []byte("orphan"), 0600))
+			past := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(orphan, past, past))
+			SyncDiskCacheStats()
+			assert.EqualValues(t, len("orphan"), GetDiskCacheStats().CurrentDiskUsageBytes,
+				"another process's files must not count toward this process's capacity")
+			assert.Equal(t, 1, GetDiskCacheDirectoryInfo().FileCount)
+			if startup {
+				CleanupOldCacheFiles()
+			} else {
+				require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+			}
+			assert.NoFileExists(t, orphan, "cleanup must still reclaim this process's inactive files")
+			assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+		}
+		return
+	}
+
+	executable, err := os.Executable()
 	require.NoError(t, err)
-	require.NoError(t, CleanupOldDiskCacheFiles(-time.Second))
-	assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+	for _, tc := range []struct {
+		name           string
+		defaultPath    bool
+		cleanerEnabled bool
+	}{
+		{"default path, enabled cleaner", true, true},
+		{"default path, disabled cleaner", true, false},
+		{"custom path, enabled cleaner", false, true},
+		{"custom path, disabled cleaner", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := useDiskCache(t, 0, 1)
+			if tc.defaultPath {
+				for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+					t.Setenv(name, base)
+				}
+				config := GetDiskCacheConfig()
+				config.Path = ""
+				SetDiskCacheConfig(config)
+			}
+			payload := []byte("active request body")
+			storage, err := CreateBodyStorage(payload)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, storage.Close()) })
+			require.True(t, storage.IsDisk())
+			filePayload := "active file cache"
+			filePath, err := WriteDiskCacheFileString(DiskCacheTypeFile, filePayload)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, RemoveDiskCacheFile(filePath)) })
+
+			legacy := filepath.Join(base, diskCacheDir, "body-deadbeef-1.tmp")
+			require.NoError(t, os.WriteFile(legacy, []byte("legacy cache"), 0600))
+			unmarkedDir := filepath.Join(base, diskCacheDir, "process-"+uuid.NewString())
+			require.NoError(t, os.Mkdir(unmarkedDir, 0700))
+			unmarked := filepath.Join(unmarkedDir, "file-deadbeef-1.tmp")
+			require.NoError(t, os.WriteFile(unmarked, []byte("unmarked cache"), 0600))
+			past := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(legacy, past, past))
+			require.NoError(t, os.Chtimes(unmarked, past, past))
+			entries, err := os.ReadDir(GetDiskCacheDir())
+			require.NoError(t, err)
+			for _, entry := range entries {
+				require.NoError(t, os.Chtimes(filepath.Join(GetDiskCacheDir(), entry.Name()), past, past))
+			}
+			SyncDiskCacheStats()
+			assert.EqualValues(t, len(payload)+len(filePayload), GetDiskCacheStats().CurrentDiskUsageBytes)
+
+			// The owning process stays alive while a fresh process runs both cleanup paths.
+			cmd := exec.CommandContext(t.Context(), executable,
+				"-test.run=^TestDiskCacheProcessIsolation$", "-test.count=1", "-test.timeout=30s")
+			cmd.Env = append(os.Environ(),
+				"NEW_API_TEST_CACHE_CLEANER_ENABLED="+strconv.FormatBool(tc.cleanerEnabled),
+				"NEW_API_TEST_CACHE_PATH="+GetDiskCachePath())
+			output, err := cmd.CombinedOutput()
+			assert.NoError(t, err, "%s", output)
+			assert.FileExists(t, legacy, "legacy shared files must not be adopted or deleted")
+			assert.FileExists(t, unmarked, "unmarked process directories must not be adopted or deleted")
+			reader, err := storage.NewReader()
+			require.NoError(t, err, "cleanup in another process must not break body retries")
+			t.Cleanup(func() { require.NoError(t, reader.Close()) })
+			replay, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			assert.Equal(t, payload, replay)
+			cached, err := ReadDiskCacheFileString(filePath)
+			require.NoError(t, err)
+			assert.Equal(t, filePayload, cached)
+			SyncDiskCacheStats()
+			assert.EqualValues(t, len(payload)+len(filePayload), GetDiskCacheStats().CurrentDiskUsageBytes)
+			assert.EqualValues(t, 2, GetDiskCacheStats().ActiveDiskFiles)
+		})
+	}
 }
 
 func TestDiskCacheConfigChangesKeepExistingOwners(t *testing.T) {
-	useDiskCache(t, 0, 2)
+	base := useDiskCache(t, 0, 2)
+	previousConfig := GetDiskCacheConfig()
 	payload := bytes.Repeat([]byte("x"), 1500<<10)
 	storage, err := CreateBodyStorage(payload)
 	require.NoError(t, err)
@@ -420,7 +568,7 @@ func TestDiskCacheConfigChangesKeepExistingOwners(t *testing.T) {
 	defer reader.Close()
 
 	config := GetDiskCacheConfig()
-	config.Path = t.TempDir()
+	config.Path = filepath.Join(base, "replacement")
 	config.MaxSizeMB = 1
 	SetDiskCacheConfig(config)
 	assert.EqualValues(t, len(payload), GetDiskCacheStats().CurrentDiskUsageBytes)
@@ -440,6 +588,15 @@ func TestDiskCacheConfigChangesKeepExistingOwners(t *testing.T) {
 	defer replacement.Close()
 	assert.True(t, replacement.IsDisk())
 	assert.Equal(t, 1, GetDiskCacheDirectoryInfo().FileCount)
+	// A request may already have captured the old config before the switch.
+	// Reusing a retired directory must reacquire ownership before writing.
+	delayed, err := createDiskCacheFile(DiskCacheTypeFile, previousConfig)
+	require.NoError(t, err)
+	_, err = delayed.WriteString("delayed request")
+	require.NoError(t, err)
+	require.NoError(t, delayed.Close())
+	require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+	assert.NoDirExists(t, previousConfig.directory())
 }
 
 func TestDiskCacheInvalidConfigurationAndStatsReset(t *testing.T) {
@@ -543,4 +700,244 @@ func TestDiskCacheStartupUsesFinalConfiguredDirectory(t *testing.T) {
 	CleanupOldCacheFiles()
 	assert.FileExists(t, foreign, "startup must not adopt a transient configuration's directory")
 	assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+}
+
+// The subprocess first announces readiness and then waits for a pipe command,
+// allowing tests to coordinate initialization, cleanup and exit without sleeps.
+func startDiskCacheProcess(t *testing.T, role string) (*exec.Cmd, io.WriteCloser, *bufio.Reader) {
+	t.Helper()
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, executable,
+		"-test.run=^TestDiskCacheProcessLifecycle$", "-test.count=1", "-test.timeout=25s")
+	cmd.Env = append(os.Environ(), "NEW_API_TEST_CACHE_PROCESS_ROLE="+role,
+		"NEW_API_TEST_CACHE_PATH="+GetDiskCachePath())
+	input, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	output, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = input.Close()
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		if t.Failed() {
+			t.Log(stderr.String())
+		}
+	})
+	reader := bufio.NewReader(output)
+	ready, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", ready)
+	return cmd, input, reader
+}
+
+func TestDiskCacheProcessLifecycle(t *testing.T) {
+	if role := os.Getenv("NEW_API_TEST_CACHE_PROCESS_ROLE"); role != "" {
+		SetDiskCacheConfig(DiskCacheConfig{Enabled: true, MaxSizeMB: 2, Path: os.Getenv("NEW_API_TEST_CACHE_PATH")})
+		_, err := fmt.Fprintln(os.Stdout, "ready")
+		require.NoError(t, err)
+		command := make([]byte, 1)
+		_, err = io.ReadFull(os.Stdin, command)
+		require.NoError(t, err)
+		if role == "cleaner" {
+			require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+			return
+		}
+		path, writer, err := CreateDiskCacheFile(DiskCacheTypeFile)
+		require.NoError(t, err)
+		_, err = writer.Write(bytes.Repeat([]byte("x"), 1<<20))
+		require.NoError(t, err)
+		reader, err := writer.newReader()
+		require.NoError(t, err)
+		_, err = fmt.Fprintln(os.Stdout, path)
+		require.NoError(t, err)
+		_, err = io.ReadFull(os.Stdin, command)
+		require.NoError(t, err)
+		if command[0] == 'v' {
+			payload, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			require.Equal(t, bytes.Repeat([]byte("x"), 1<<20), payload)
+			_, err = writer.Write(nil)
+			require.NoError(t, err)
+			_, err = fmt.Fprintln(os.Stdout, "intact")
+			require.NoError(t, err)
+			_, err = io.ReadFull(os.Stdin, command)
+			require.NoError(t, err)
+		}
+		// Deliberately exit without releasing the file owner or replay reader.
+		os.Exit(0)
+	}
+	for _, tc := range []struct {
+		name        string
+		kill        bool
+		startup     bool
+		recent      bool
+		defaultPath bool
+		previous    bool
+	}{
+		{name: "normal exit, startup, disabled cache", startup: true, defaultPath: true},
+		{name: "terminated process, periodic and manual cleanup", kill: true},
+		{name: "recent orphan blocks first admission", recent: true},
+		{name: "exit in previously configured root", kill: true, previous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := useDiskCache(t, 0, 1)
+			config := GetDiskCacheConfig()
+			if tc.defaultPath {
+				for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+					t.Setenv(name, base)
+				}
+				config.Path = ""
+				SetDiskCacheConfig(config)
+			}
+			cmd, input, output := startDiskCacheProcess(t, "owner")
+			_, err := input.Write([]byte("s"))
+			require.NoError(t, err)
+			line, err := output.ReadString('\n')
+			require.NoError(t, err)
+			path := strings.TrimSpace(line)
+			require.FileExists(t, path)
+			if !tc.recent {
+				past := time.Now().Add(-time.Hour)
+				require.NoError(t, os.Chtimes(path, past, past))
+				SyncDiskCacheStats()
+				require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+				assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+				assert.FileExists(t, path, "live owners must be protected regardless of file age")
+			}
+			_, err = input.Write([]byte("v"))
+			require.NoError(t, err)
+			line, err = output.ReadString('\n')
+			require.NoError(t, err)
+			require.Equal(t, "intact\n", line)
+			if tc.previous {
+				config.Path = filepath.Join(base, "replacement")
+				SetDiskCacheConfig(config)
+			}
+			if tc.kill {
+				require.NoError(t, cmd.Process.Kill())
+				require.Error(t, cmd.Wait())
+			} else {
+				_, err = input.Write([]byte("x"))
+				require.NoError(t, err)
+				require.NoError(t, cmd.Wait())
+			}
+			if tc.recent {
+				storage, err := CreateBodyStorage([]byte("new request"))
+				require.NoError(t, err)
+				assert.False(t, storage.IsDisk(), "first admission must discover and charge orphaned files")
+				require.NoError(t, storage.Close())
+				SyncDiskCacheStats()
+				require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+				assert.FileExists(t, path)
+				assert.EqualValues(t, 1<<20, GetDiskCacheStats().CurrentDiskUsageBytes)
+				assert.Zero(t, GetDiskCacheStats().ActiveDiskFiles)
+				assert.False(t, IsDiskCacheAvailable(1))
+				require.NoError(t, CleanupOldDiskCacheFiles(-time.Second))
+			} else if tc.startup {
+				config.Enabled = false
+				SetDiskCacheConfig(config)
+				CleanupOldCacheFiles()
+			} else {
+				require.NoError(t, CleanupOldDiskCacheFiles(10*time.Minute))
+			}
+			assert.NoDirExists(t, filepath.Dir(path))
+			assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+			SyncDiskCacheStats()
+			assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+			config.Enabled = true
+			SetDiskCacheConfig(config)
+			assert.True(t, IsDiskCacheAvailable(1<<20))
+		})
+	}
+}
+
+func TestDiskCacheConcurrentProcessCleanup(t *testing.T) {
+	useDiskCache(t, 0, 1)
+	owner, input, output := startDiskCacheProcess(t, "owner")
+	_, err := input.Write([]byte("s"))
+	require.NoError(t, err)
+	line, err := output.ReadString('\n')
+	require.NoError(t, err)
+	path := strings.TrimSpace(line)
+	past := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, past, past))
+	_, err = input.Write([]byte("x"))
+	require.NoError(t, err)
+	require.NoError(t, owner.Wait())
+	SyncDiskCacheStats()
+	assert.EqualValues(t, 1<<20, GetDiskCacheStats().CurrentDiskUsageBytes)
+
+	first, firstInput, _ := startDiskCacheProcess(t, "cleaner")
+	second, secondInput, _ := startDiskCacheProcess(t, "cleaner")
+	newOwner, newInput, newOutput := startDiskCacheProcess(t, "owner")
+	for _, pipe := range []io.WriteCloser{firstInput, secondInput, newInput} {
+		_, err := pipe.Write([]byte("s"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, first.Wait())
+	require.NoError(t, second.Wait())
+	line, err = newOutput.ReadString('\n')
+	require.NoError(t, err)
+	newPath := strings.TrimSpace(line)
+	assert.NoDirExists(t, filepath.Dir(path))
+	assert.FileExists(t, newPath, "concurrent initialization must publish a protected directory")
+	SyncDiskCacheStats()
+	assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes, "another cleaner's deletion must reconcile exactly once")
+	_, err = newInput.Write([]byte("v"))
+	require.NoError(t, err)
+	line, err = newOutput.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "intact\n", line)
+	require.NoError(t, newOwner.Process.Kill())
+	require.Error(t, newOwner.Wait())
+	require.NoError(t, CleanupOldDiskCacheFiles(-time.Second))
+	assert.NoDirExists(t, filepath.Dir(newPath))
+}
+
+func TestDiskCacheOrphanErrorsRetainCapacity(t *testing.T) {
+	for _, failure := range []string{"payload removal", "owner lock"} {
+		t.Run(failure, func(t *testing.T) {
+			base := useDiskCache(t, 0, 1)
+			dir := filepath.Join(base, diskCacheDir, "process-"+uuid.NewString())
+			require.NoError(t, os.MkdirAll(dir, 0700))
+			marker := filepath.Join(dir, diskCacheOwnerLock)
+			lease, err := acquireDiskCacheLock(marker, true, true)
+			require.NoError(t, err)
+			require.NotNil(t, lease)
+			require.NoError(t, closeDiskCacheLock(lease))
+			path := filepath.Join(dir, "file-deadbeef-1.tmp")
+			require.NoError(t, os.WriteFile(path, bytes.Repeat([]byte("x"), 1<<20), 0600))
+			SyncDiskCacheStats()
+			assert.EqualValues(t, 1<<20, GetDiskCacheStats().CurrentDiskUsageBytes)
+			blocker := path
+			if failure == "owner lock" {
+				blocker = marker
+			}
+			require.NoError(t, os.Rename(blocker, blocker+".held"))
+			require.NoError(t, os.Mkdir(blocker, 0700))
+			require.Error(t, CleanupOldDiskCacheFiles(-time.Second))
+			SyncDiskCacheStats()
+			assert.EqualValues(t, 1<<20, GetDiskCacheStats().CurrentDiskUsageBytes)
+			assert.False(t, IsDiskCacheAvailable(1))
+			if failure == "owner lock" {
+				_, _, err := CreateDiskCacheFile(DiskCacheTypeFile)
+				require.Error(t, err)
+				assert.NotErrorIs(t, err, ErrDiskCacheFull)
+			}
+			require.NoError(t, os.Remove(blocker))
+			require.NoError(t, os.Rename(blocker+".held", blocker))
+			require.NoError(t, CleanupOldDiskCacheFiles(-time.Second))
+			assert.NoDirExists(t, dir)
+			assert.Zero(t, GetDiskCacheStats().CurrentDiskUsageBytes)
+			assert.True(t, IsDiskCacheAvailable(1<<20))
+		})
+	}
 }

@@ -27,6 +27,10 @@ var ErrDiskCacheFull = errors.New("disk cache capacity exhausted")
 
 var diskCacheName = regexp.MustCompile(`^(body|file)-[0-9a-f]{8}-[0-9]+\.tmp$`)
 
+// Initialize one namespace before any startup cleanup. A fresh UUID prevents
+// sharing directories with other instances or a previous process using the same PID.
+var diskCacheProcessDir = "process-" + uuid.NewString()
+
 type diskCacheEntry struct {
 	path       string
 	size       int64
@@ -40,10 +44,11 @@ type diskCacheDirectory struct {
 	count  int
 	size   int64
 	err    error
+	owner  *os.File
 }
 
-// The directory is exclusive to this process. Metadata operations and deletion
-// are serialized; payload writes reserve space under the lock but do I/O outside it.
+// Owned directories keep a lifetime process lock; orphan scans take a temporary
+// lock. Payload writes reserve space under mu but do I/O outside it.
 type diskCacheManager struct {
 	mu          sync.Mutex
 	initialized bool
@@ -52,12 +57,14 @@ type diskCacheManager struct {
 	reserved    int64
 	files       map[string]*diskCacheEntry
 	directories map[string]*diskCacheDirectory
+	roots       map[string]error
 }
 
 var diskCache = diskCacheManager{
 	config:      DiskCacheConfig{ThresholdMB: 10, MaxSizeMB: 1024},
 	files:       make(map[string]*diskCacheEntry),
 	directories: make(map[string]*diskCacheDirectory),
+	roots:       make(map[string]error),
 }
 
 func GetDiskCacheDir() string {
@@ -68,24 +75,6 @@ func EnsureDiskCacheDir() error {
 	diskCache.mu.Lock()
 	defer diskCache.mu.Unlock()
 	return diskCache.ensureDirectoryLocked(diskCache.config.directory())
-}
-
-func (m *diskCacheManager) ensureDirectoryLocked(dir string) error {
-	m.initialized = true
-	directory := m.directories[dir]
-	if directory == nil || directory.err != nil {
-		if err := m.scanDirectoryLocked(dir); err != nil {
-			return err
-		}
-		directory = m.directories[dir]
-	}
-	if !directory.exists {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("failed to create cache directory: %w", err)
-		}
-		directory.exists = true
-	}
-	return nil
 }
 
 // DiskCacheFile is an append-only cache writer. Closing it releases its owner;
@@ -137,6 +126,8 @@ func createDiskCacheFile(cacheType DiskCacheType, config DiskCacheConfig) (*Disk
 func (m *diskCacheManager) canReserveLocked(size int64) bool {
 	_, limit, valid := m.config.limits()
 	used := m.stats.CurrentDiskUsageBytes
+	// Selection uses the known usage only. Creation and reservation surface scan
+	// errors explicitly, rather than disguising I/O errors as a full cache.
 	return valid && size >= 0 && used <= limit &&
 		m.reserved <= limit-used && size <= limit-used-m.reserved
 }
@@ -144,6 +135,9 @@ func (m *diskCacheManager) canReserveLocked(size int64) bool {
 func (f *DiskCacheFile) reserve(size int64) error {
 	diskCache.mu.Lock()
 	defer diskCache.mu.Unlock()
+	if err := diskCache.scanErrorLocked(); err != nil {
+		return err
+	}
 	if !diskCache.canReserveLocked(size) {
 		return ErrDiskCacheFull
 	}
@@ -354,6 +348,14 @@ func (m *diskCacheManager) scanDirectoryLocked(dir string) error {
 		directory = &diskCacheDirectory{}
 		m.directories[dir] = directory
 	}
+	info, err := os.Lstat(dir)
+	if err == nil && !info.IsDir() {
+		err = fmt.Errorf("cache path is not a directory: %s", dir)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		directory.err = err
+		return err
+	}
 	entries, err := os.ReadDir(dir)
 	directory.err = err
 	if os.IsNotExist(err) {
@@ -404,30 +406,12 @@ func (m *diskCacheManager) scanDirectoryLocked(dir string) error {
 	return directory.err
 }
 
+// CleanupOldDiskCacheFiles reclaims inactive files in this process's directories
+// and in marked directories whose previous owner has released its process lock.
 func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 	diskCache.mu.Lock()
 	defer diskCache.mu.Unlock()
-	diskCache.initialized = true
-	var result error
-	current := diskCache.config.directory()
-	if diskCache.directories[current] == nil {
-		diskCache.directories[current] = &diskCacheDirectory{}
-	}
-	for dir := range diskCache.directories {
-		result = errors.Join(result, diskCache.scanDirectoryLocked(dir))
-	}
-	now := time.Now()
-	for _, entry := range diskCache.files {
-		if entry.references == 0 && now.Sub(entry.inactiveAt) > maxAge {
-			result = errors.Join(result, diskCache.removeLocked(entry))
-		}
-	}
-	for dir, directory := range diskCache.directories {
-		if dir != current && directory.count == 0 && directory.err == nil {
-			delete(diskCache.directories, dir)
-		}
-	}
-	return result
+	return diskCache.syncDirectoriesLocked(&maxAge)
 }
 
 // DiskCacheDirectoryInfo is a cached snapshot, not a filesystem scan.
@@ -454,7 +438,7 @@ func GetDiskCacheInfo() (fileCount int, totalSize int64, err error) {
 	diskCache.mu.Lock()
 	defer diskCache.mu.Unlock()
 	if directory := diskCache.directories[diskCache.config.directory()]; directory != nil {
-		return directory.count, directory.size, directory.err
+		return directory.count, directory.size, errors.Join(directory.err, diskCache.scanErrorLocked())
 	}
 	return 0, 0, nil
 }

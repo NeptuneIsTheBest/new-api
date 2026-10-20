@@ -11,7 +11,7 @@ type DiskCacheConfig struct {
 	Enabled     bool
 	ThresholdMB int
 	MaxSizeMB   int
-	Path        string
+	Path        string // Base directory; empty uses the system temporary directory.
 }
 
 func (c DiskCacheConfig) limits() (threshold, capacity int64, valid bool) {
@@ -27,7 +27,7 @@ func (c DiskCacheConfig) directory() string {
 	if path == "" {
 		path = os.TempDir()
 	}
-	dir := filepath.Join(path, diskCacheDir)
+	dir := filepath.Join(path, diskCacheDir, diskCacheProcessDir)
 	if absolute, err := filepath.Abs(dir); err == nil {
 		return absolute
 	}
@@ -51,7 +51,7 @@ func SetDiskCacheConfig(config DiskCacheConfig) {
 	if diskCache.initialized && (dir != previousDir || diskCache.directories[dir] == nil) {
 		// Retain any scan error so admission fails explicitly instead of
 		// accepting files with an unknown starting usage.
-		_ = diskCache.scanDirectoryLocked(dir)
+		_ = diskCache.syncDirectoriesLocked(nil)
 	}
 }
 
@@ -134,14 +134,7 @@ func ResetDiskCacheUsage() {
 func SyncDiskCacheStats() {
 	diskCache.mu.Lock()
 	defer diskCache.mu.Unlock()
-	diskCache.initialized = true
-	current := diskCache.config.directory()
-	if diskCache.directories[current] == nil {
-		diskCache.directories[current] = &diskCacheDirectory{}
-	}
-	for dir := range diskCache.directories {
-		_ = diskCache.scanDirectoryLocked(dir)
-	}
+	_ = diskCache.syncDirectoriesLocked(nil)
 }
 
 func IsDiskCacheAvailable(size int64) bool {

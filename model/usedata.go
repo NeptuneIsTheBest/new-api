@@ -120,12 +120,13 @@ func SaveQuotaDataCache() {
 			"channel_id": quotaData.ChannelID,
 			"node_name":  quotaData.NodeName,
 		}
-		// Preserve the historical behavior of incrementing every matching row.
-		result := DB.Table("quota_data").Where(conditions).Updates(map[string]any{
+		increments := map[string]any{
 			"count":      gorm.Expr("count + ?", quotaData.Count),
 			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
 			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
-		})
+		}
+		// Preserve the historical behavior of incrementing every matching row.
+		result := DB.Table("quota_data").Where(conditions).Updates(increments)
 		if result.Error != nil {
 			// Do not replay writes whose commit outcome may be unknown.
 			common.SysError(common.LogText("failed to save dashboard data (%s): %s", "UPDATE", result.Error))
@@ -146,6 +147,12 @@ func SaveQuotaDataCache() {
 		if result.RowsAffected == 0 {
 			if err := DB.Table("quota_data").Create(quotaData).Error; err != nil {
 				common.SysError(common.LogText("failed to save dashboard data (%s): %s", "INSERT", err))
+				continue
+			}
+		} else if quotaData.Count != 0 || quotaData.Quota != 0 || quotaData.TokenUsed != 0 {
+			// Another instance may have created the bucket after the missed update.
+			if err := DB.Table("quota_data").Where(conditions).Updates(increments).Error; err != nil {
+				common.SysError(common.LogText("failed to save dashboard data (%s): %s", "UPDATE", err))
 				continue
 			}
 		}

@@ -257,16 +257,35 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength, maxBytes int64
 		}
 	}
 
-	// Keep the overflow probe bounded without computing maxBytes+1.
-	buffer := make([]byte, min(maxBytes, 64*1024-1)+1)
+	// Start small and keep the overflow probe bounded without computing maxBytes+1.
+	chunkSize := int(min(maxBytes, 512-1) + 1)
+	var buffer []byte
 	var total int64
 	emptyReads := 0
 	for {
-		readSize := len(buffer)
+		readSize := chunkSize
 		if remaining := maxBytes - total; remaining < int64(readSize) {
 			readSize = int(remaining) + 1
 		}
-		n, readErr := reader.Read(buffer[:readSize])
+		readBuffer := buffer
+		if disk == nil {
+			// Reuse storage capacity instead of allocating a second growing
+			// buffer. Probe before large growth so EOF does not allocate again.
+			if memory.Available() == 0 && memory.Len() < 64*1024 {
+				memory.Grow(readSize)
+			}
+			if available := memory.AvailableBuffer(); cap(available) > 0 {
+				readBuffer = available[:cap(available)]
+			} else if len(buffer) == 0 {
+				buffer = make([]byte, min(readSize, 512))
+				readBuffer = buffer
+			}
+		} else if readSize > len(buffer) {
+			buffer = make([]byte, readSize)
+			readBuffer = buffer
+		}
+		readSize = min(readSize, len(readBuffer))
+		n, readErr := reader.Read(readBuffer[:readSize])
 		if n > 0 {
 			emptyReads = 0
 			if int64(n) > maxBytes-total {
@@ -297,7 +316,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength, maxBytes int64
 				}
 			}
 			if disk != nil {
-				written, err := disk.file.Write(buffer[:n])
+				written, err := disk.file.Write(readBuffer[:n])
 				disk.size += int64(written)
 				if errors.Is(err, ErrDiskCacheFull) {
 					prefix, err := disk.Bytes()
@@ -310,12 +329,12 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength, maxBytes int64
 					}
 					disk = nil
 					allowDisk = false
-					memory.Write(buffer[:n])
+					memory.Write(readBuffer[:n])
 				} else if err != nil {
 					return nil, err
 				}
 			} else {
-				memory.Write(buffer[:n])
+				memory.Write(readBuffer[:n])
 			}
 		} else if readErr == nil {
 			emptyReads++
@@ -328,6 +347,13 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength, maxBytes int64
 				return nil, readErr
 			}
 			break
+		}
+		if n == chunkSize && chunkSize < 64*1024 && total < maxBytes {
+			nextChunkSize := min(2*chunkSize, 64*1024)
+			if remaining := maxBytes - total; remaining < int64(nextChunkSize) {
+				nextChunkSize = int(remaining) + 1
+			}
+			chunkSize = max(chunkSize, nextChunkSize)
 		}
 	}
 
@@ -368,7 +394,7 @@ func NewReplayableBodyReader(storage BodyStorage) ReplayableBody {
 	return replayableBodyReader{storage: storage}
 }
 
-// CleanupOldCacheFiles reclaims startup leftovers without touching active files.
+// CleanupOldCacheFiles also reclaims marked cache directories left by exited processes.
 func CleanupOldCacheFiles() {
 	if err := CleanupOldDiskCacheFiles(5 * time.Minute); err != nil {
 		SysError(LogText("failed to clean up disk cache: %v", err))
