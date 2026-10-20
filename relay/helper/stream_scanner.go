@@ -33,6 +33,12 @@ const (
 	streamWriteTimeout = 30 * time.Second
 )
 
+// Only the managed handler borrows buffers: its cleanup waits for every reader
+// before returning the initial allocation. Scanner growth stays outside the pool.
+var streamScannerBuffers = sync.Pool{
+	New: func() any { return new([InitialScannerBufferSize]byte) },
+}
+
 func getScannerBufferSize() int {
 	if constant.StreamScannerMaxBufferMB > 0 {
 		return constant.StreamScannerMaxBufferMB << 20
@@ -95,7 +101,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	var (
 		stopChan    = make(chan bool, 3) // 增加缓冲区避免阻塞
-		scanner     = NewStreamScanner(resp.Body)
+		scanner     = bufio.NewScanner(resp.Body)
+		buffer      = streamScannerBuffers.Get().(*[InitialScannerBufferSize]byte)
 		ticker      = time.NewTicker(streamingTimeout)
 		pingTicker  *time.Ticker
 		writeMutex  sync.Mutex     // Mutex to protect concurrent writes
@@ -103,6 +110,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		cleanupOnce sync.Once
 		stopOnce    sync.Once
 	)
+	scanner.Buffer(buffer[:], getScannerBufferSize())
 
 	stop := func() {
 		stopOnce.Do(func() {
@@ -141,6 +149,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 
 			wg.Wait()
+			streamScannerBuffers.Put(buffer)
 		})
 	}
 	// Ensure gin.Context is not returned to Gin's pool while any stream goroutine can still use it.

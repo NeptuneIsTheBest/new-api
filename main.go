@@ -63,6 +63,10 @@ func main() {
 		return
 	}
 
+	cacheContext, stopCacheCleanup := context.WithCancel(context.Background())
+	defer stopCacheCleanup()
+	go common.RunDiskCacheCleanup(cacheContext)
+
 	common.SysLog(common.LogText("New API %s started", common.Version))
 	if os.Getenv("GIN_MODE") != "debug" {
 		gin.SetMode(gin.ReleaseMode)

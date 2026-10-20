@@ -181,23 +181,10 @@ func streamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 }
 
 func handleStream(c *gin.Context, info *relaycommon.RelayInfo, resp *dto.ChatCompletionsStreamResponse) error {
-	streamData, err := common.Marshal(resp)
-	if err != nil {
-		return fmt.Errorf("failed to marshal stream response: %w", err)
-	}
-	err = openai.HandleStreamFormat(c, info, string(streamData), info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+	err := openai.HandleParsedStreamFormat(c, info, resp, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 	if err != nil {
 		return fmt.Errorf("failed to handle stream format: %w", err)
 	}
-	return nil
-}
-
-func handleFinalStream(c *gin.Context, info *relaycommon.RelayInfo, resp *dto.ChatCompletionsStreamResponse) error {
-	streamData, err := common.Marshal(resp)
-	if err != nil {
-		return fmt.Errorf("failed to marshal stream response: %w", err)
-	}
-	openai.HandleFinalResponse(c, info, string(streamData), resp.Id, resp.Created, resp.Model, resp.GetSystemFingerprint(), resp.Usage, false)
 	return nil
 }
 
@@ -402,10 +389,7 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 		response = helper.GenerateStopResponse(id, createAt, info.UpstreamModelName, finishReason)
 		response.Usage = usage
 	}
-	handleErr := handleFinalStream(c, info, response)
-	if handleErr != nil {
-		common.SysLog(common.LogText("send final response failed: %s", handleErr.Error()))
-	}
+	openai.HandleParsedFinalResponse(c, info, response, response.Id, response.Created, response.Model, response.GetSystemFingerprint(), response.Usage, false)
 	return usage, nil
 }
 

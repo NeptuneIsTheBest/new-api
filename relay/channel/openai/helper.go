@@ -2,6 +2,7 @@ package openai
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -19,33 +20,79 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 辅助函数
+// chatStreamChunk keeps the wire payload alongside its decoded value. The value
+// is read-only so output transformations cannot change accounting or later frames.
+type chatStreamChunk struct {
+	data     string
+	response *dto.ChatCompletionsStreamResponse
+	err      error
+}
+
+func parseChatStreamChunk(data string) chatStreamChunk {
+	chunk := chatStreamChunk{data: data, response: &dto.ChatCompletionsStreamResponse{}}
+	chunk.err = common.UnmarshalJsonStr(data, chunk.response)
+	return chunk
+}
+
 func HandleStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
+	chunk := chatStreamChunk{data: data}
+	switch info.RelayFormat {
+	case types.RelayFormatOpenAI:
+		if data != "" && (forceFormat || thinkToContent) {
+			chunk = parseChatStreamChunk(data)
+		}
+	case types.RelayFormatClaude, types.RelayFormatGemini:
+		chunk = parseChatStreamChunk(data)
+	}
+	return chunk.send(c, info, forceFormat, thinkToContent)
+}
+
+// HandleParsedStreamFormat forwards a synthesized Chat chunk without a JSON
+// round trip. It does not mutate the caller's response.
+func HandleParsedStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, response *dto.ChatCompletionsStreamResponse, forceFormat bool, thinkToContent bool) error {
+	if response == nil {
+		return fmt.Errorf("stream response is nil")
+	}
+	return (chatStreamChunk{response: response}).send(c, info, forceFormat, thinkToContent)
+}
+
+func (chunk chatStreamChunk) send(c *gin.Context, info *relaycommon.RelayInfo, forceFormat bool, thinkToContent bool) error {
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
 		info.SendResponseCount++
-		return sendStreamData(c, info, data, forceFormat, thinkToContent)
+		return sendStreamData(c, info, chunk, forceFormat, thinkToContent)
 	case types.RelayFormatClaude:
 		info.SendResponseCount++
-		return handleClaudeFormat(c, data, info)
+		if chunk.err != nil {
+			return chunk.err
+		}
+		return handleClaudeFormat(c, chunk.response, info)
 	case types.RelayFormatGemini:
 		// The stateful relaykit path owns its chunk counter so multi-hop and
 		// direct conversions observe the same stream state semantics.
-		return handleGeminiFormat(c, data, info)
+		if chunk.err != nil {
+			logger.LogError(c, common.LogText("failed to unmarshal stream response: %s", chunk.err.Error()))
+			return chunk.err
+		}
+		return handleGeminiFormat(c, chunk.response, info)
 	}
 	return nil
 }
 
-func handleClaudeFormat(c *gin.Context, data string, info *relaycommon.RelayInfo) error {
-	var streamResponse dto.ChatCompletionsStreamResponse
-	if err := common.Unmarshal(common.StringToByteSlice(data), &streamResponse); err != nil {
-		return err
-	}
-
+func handleClaudeFormat(c *gin.Context, streamResponse *dto.ChatCompletionsStreamResponse, info *relaycommon.RelayInfo) error {
 	if streamResponse.Usage != nil {
-		info.EnsureClaudeConvertInfo().Usage = streamResponse.Usage
+		// The Claude converter merges usage into its mutable stream state.
+		// Keep that state independent of the cached event and synthesized inputs.
+		usage := *streamResponse.Usage
+		usage.PromptTokensDetails = usage.PromptTokensDetails.Clone()
+		if usage.InputTokensDetails != nil {
+			details := usage.InputTokensDetails.Clone()
+			usage.InputTokensDetails = &details
+		}
+		usage.BillingUsage = dto.CloneBillingUsage(usage.BillingUsage)
+		info.EnsureClaudeConvertInfo().Usage = &usage
 	}
-	result, err := service.ConvertStreamResponse(c, info, types.RelayFormatClaude, &streamResponse)
+	result, err := service.ConvertStreamResponse(c, info, types.RelayFormatClaude, streamResponse)
 	if err != nil {
 		return err
 	}
@@ -59,18 +106,12 @@ func handleClaudeFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 	return nil
 }
 
-func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo) error {
-	var streamResponse dto.ChatCompletionsStreamResponse
-	if err := common.Unmarshal(common.StringToByteSlice(data), &streamResponse); err != nil {
-		logger.LogError(c, common.LogText("failed to unmarshal stream response: %s", err.Error()))
-		return err
-	}
-
-	state, err := chatToGeminiStreamState(info, &streamResponse)
+func handleGeminiFormat(c *gin.Context, streamResponse *dto.ChatCompletionsStreamResponse, info *relaycommon.RelayInfo) error {
+	state, err := chatToGeminiStreamState(info, streamResponse)
 	if err != nil {
 		return err
 	}
-	results, err := service.ConvertStreamResponseChunk(c, info, state, &streamResponse)
+	results, err := service.ConvertStreamResponseChunk(c, info, state, streamResponse)
 	if err != nil {
 		return err
 	}
@@ -137,18 +178,17 @@ func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, res
 	return nil
 }
 
-func processTokenData(info *relaycommon.RelayInfo, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
+func processTokenData(info *relaycommon.RelayInfo, chunk chatStreamChunk, responseTextBuilder *strings.Builder, toolCount *int) error {
 	switch info.RelayMode {
 	case relayconstant.RelayModeChatCompletions:
-		var streamResponse dto.ChatCompletionsStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-			return err
+		if chunk.err != nil {
+			return chunk.err
 		}
-		info.ObserveResponseModel(streamResponse.Model)
-		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
+		info.ObserveResponseModel(chunk.response.Model)
+		return ProcessStreamResponse(*chunk.response, responseTextBuilder, toolCount)
 	case relayconstant.RelayModeCompletions:
 		var streamResponse dto.CompletionsStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		if err := common.UnmarshalJsonStr(chunk.data, &streamResponse); err != nil {
 			return err
 		}
 		processCompletionsStreamResponse(streamResponse, responseTextBuilder)
@@ -162,14 +202,17 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 	}
 }
 
-func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
+func handleLastResponse(chunk chatStreamChunk, responseId *string, createAt *int64,
 	systemFingerprint *string, model *string, usage **dto.Usage,
 	containStreamUsage *bool, info *relaycommon.RelayInfo,
 	shouldSendLastResp *bool) error {
 
-	var lastStreamResponse dto.ChatCompletionsStreamResponse
-	if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &lastStreamResponse); err != nil {
-		return err
+	if chunk.err != nil {
+		return chunk.err
+	}
+	lastStreamResponse := chunk.response
+	if lastStreamResponse == nil {
+		return io.ErrUnexpectedEOF
 	}
 
 	*responseId = lastStreamResponse.Id
@@ -193,6 +236,34 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStreamData string,
 	responseId string, createAt int64, model string, systemFingerprint string,
 	usage *dto.Usage, containStreamUsage bool) {
+	var chunk chatStreamChunk
+	if info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini {
+		chunk = parseChatStreamChunk(lastStreamData)
+	}
+	chunk.finish(c, info, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+}
+
+// HandleParsedFinalResponse finishes a converted stream using its existing Chat
+// chunk. Like HandleFinalResponse, native OpenAI output needs only the metadata.
+func HandleParsedFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, response *dto.ChatCompletionsStreamResponse,
+	responseId string, createAt int64, model string, systemFingerprint string,
+	usage *dto.Usage, containStreamUsage bool) {
+	(chatStreamChunk{response: response}).finish(c, info, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+}
+
+func (chunk chatStreamChunk) finish(c *gin.Context, info *relaycommon.RelayInfo,
+	responseId string, createAt int64, model string, systemFingerprint string,
+	usage *dto.Usage, containStreamUsage bool) {
+	if info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini {
+		if chunk.err == nil && chunk.response == nil {
+			chunk.err = io.ErrUnexpectedEOF
+		}
+		if chunk.err != nil {
+			common.SysLog(common.LogText("error unmarshalling stream response: %s", chunk.err.Error()))
+			return
+		}
+	}
+	streamResponse := chunk.response
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
@@ -204,15 +275,9 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 		helper.Done(c)
 
 	case types.RelayFormatClaude:
-		var streamResponse dto.ChatCompletionsStreamResponse
-		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
-			common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
-			return
-		}
-
 		info.ClaudeConvertInfo.Usage = usage
 
-		result, err := service.ConvertStreamResponse(c, info, types.RelayFormatClaude, &streamResponse)
+		result, err := service.ConvertStreamResponse(c, info, types.RelayFormatClaude, streamResponse)
 		if err != nil {
 			common.SysLog(common.LogText("error converting Claude stream response: %s", err.Error()))
 			return
@@ -228,20 +293,14 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 		info.ClaudeConvertInfo.Done = true
 
 	case types.RelayFormatGemini:
-		var streamResponse dto.ChatCompletionsStreamResponse
-		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
-			common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
-			return
-		}
-
-		state, err := chatToGeminiStreamState(info, &streamResponse)
+		state, err := chatToGeminiStreamState(info, streamResponse)
 		if err != nil {
 			common.SysLog(common.LogText("error creating Gemini stream state: %s", err.Error()))
 			return
 		}
 		state.SetUsage(usage)
 
-		results, err := service.ConvertStreamResponseChunk(c, info, state, &streamResponse)
+		results, err := service.ConvertStreamResponseChunk(c, info, state, streamResponse)
 		if err != nil {
 			common.SysLog(common.LogText("error converting final Gemini stream response: %s", err.Error()))
 			return

@@ -617,3 +617,53 @@ func TestNewStreamScannerCallerLimit(t *testing.T) {
 	assert.Equal(t, "data: ok", scanner.Text())
 	require.NoError(t, scanner.Err())
 }
+
+func TestStreamScannerHandlerRetainedChunksRemainIndependent(t *testing.T) {
+	t.Parallel()
+
+	want := [][]string{
+		{"first stream", strings.Repeat("large payload ", 12<<10) + "end", "first tail"},
+		{"second stream", "second tail"},
+	}
+	received := make([][]string, len(want))
+	started := make(chan struct{}, len(want))
+	finished := make(chan struct{}, len(want))
+	release := make([]chan struct{}, len(want))
+	var wg sync.WaitGroup
+	for index, chunks := range want {
+		release[index] = make(chan struct{})
+		wire := "data: " + strings.Join(chunks, "\n\ndata: ") + "\n\ndata: [DONE]\n\n"
+		c, resp, info := setupStreamTest(t, strings.NewReader(wire))
+		info.DisablePing = true
+		wg.Go(func() {
+			StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+				received[index] = append(received[index], data)
+				if len(received[index]) == 1 {
+					started <- struct{}{}
+					<-release[index]
+				}
+			})
+			finished <- struct{}{}
+		})
+	}
+	for range want {
+		<-started
+	}
+	// Overlap active callbacks, but serialize handler completion: the global
+	// logger's existing counter is not synchronized across concurrent log calls.
+	for index := range want {
+		close(release[index])
+		<-finished
+	}
+	wg.Wait()
+
+	// Retained strings must also survive a later request reusing scanner storage.
+	c, resp, info := setupStreamTest(t, strings.NewReader("data: later stream\n\ndata: [DONE]\n\n"))
+	info.DisablePing = true
+	var later []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		later = append(later, data)
+	})
+	assert.Equal(t, []string{"later stream"}, later)
+	assert.Equal(t, want, received)
+}

@@ -20,19 +20,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
-	if data == "" {
+func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, chunk chatStreamChunk, forceFormat bool, thinkToContent bool) error {
+	if chunk.data == "" && chunk.response == nil {
 		return nil
 	}
 
-	if !forceFormat && !thinkToContent {
-		return helper.StringData(c, data)
+	if chunk.data != "" && !forceFormat && !thinkToContent {
+		return helper.StringData(c, chunk.data)
 	}
 
-	var lastStreamResponse dto.ChatCompletionsStreamResponse
-	if err := common.UnmarshalJsonStr(data, &lastStreamResponse); err != nil {
-		return err
+	if chunk.err != nil {
+		return chunk.err
 	}
+	lastStreamResponse := chunk.response
 
 	if !thinkToContent {
 		return helper.ObjectData(c, lastStreamResponse)
@@ -70,6 +70,10 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	if lastStreamResponse.Choices == nil || len(lastStreamResponse.Choices) == 0 {
 		return helper.ObjectData(c, lastStreamResponse)
 	}
+
+	// The decoded event is also used for usage and terminal processing. Only
+	// transformed choices need their own storage; the untouched event stays intact.
+	lastStreamResponse = lastStreamResponse.Copy()
 
 	// Process each choice
 	for i, choice := range lastStreamResponse.Choices {
@@ -117,26 +121,28 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var responseTextBuilder strings.Builder
 	var toolCount int
 	var usage = &dto.Usage{}
-	var lastStreamData string
-	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
+	var lastChunk chatStreamChunk
+	var secondLastChunk chatStreamChunk // Some compatible gateways put usage in the penultimate event.
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if lastStreamData != "" {
-			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+		if lastChunk.data != "" {
+			if err := lastChunk.send(c, info, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
 				sr.Error(err)
 			}
 		}
 		if len(data) > 0 {
-			if lastStreamData != "" {
-				secondLastStreamData = lastStreamData
+			if lastChunk.data != "" {
+				secondLastChunk = lastChunk
 			}
 
-			lastStreamData = data
-			observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
-			if err := processTokenData(info, data, &responseTextBuilder, &toolCount); err != nil {
+			lastChunk = parseChatStreamChunk(data)
+			if lastChunk.err == nil {
+				observeStreamChoices(info, lastChunk.response, seenStreamToolCalls, &streamFunctionCallNames)
+			}
+			if err := processTokenData(info, lastChunk, &responseTextBuilder, &toolCount); err != nil {
 				logger.LogError(c, common.LogText("error processing stream token data: %s", err.Error()))
 				sr.Error(err)
 			}
@@ -147,25 +153,32 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	// 处理最后的响应
 	shouldSendLastResp := true
-	if err := handleLastResponse(lastStreamData, &responseId, &createAt, &systemFingerprint, &model, &usage,
+	if err := handleLastResponse(lastChunk, &responseId, &createAt, &systemFingerprint, &model, &usage,
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
-		logger.LogError(c, common.LogText("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
+		logger.LogError(c, common.LogText("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastChunk.data))
 	}
 
 	// 部分兼容网关把完整的累计usage附在倒数第二个事件上，随后发送一个空的最后事件。
 	// 仅当最后一个事件没有有效usage时，回退到倒数第二个事件的完整快照。
-	usageFrame := lastStreamData
-	if !containStreamUsage && secondLastStreamData != "" {
-		var streamResp struct {
-			Usage *dto.Usage `json:"usage"`
+	usageFrame := lastChunk.data
+	if !containStreamUsage && secondLastChunk.data != "" {
+		previousUsage := secondLastChunk.response.Usage
+		if secondLastChunk.err != nil {
+			// Preserve the usage-only fallback for providers with malformed
+			// unrelated fields. Valid events reuse their already decoded usage.
+			var streamResp struct {
+				Usage *dto.Usage `json:"usage"`
+			}
+			previousUsage = nil
+			if common.UnmarshalJsonStr(secondLastChunk.data, &streamResp) == nil {
+				previousUsage = streamResp.Usage
+			}
 		}
-		err := common.Unmarshal([]byte(secondLastStreamData), &streamResp)
-		if err == nil && streamResp.Usage != nil &&
-			streamResp.Usage.PromptTokens > 0 &&
-			(streamResp.Usage.CompletionTokens > 0 || streamResp.Usage.TotalTokens > 0) {
-			usage = dto.MergeUsageNonZero(usage, streamResp.Usage)
+		if previousUsage != nil && previousUsage.PromptTokens > 0 &&
+			(previousUsage.CompletionTokens > 0 || previousUsage.TotalTokens > 0) {
+			usage = dto.MergeUsageNonZero(usage, previousUsage)
 			containStreamUsage = true
-			usageFrame = secondLastStreamData
+			usageFrame = secondLastChunk.data
 
 			if common.DebugEnabled {
 				logger.LogDebug(c, "usage extracted from second last SSE: PromptTokens=%d, CompletionTokens=%d, TotalTokens=%d, InputTokens=%d, OutputTokens=%d",
@@ -177,7 +190,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
-			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+			_ = sendStreamData(c, info, lastChunk, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
 	}
 
@@ -192,18 +205,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		info.CountBillableToolCall(dto.BuildInCallFunctionCall, name)
 	}
 
-	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	lastChunk.finish(c, info, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 
 	return usage, nil
 }
 
 // observeStreamChoices collects billable function call names and records the
 // finish reason facts used by health sampling from one parsed chunk.
-func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[string]struct{}, names *[]string) {
-	var streamResponse dto.ChatCompletionsStreamResponse
-	if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-		return
-	}
+func observeStreamChoices(info *relaycommon.RelayInfo, streamResponse *dto.ChatCompletionsStreamResponse, seen map[string]struct{}, names *[]string) {
 	for _, choice := range streamResponse.Choices {
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			if *choice.FinishReason == constant.FinishReasonContentFilter {

@@ -92,6 +92,7 @@
   "Failed to stream task media: %v": "向客户端转发任务媒体文件失败: %v",
   "Failed to update task %s: %s": "更新任务 %s 失败: %s",
   "Failed to update video task %s: %s": "更新视频任务 %s 失败: %s",
+  "failed to clean up disk cache: %v": "清理磁盘缓存失败: %v",
   "Failed to write to disk cache, falling back to memory: %v": "写入磁盘缓存失败，改用内存缓存: %v",
   "File cached to disk: %s, size: %d bytes": "文件已缓存到磁盘: %s，大小: %d 字节",
   "Fix null mj_id task error: %v": "修复 mj_id 为空的任务出错: %v",

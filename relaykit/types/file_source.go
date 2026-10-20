@@ -156,6 +156,10 @@ type CachedFileData struct {
 	diskClosed      bool       // 是否已关闭/清理
 	statDecremented bool       // 是否已扣减统计
 
+	// Cleanup optionally delegates storage release to the host. It runs once,
+	// for either memory or disk storage, instead of the default file removal.
+	// The host retains responsibility for retrying failed disk removals.
+	Cleanup func() error
 	OnClose func(size int64)
 }
 
@@ -178,12 +182,11 @@ func NewDiskCachedData(diskPath string, mimeType string, size int64) *CachedFile
 }
 
 func (c *CachedFileData) GetBase64Data() (string, error) {
+	c.diskMu.Lock()
+	defer c.diskMu.Unlock()
 	if !c.isDisk {
 		return c.base64Data, nil
 	}
-
-	c.diskMu.Lock()
-	defer c.diskMu.Unlock()
 
 	if c.diskClosed {
 		return "", fmt.Errorf("disk cache already closed")
@@ -197,7 +200,9 @@ func (c *CachedFileData) GetBase64Data() (string, error) {
 }
 
 func (c *CachedFileData) SetBase64Data(data string) {
-	if !c.isDisk {
+	c.diskMu.Lock()
+	defer c.diskMu.Unlock()
+	if !c.isDisk && !c.diskClosed {
 		c.base64Data = data
 	}
 }
@@ -207,26 +212,25 @@ func (c *CachedFileData) IsDisk() bool {
 }
 
 func (c *CachedFileData) Close() error {
-	if !c.isDisk {
-		c.base64Data = ""
-		return nil
-	}
-
 	c.diskMu.Lock()
 	defer c.diskMu.Unlock()
-
 	if c.diskClosed {
 		return nil
 	}
-
 	c.diskClosed = true
-	if c.diskPath != "" {
-		err := os.Remove(c.diskPath)
-		if err == nil && !c.statDecremented && c.OnClose != nil {
-			c.OnClose(c.DiskSize)
-			c.statDecremented = true
+	c.base64Data = ""
+	if c.Cleanup != nil {
+		if err := c.Cleanup(); err != nil {
+			return err
 		}
-		return err
+	} else if c.isDisk && c.diskPath != "" {
+		if err := os.Remove(c.diskPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if c.isDisk && !c.statDecremented && c.OnClose != nil {
+		c.OnClose(c.DiskSize)
+		c.statDecremented = true
 	}
 	return nil
 }
