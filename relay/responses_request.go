@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,25 @@ import (
 // passthrough bodies remain owned by the incoming request's BodyStorage.
 // The returned adaptor retains route/conversion state for DoRequest/DoResponse.
 func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.OpenAIResponsesRequest) (relaychannel.Adaptor, common.ReplayableBody, io.Closer, *types.NewAPIError) {
+	adaptor, jsonData, storage, apiErr := prepareResponsesRequest(c, info, req)
+	if apiErr != nil {
+		return nil, nil, nil, apiErr
+	}
+	if storage != nil {
+		body := common.NewReplayableBodyReader(storage)
+		return adaptor, body, io.NopCloser(body), nil
+	}
+	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+	if err != nil {
+		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	return adaptor, body, closer, nil
+}
+
+// prepareResponsesRequest returns either serialized JSON or the borrowed
+// passthrough storage. HTTP wraps JSON for replay; WebSocket consumes it directly
+// without storing and reading back an intermediate outbound body.
+func prepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.OpenAIResponsesRequest) (relaychannel.Adaptor, []byte, common.BodyStorage, *types.NewAPIError) {
 	info.InitChannelMeta(c)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact &&
 		!common.SupportsResponsesCompact(info.ChannelType, info.ApiType) {
@@ -33,9 +53,9 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		)
 	}
 
-	request, err := common.DeepCopy(req)
-	if err != nil {
-		return nil, nil, nil, types.NewError(fmt.Errorf("failed to copy responses request: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	request := req.Clone()
+	if request == nil {
+		return nil, nil, nil, types.NewError(errors.New("failed to copy responses request: copy source cannot be nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 	if err := helper.ModelMappedHelper(c, info, request); err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
@@ -54,8 +74,7 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		body := common.NewReplayableBodyReader(storage)
-		return adaptor, body, io.NopCloser(body), nil
+		return adaptor, nil, storage, nil
 	}
 
 	convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
@@ -79,9 +98,5 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 	}
 
 	logger.LogDebug(c, "requestBody: %s", jsonData)
-	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-	if err != nil {
-		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	return adaptor, body, closer, nil
+	return adaptor, jsonData, nil, nil
 }

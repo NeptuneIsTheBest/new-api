@@ -598,21 +598,32 @@ func TestResponsesWSShutdownInterruptsBusyWriter(t *testing.T) {
 }
 
 func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
-	create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","generate":false,"response":{"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"},"stream":true}}`))
-	require.NoError(t, err)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
-	c.Request.Header.Set("Content-Type", "application/json")
-	common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
-	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
-	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
-	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
-	require.Nil(t, apiErr)
-	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
-	storage, err := common.GetBodyStorage(c)
-	require.NoError(t, err)
-	require.NoError(t, storage.Close())
+	for _, disk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
+			previous := common.GetDiskCacheConfig()
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 64, Path: t.TempDir()})
+			t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+			create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","generate":false,"response":{"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"},"stream":true}}`))
+			require.NoError(t, err)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
+			common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
+			info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+			payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			require.Nil(t, apiErr)
+			assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
+			storage, err := common.GetBodyStorage(c)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, storage.Close()) })
+			assert.Equal(t, disk, storage.IsDisk())
+			original, err := storage.Bytes()
+			require.NoError(t, err, "passthrough storage remains owned by the incoming request")
+			assert.Equal(t, create.Body, original)
+		})
+	}
 }
 
 func TestResponsesWSStreamIdentity(t *testing.T) {

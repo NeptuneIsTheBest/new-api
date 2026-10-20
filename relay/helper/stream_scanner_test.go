@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,39 @@ func TestStreamScannerHandler_NilInputs(t *testing.T) {
 
 	StreamScannerHandler(c, nil, info, func(data string, sr *StreamResult) {})
 	StreamScannerHandler(c, &http.Response{Body: io.NopCloser(strings.NewReader(""))}, info, nil)
+}
+
+func TestResponseChunkDataPreservesWireFormat(t *testing.T) {
+	for _, tc := range []struct {
+		name, event, data, want string
+	}{
+		{"text", "response.output_text.delta", `{"delta":"你好\nworld"}`, "event: response.output_text.delta\ndata: {\"delta\":\"你好\\nworld\"}\n\n"},
+		{"CR and multiline whitespace", "response.custom\rname", "{\r\n\"value\":1}", "event: response.custom\\rname\ndata: {\\r\n\"value\":1}\n\n"},
+		{"empty data", "response.custom", "", "event: response.custom\ndata: \n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			recorder.Header().Set("Cache-Control", "no-store")
+			require.NoError(t, ResponseChunkData(c, dto.ResponsesStreamResponse{Type: tc.event}, tc.data))
+			assert.Equal(t, tc.want, recorder.Body.String())
+			assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+			assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+			assert.True(t, recorder.Flushed)
+		})
+	}
+
+	t.Run("cancelled request writes nothing", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+		require.ErrorIs(t, ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "response.completed"}, `{}`), context.Canceled)
+		assert.Empty(t, recorder.Body.String())
+		assert.False(t, recorder.Flushed)
+	})
 }
 
 func TestNewStreamScanner_AllowsLargeStreamLine(t *testing.T) {

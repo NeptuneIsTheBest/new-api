@@ -40,6 +40,7 @@ var responsesWSTestUserSequence atomic.Int64
 
 func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	previousDB := model.DB
 	previousLogDB := model.LOG_DB
 	previousType := common.MainDatabaseType()
@@ -525,6 +526,38 @@ func assertResponsesWSAccounting(t *testing.T, fixture *responsesWSBillingTest, 
 	assert.Equal(t, charged, fixture.token.UsedQuota)
 	assert.Equal(t, 100000-charged, fixture.user.Quota)
 	assert.Equal(t, charged, fixture.user.UsedQuota)
+}
+
+func TestResponsesWebSocketClearsEventFields(t *testing.T) {
+	events := []string{
+		`{"type":"response.output_text.delta","stream_id":"other","delta":"ignored"}`,
+		`{"type":"response.created","response":{"id":"current","model":"gpt-4o","status":"in_progress","usage":{"input_tokens":999,"output_tokens":999}}}`,
+		`{"type":"response.output_text.delta","delta":"hello"}`,
+		`{"type":"response.output_text.delta"}`,
+		`{"type":"response.completed"}`,
+	}
+	fixture := newResponsesWSBillingTest(t, `tier("output", c * 2000)`, func(ws *websocket.Conn, _ *http.Request) {
+		if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+			return
+		}
+		for _, event := range events {
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event))) {
+				return
+			}
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","stream_id":"planner","model":"ws-billing","input":"hi"}`)))
+	for _, expected := range events {
+		actual, err := common.Marshal(readResponsesWSTestEvent(t, fixture.client))
+		require.NoError(t, err)
+		assert.JSONEq(t, expected, string(actual))
+	}
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{1000})
+	var log model.Log
+	require.NoError(t, model.LOG_DB.Where("token_id = ? AND type = ?", fixture.token.Id, model.LogTypeConsume).First(&log).Error)
+	assert.Equal(t, 1, log.CompletionTokens)
 }
 
 func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {

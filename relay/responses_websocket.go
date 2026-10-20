@@ -69,6 +69,11 @@ type responsesWSMessage struct {
 	err  error
 }
 
+type responsesWSStreamEvent struct {
+	dto.ResponsesStreamResponse
+	StreamID string `json:"stream_id"`
+}
+
 // responsesWSControl is a client control event (response.cancel) whose
 // envelope the read loop already parsed.
 type responsesWSControl struct {
@@ -381,6 +386,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	var pendingControl []byte
 	var sentControl []byte
 	var responseID string
+	var event responsesWSStreamEvent
 	for {
 		select {
 		case incoming := <-state.inbox:
@@ -392,10 +398,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				return nil
 			}
 			info.SetFirstResponseTime()
-			var event struct {
-				dto.ResponsesStreamResponse
-				StreamID string `json:"stream_id"`
-			}
+			// An omitted field must not inherit state from the previous frame.
+			event = responsesWSStreamEvent{}
 			if err := common.Unmarshal(incoming.body, &event); err != nil {
 				info.StreamStatus.RecordError("invalid upstream websocket event")
 			} else {
@@ -611,14 +615,16 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 }
 
 func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) ([]byte, *types.NewAPIError) {
-	_, body, closer, apiErr := PrepareResponsesRequest(c, info, &req)
+	_, jsonData, storage, apiErr := prepareResponsesRequest(c, info, &req)
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	defer closer.Close()
-	jsonData, err := io.ReadAll(body)
-	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+	if storage != nil {
+		var err error
+		jsonData, err = storage.Bytes()
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
 	}
 	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
 	if err != nil {

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/copier"
 	"github.com/stretchr/testify/assert"
@@ -24,6 +27,18 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, clone)
 	})
+	testResponsesRequestCopy(t, common.DeepCopy[dto.OpenAIResponsesRequest])
+}
+
+func TestResponsesRequestClone(t *testing.T) {
+	assert.Nil(t, (*dto.OpenAIResponsesRequest)(nil).Clone())
+	testResponsesRequestCopy(t, func(src *dto.OpenAIResponsesRequest) (*dto.OpenAIResponsesRequest, error) {
+		return src.Clone(), nil
+	})
+}
+
+func testResponsesRequestCopy(t *testing.T, copyRequest func(*dto.OpenAIResponsesRequest) (*dto.OpenAIResponsesRequest, error)) {
+	t.Helper()
 
 	for _, raw := range []json.RawMessage{nil, {}, []byte(`null`), []byte(`false`), []byte(`0`), []byte(`[]`), []byte(`{"x":1}`)} {
 		t.Run(fmt.Sprintf("raw_%q_nil_%t", raw, raw == nil), func(t *testing.T) {
@@ -31,7 +46,7 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 			populateResponsesCloneFixture(t, reflect.ValueOf(src).Elem(), raw)
 			want := &dto.OpenAIResponsesRequest{}
 			populateResponsesCloneFixture(t, reflect.ValueOf(want).Elem(), raw)
-			clone, err := common.DeepCopy(src)
+			clone, err := copyRequest(src)
 			require.NoError(t, err)
 			assert.Equal(t, src, clone, "including internal state and explicit zero pointers")
 
@@ -39,7 +54,7 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 			// A later channel attempt must still see the original request.
 			populateResponsesCloneFixture(t, reflect.ValueOf(clone).Elem(), []byte(`true`))
 			assert.Equal(t, want, src)
-			retry, err := common.DeepCopy(src)
+			retry, err := copyRequest(src)
 			require.NoError(t, err)
 			assert.Equal(t, want, retry)
 		})
@@ -47,7 +62,7 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 
 	t.Run("absent optional fields", func(t *testing.T) {
 		src := &dto.OpenAIResponsesRequest{Model: "gpt-4.1", Input: []byte(`"hello"`)}
-		clone, err := common.DeepCopy(src)
+		clone, err := copyRequest(src)
 		require.NoError(t, err)
 		assert.Equal(t, src, clone)
 		clone.Input[1] = 'H'
@@ -58,7 +73,7 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 		input := bytes.Repeat([]byte("a"), 1<<20)
 		input[0], input[len(input)-1] = '"', '"'
 		src := &dto.OpenAIResponsesRequest{Model: "gpt-4.1", Input: input}
-		clone, err := common.DeepCopy(src)
+		clone, err := copyRequest(src)
 		require.NoError(t, err)
 		assert.Equal(t, src, clone)
 		clone.Input[len(input)/2] = 'b'
@@ -68,7 +83,7 @@ func TestRequestDeepCopyResponses(t *testing.T) {
 	t.Run("model mapping on successive channel attempts", func(t *testing.T) {
 		src := &dto.OpenAIResponsesRequest{Model: "client-model", Input: []byte(`"hello"`)}
 		for _, model := range []string{"first-channel-model", "retry-channel-model"} {
-			request, err := common.DeepCopy(src)
+			request, err := copyRequest(src)
 			require.NoError(t, err)
 			assert.Equal(t, json.RawMessage(`"hello"`), request.Input)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -291,6 +306,9 @@ func BenchmarkRequestDeepCopy(b *testing.B) {
 				return &dst, err
 			}},
 			{"raw_bytes", common.DeepCopy[dto.OpenAIResponsesRequest]},
+			{"typed", func(src *dto.OpenAIResponsesRequest) (*dto.OpenAIResponsesRequest, error) {
+				return src.Clone(), nil
+			}},
 		} {
 			b.Run(fmt.Sprintf("%dB/%s", size, method.name), func(b *testing.B) {
 				b.ReportAllocs()
@@ -299,6 +317,42 @@ func BenchmarkRequestDeepCopy(b *testing.B) {
 					clone, err := method.copy(src)
 					require.NoError(b, err)
 					require.Len(b, clone.Input, size)
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkResponsesRequestPreparation(b *testing.B) {
+	gin.SetMode(gin.TestMode)
+	for _, size := range []int{256, 4 << 10, 1 << 20} {
+		input := bytes.Repeat([]byte("a"), size)
+		input[0], input[len(input)-1] = '"', '"'
+		for _, transport := range []string{"http", "websocket"} {
+			b.Run(fmt.Sprintf("%dB/%s", size, transport), func(b *testing.B) {
+				request := &dto.OpenAIResponsesRequest{Model: "gpt-4.1", Input: input}
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, request.Model)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				info := &relaycommon.RelayInfo{OriginModelName: request.Model, Request: request, RelayFormat: types.RelayFormatOpenAIResponses}
+				b.ReportAllocs()
+				b.SetBytes(int64(size))
+				for b.Loop() {
+					if transport == "websocket" {
+						payload, apiErr := buildResponsesWSCreatePayload(c, info, *request, nil, "planner")
+						if apiErr != nil || len(payload) < size {
+							b.Fatalf("prepare websocket request: %v", apiErr)
+						}
+					} else {
+						_, body, closer, apiErr := PrepareResponsesRequest(c, info, request)
+						if apiErr != nil || body.Size() < int64(size) {
+							b.Fatalf("prepare HTTP request: %v", apiErr)
+						}
+						if err := closer.Close(); err != nil {
+							b.Fatal(err)
+						}
+					}
 				}
 			})
 		}

@@ -1,6 +1,7 @@
 package dto
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1097,6 +1098,82 @@ type OpenAIResponsesRequest struct {
 
 	// Internal conversion state; never serialized to an upstream protocol.
 	ReasoningConversion *ReasoningConversionState `json:"-"`
+}
+
+// Clone gives each relay attempt independent mutable request state, including
+// raw JSON and fields that are not serialized to the upstream protocol.
+func (r *OpenAIResponsesRequest) Clone() *OpenAIResponsesRequest {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	clone.Input = bytes.Clone(r.Input)
+	clone.Include = bytes.Clone(r.Include)
+	clone.Conversation = bytes.Clone(r.Conversation)
+	clone.ContextManagement = bytes.Clone(r.ContextManagement)
+	clone.Instructions = bytes.Clone(r.Instructions)
+	clone.Metadata = bytes.Clone(r.Metadata)
+	clone.Moderation = bytes.Clone(r.Moderation)
+	clone.ParallelToolCalls = bytes.Clone(r.ParallelToolCalls)
+	clone.FrequencyPenalty = bytes.Clone(r.FrequencyPenalty)
+	clone.PresencePenalty = bytes.Clone(r.PresencePenalty)
+	clone.Store = bytes.Clone(r.Store)
+	clone.PromptCacheKey = bytes.Clone(r.PromptCacheKey)
+	clone.PromptCacheOptions = bytes.Clone(r.PromptCacheOptions)
+	clone.PromptCacheRetention = bytes.Clone(r.PromptCacheRetention)
+	clone.SafetyIdentifier = bytes.Clone(r.SafetyIdentifier)
+	clone.Text = bytes.Clone(r.Text)
+	clone.ToolChoice = bytes.Clone(r.ToolChoice)
+	clone.Tools = bytes.Clone(r.Tools)
+	clone.Truncation = bytes.Clone(r.Truncation)
+	clone.User = bytes.Clone(r.User)
+	clone.Prompt = bytes.Clone(r.Prompt)
+	clone.ClientMetadata = bytes.Clone(r.ClientMetadata)
+	clone.EnableThinking = bytes.Clone(r.EnableThinking)
+	clone.ThinkingBudget = bytes.Clone(r.ThinkingBudget)
+	clone.ChatTemplateKwargs = bytes.Clone(r.ChatTemplateKwargs)
+	clone.TopK = bytes.Clone(r.TopK)
+	clone.MinP = bytes.Clone(r.MinP)
+	clone.RepetitionPenalty = bytes.Clone(r.RepetitionPenalty)
+	clone.Stop = bytes.Clone(r.Stop)
+	clone.CacheSalt = bytes.Clone(r.CacheSalt)
+	clone.Preset = bytes.Clone(r.Preset)
+	if r.MaxOutputTokens != nil {
+		clone.MaxOutputTokens = lo.ToPtr(*r.MaxOutputTokens)
+	}
+	if r.TopLogProbs != nil {
+		clone.TopLogProbs = lo.ToPtr(*r.TopLogProbs)
+	}
+	if r.Stream != nil {
+		clone.Stream = lo.ToPtr(*r.Stream)
+	}
+	if r.Temperature != nil {
+		clone.Temperature = lo.ToPtr(*r.Temperature)
+	}
+	if r.TopP != nil {
+		clone.TopP = lo.ToPtr(*r.TopP)
+	}
+	if r.MaxToolCalls != nil {
+		clone.MaxToolCalls = lo.ToPtr(*r.MaxToolCalls)
+	}
+	if r.StreamOptions != nil {
+		clone.StreamOptions = lo.ToPtr(*r.StreamOptions)
+	}
+	if r.Reasoning != nil {
+		clone.Reasoning = lo.ToPtr(*r.Reasoning)
+		clone.Reasoning.Mode = bytes.Clone(r.Reasoning.Mode)
+		clone.Reasoning.Context = bytes.Clone(r.Reasoning.Context)
+	}
+	if r.ReasoningConversion != nil {
+		clone.ReasoningConversion = lo.ToPtr(*r.ReasoningConversion)
+		if r.ReasoningConversion.BudgetTokens != nil {
+			clone.ReasoningConversion.BudgetTokens = lo.ToPtr(*r.ReasoningConversion.BudgetTokens)
+		}
+		if r.ReasoningConversion.IncludeThoughts != nil {
+			clone.ReasoningConversion.IncludeThoughts = lo.ToPtr(*r.ReasoningConversion.IncludeThoughts)
+		}
+	}
+	return &clone
 }
 
 func (r OpenAIResponsesRequest) MarshalJSON() ([]byte, error) {

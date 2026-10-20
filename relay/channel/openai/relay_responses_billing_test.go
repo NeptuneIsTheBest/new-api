@@ -21,6 +21,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func BenchmarkResponsesStreamRelay(b *testing.B) {
+	gin.SetMode(gin.TestMode)
+	common.LogWriterMu.Lock()
+	previousWriter := gin.DefaultWriter
+	gin.DefaultWriter = io.Discard
+	common.LogWriterMu.Unlock()
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	b.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previousWriter
+		common.LogWriterMu.Unlock()
+		constant.StreamingTimeout = previousTimeout
+	})
+	for _, workload := range []string{"text", "tool_calls", "large_terminal"} {
+		b.Run(workload, func(b *testing.B) {
+			var body strings.Builder
+			body.WriteString("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o\",\"status\":\"in_progress\"}}\n\n")
+			delta := `{"type":"response.output_text.delta","delta":"The next step is to inspect the result.","sequence_number":1,"output_index":0,"content_index":0,"item_id":"msg_1"}`
+			if workload == "tool_calls" {
+				delta = `{"type":"response.function_call_arguments.delta","delta":"{\"path\":\"src/main.go\"}","sequence_number":1,"output_index":0,"item_id":"call_1"}`
+			}
+			for range 64 {
+				body.WriteString("data: " + delta + "\n\n")
+			}
+			if workload == "tool_calls" {
+				body.WriteString("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"call_1\",\"status\":\"completed\"}}\n\n")
+			}
+			output := "[]"
+			if workload == "large_terminal" {
+				output = `[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + strings.Repeat("a", 1<<20) + `"}]}]`
+			}
+			body.WriteString("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o\",\"status\":\"completed\",\"output\":" + output + ",\"usage\":{\"input_tokens\":100,\"output_tokens\":64,\"total_tokens\":164}}}\n\ndata: [DONE]\n\n")
+			wire := body.String()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(wire)))
+			for b.Loop() {
+				recorder.Body.Reset()
+				info := &relaycommon.RelayInfo{OriginModelName: "gpt-4o", DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI, UpstreamModelName: "gpt-4o"}}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}
+				usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+				if apiErr != nil || usage.TotalTokens != 164 {
+					b.Fatalf("relay stream: usage=%+v error=%v", usage, apiErr)
+				}
+			}
+		})
+	}
+}
+
 func TestOaiResponsesHandlerCountsOutputCallsNotDeclarations(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	operation_setting.SetToolPriceForTest("priced_fn", 5.0)
@@ -70,6 +122,40 @@ func TestOaiResponsesHandlerCountsOutputCallsNotDeclarations(t *testing.T) {
 	require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, "priced_fn")
 	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools["priced_fn"].CallCount)
 	assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "unpriced_fn")
+}
+
+func TestOaiResponsesStreamHandlerClearsEventFields(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	events := []struct{ kind, data string }{
+		{"response.created", `{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o","status":"in_progress","usage":{"input_tokens":999,"output_tokens":999}}}`},
+		{"response.output_text.delta", `{"type":"response.output_text.delta","delta":"hello"}`},
+		{"response.output_text.delta", `{"type":"response.output_text.delta"}`},
+		{"response.output_item.done", `{"type":"response.output_item.done","item":{"type":"web_search_call"}}`},
+		{"response.output_item.done", `{"type":"response.output_item.done"}`},
+		{"response.completed", `{"type":"response.completed"}`},
+	}
+	var wire, want strings.Builder
+	for _, event := range events {
+		wire.WriteString("data: " + event.data + "\n\n")
+		want.WriteString("event: " + event.kind + "\ndata: " + event.data + "\n\n")
+	}
+	wire.WriteString("data: [DONE]\n\n")
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{OriginModelName: "gpt-4o", DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI, UpstreamModelName: "gpt-4o"}}
+	info.SetEstimatePromptTokens(13)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire.String()))}
+	usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+	require.Nil(t, apiErr)
+	assert.Equal(t, want.String(), recorder.Body.String())
+	assert.Equal(t, 13, usage.PromptTokens)
+	assert.Equal(t, 1, usage.CompletionTokens)
+	require.NotNil(t, info.ResponsesUsageInfo)
+	require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, dto.BuildInToolWebSearchPreview)
+	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview].CallCount)
 }
 
 func TestOaiResponsesHandlerDeclaredToolsWithoutOutputCountZero(t *testing.T) {

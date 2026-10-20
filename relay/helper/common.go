@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -89,8 +90,14 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
+	common.CustomEvent{}.WriteContentType(c.Writer)
+	// Match CustomEvent's CR escaping and framing without copying the payload
+	// into formatted strings or routing string data through its any renderer.
+	for _, part := range [...]string{"event: ", strings.ReplaceAll(resp.Type, "\r", `\r`), "\ndata: ", strings.ReplaceAll(data, "\r", `\r`), "\n\n"} {
+		if _, err := c.Writer.WriteString(part); err != nil {
+			return err
+		}
+	}
 	return FlushWriter(c)
 }
 

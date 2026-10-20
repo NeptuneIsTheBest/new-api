@@ -76,17 +76,18 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	defer service.CloseResponseBodyGracefully(resp)
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
+	var streamResponse dto.ResponsesStreamResponse
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
-		// 检查当前数据是否包含 completed 状态和 usage 信息
-		var streamResponse dto.ResponsesStreamResponse
+		// Reuse only the event container; omitted fields must remain absent.
+		streamResponse = dto.ResponsesStreamResponse{}
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			logger.LogError(c, common.LogText("failed to unmarshal stream response: %s", err.Error()))
 			sr.Error(err)
 			return
 		}
-		if streamResponse.Response != nil {
+		if info.GetChannelType() == constant.ChannelTypeSGLang && streamResponse.Response != nil {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
 		sendResponsesStreamData(c, streamResponse, data)
