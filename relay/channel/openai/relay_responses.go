@@ -86,7 +86,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			sr.Error(err)
 			return
 		}
-		if streamResponse.Response != nil {
+		if streamResponse.Response != nil && info.GetChannelType() == constant.ChannelTypeSGLang {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
 		sendResponsesStreamData(c, streamResponse, data)
