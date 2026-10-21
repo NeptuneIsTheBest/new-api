@@ -167,16 +167,22 @@ func (c *ImageGenerationCallCounter) Observe(item *dto.ResponsesOutput, outputIn
 	if outputIndex != nil && *outputIndex >= 0 {
 		aliases = append(aliases, fmt.Sprintf("index:%d", *outputIndex))
 	}
-	sum := sha256.Sum256([]byte(item.Result))
-	aliases = append(aliases, "result:"+hex.EncodeToString(sum[:]))
-
-	if c.seen == nil {
-		c.seen = make(map[string]struct{})
-	}
+	// Repeated stream events usually share an ID or index; skip copying and
+	// hashing their full image payload when an identity is already known.
 	for _, alias := range aliases {
 		if _, ok := c.seen[alias]; ok {
 			return
 		}
+	}
+	sum := sha256.Sum256([]byte(item.Result))
+	resultAlias := "result:" + hex.EncodeToString(sum[:])
+	if _, ok := c.seen[resultAlias]; ok {
+		return
+	}
+	aliases = append(aliases, resultAlias)
+
+	if c.seen == nil {
+		c.seen = make(map[string]struct{})
 	}
 	for _, alias := range aliases {
 		c.seen[alias] = struct{}{}
