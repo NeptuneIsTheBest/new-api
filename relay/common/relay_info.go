@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1149,92 +1151,120 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || channelPassThroughEnabled {
 		return jsonData, nil
 	}
-	if !hasRemovableDisabledField(jsonData, channelOtherSettings) {
+	if channelOtherSettings.AllowServiceTier && channelOtherSettings.AllowInferenceGeo &&
+		channelOtherSettings.AllowSpeed && !channelOtherSettings.DisableStore &&
+		channelOtherSettings.AllowSafetyIdentifier && channelOtherSettings.AllowIncludeObfuscation {
 		return jsonData, nil
 	}
 
-	var data map[string]any
-	if err := common.Unmarshal(jsonData, &data); err != nil {
-		common.SysError(common.LogText("RemoveDisabledFields Unmarshal error :%s", err.Error()))
+	// This read-only view and all gjson results stay inside this call. Never write
+	// to jsonData: filtered output gets its own buffer after traversal completes.
+	data := gjson.Parse(unsafe.String(unsafe.SliceData(jsonData), len(jsonData)))
+	if !data.IsObject() {
 		return jsonData, nil
 	}
 
-	// 默认移除 service_tier，除非明确允许（避免额外计费风险）
-	if !channelOtherSettings.AllowServiceTier {
-		if _, exists := data["service_tier"]; exists {
-			delete(data, "service_tier")
-		}
-	}
-
-	// 默认移除 inference_geo，除非明确允许（避免在未授权情况下透传数据驻留区域）
-	if !channelOtherSettings.AllowInferenceGeo {
-		if _, exists := data["inference_geo"]; exists {
-			delete(data, "inference_geo")
-		}
-	}
-
-	// 默认移除 speed，除非明确允许（避免意外切换 Claude 推理速度模式）
-	if !channelOtherSettings.AllowSpeed {
-		if _, exists := data["speed"]; exists {
-			delete(data, "speed")
-		}
-	}
-
-	// 默认允许 store 透传，除非明确禁用（禁用可能影响 Codex 使用）
-	if channelOtherSettings.DisableStore {
-		if _, exists := data["store"]; exists {
-			delete(data, "store")
-		}
-	}
-
-	// 默认移除 safety_identifier，除非明确允许（保护用户隐私，避免向 OpenAI 报告用户信息）
-	if !channelOtherSettings.AllowSafetyIdentifier {
-		if _, exists := data["safety_identifier"]; exists {
-			delete(data, "safety_identifier")
-		}
-	}
-
-	// 默认移除 stream_options.include_obfuscation，除非明确允许（避免关闭响应流混淆保护）
-	if !channelOtherSettings.AllowIncludeObfuscation {
-		if streamOptionsAny, exists := data["stream_options"]; exists {
-			if streamOptions, ok := streamOptionsAny.(map[string]any); ok {
-				if _, includeExists := streamOptions["include_obfuscation"]; includeExists {
-					delete(streamOptions, "include_obfuscation")
-				}
-				if len(streamOptions) == 0 {
-					delete(data, "stream_options")
-				} else {
-					data["stream_options"] = streamOptions
+	var localSpans [8]disabledFieldSpan
+	removals := localSpans[:0]
+	previousKeptEnd := 0
+	changed := false
+	data.ForEach(func(key, value gjson.Result) bool {
+		remove := false
+		switch key.Str {
+		case "service_tier":
+			remove = !channelOtherSettings.AllowServiceTier
+		case "inference_geo":
+			remove = !channelOtherSettings.AllowInferenceGeo
+		case "speed":
+			remove = !channelOtherSettings.AllowSpeed
+		case "store":
+			remove = channelOtherSettings.DisableStore
+		case "safety_identifier":
+			remove = !channelOtherSettings.AllowSafetyIdentifier
+		case "stream_options":
+			if !channelOtherSettings.AllowIncludeObfuscation && value.IsObject() {
+				previousOptionEnd := 0
+				value.ForEach(func(optionKey, optionValue gjson.Result) bool {
+					if optionKey.Str == "include_obfuscation" {
+						changed = true
+						removals = append(removals, disabledFieldMemberSpan(jsonData, optionKey, optionValue, previousOptionEnd))
+					} else {
+						previousOptionEnd = optionValue.Index + len(optionValue.Raw)
+					}
+					return true
+				})
+				if previousOptionEnd == 0 {
+					// Preserve an originally empty object unless another disabled
+					// field is removed, matching the existing cleanup behavior.
+					removals = append(removals, disabledFieldMemberSpan(jsonData, key, value, previousKeptEnd))
+					return true
 				}
 			}
 		}
-	}
 
-	jsonDataAfter, err := common.Marshal(data)
-	if err != nil {
-		common.SysError(common.LogText("RemoveDisabledFields Marshal error :%s", err.Error()))
+		if remove {
+			changed = true
+			removals = append(removals, disabledFieldMemberSpan(jsonData, key, value, previousKeptEnd))
+		} else {
+			previousKeptEnd = value.Index + len(value.Raw)
+		}
+		return true
+	})
+	if !changed {
 		return jsonData, nil
 	}
-	return jsonDataAfter, nil
+	// gjson traversal is permissive; validate before using its offsets to edit.
+	if !gjson.ValidBytes(jsonData) {
+		common.SysError(common.LogText("RemoveDisabledFields Unmarshal error :%s", "invalid JSON"))
+		return jsonData, nil
+	}
+
+	// Nested removals and consecutive trailing members can overlap.
+	slices.SortFunc(removals, func(a, b disabledFieldSpan) int { return a.start - b.start })
+	merged := removals[:0]
+	for _, span := range removals {
+		if len(merged) > 0 && span.start <= merged[len(merged)-1].end {
+			merged[len(merged)-1].end = max(merged[len(merged)-1].end, span.end)
+		} else {
+			merged = append(merged, span)
+		}
+	}
+	size := len(jsonData)
+	for _, span := range merged {
+		size -= span.end - span.start
+	}
+	filtered := make([]byte, 0, size)
+	previousEnd := 0
+	for _, span := range merged {
+		filtered = append(filtered, jsonData[previousEnd:span.start]...)
+		previousEnd = span.end
+	}
+	return append(filtered, jsonData[previousEnd:]...), nil
 }
 
-func hasRemovableDisabledField(jsonData []byte, channelOtherSettings dto.ChannelOtherSettings) bool {
-	values := gjson.GetManyBytes(
-		jsonData,
-		"service_tier",
-		"inference_geo",
-		"speed",
-		"store",
-		"safety_identifier",
-		"stream_options.include_obfuscation",
-	)
+type disabledFieldSpan struct {
+	start int
+	end   int
+}
 
-	return (!channelOtherSettings.AllowServiceTier && values[0].Exists()) ||
-		(!channelOtherSettings.AllowInferenceGeo && values[1].Exists()) ||
-		(!channelOtherSettings.AllowSpeed && values[2].Exists()) ||
-		(channelOtherSettings.DisableStore && values[3].Exists()) ||
-		(!channelOtherSettings.AllowSafetyIdentifier && values[4].Exists()) ||
-		(!channelOtherSettings.AllowIncludeObfuscation && values[5].Exists())
+func disabledFieldMemberSpan(data []byte, key, value gjson.Result, previousKeptEnd int) disabledFieldSpan {
+	span := disabledFieldSpan{start: key.Index, end: value.Index + len(value.Raw)}
+	for i := span.end; i < len(data); i++ {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case ',':
+			span.end = i + 1
+		default:
+			// A trailing run must also remove the comma after the last kept
+			// member; earlier removal spans in the run will be merged into it.
+			if previousKeptEnd > 0 {
+				span.start = previousKeptEnd
+			}
+		}
+		break
+	}
+	return span
 }
 
 // RemoveGeminiDisabledFields removes disabled fields from Gemini request JSON data

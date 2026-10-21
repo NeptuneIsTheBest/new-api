@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -2261,11 +2262,11 @@ func TestRemoveDisabledFieldsSkipWhenChannelPassThroughEnabled(t *testing.T) {
 	}`
 	settings := dto.ChannelOtherSettings{}
 
-	out, err := RemoveDisabledFields([]byte(input), settings, true)
-	if err != nil {
-		t.Fatalf("RemoveDisabledFields returned error: %v", err)
-	}
-	assertJSONEqual(t, input, string(out))
+	body := []byte(input)
+	out, err := RemoveDisabledFields(body, settings, true)
+	require.NoError(t, err)
+	assert.Equal(t, input, string(out))
+	assert.Same(t, &body[0], &out[0])
 }
 
 func TestRemoveDisabledFieldsSkipWhenGlobalPassThroughEnabled(t *testing.T) {
@@ -2282,11 +2283,11 @@ func TestRemoveDisabledFieldsSkipWhenGlobalPassThroughEnabled(t *testing.T) {
 	}`
 	settings := dto.ChannelOtherSettings{}
 
-	out, err := RemoveDisabledFields([]byte(input), settings, false)
-	if err != nil {
-		t.Fatalf("RemoveDisabledFields returned error: %v", err)
-	}
-	assertJSONEqual(t, input, string(out))
+	body := []byte(input)
+	out, err := RemoveDisabledFields(body, settings, false)
+	require.NoError(t, err)
+	assert.Equal(t, input, string(out))
+	assert.Same(t, &body[0], &out[0])
 }
 
 func TestRemoveDisabledFieldsDefaultFiltering(t *testing.T) {
@@ -2349,6 +2350,178 @@ func TestRemoveDisabledFieldsAllowSpeed(t *testing.T) {
 		t.Fatalf("RemoveDisabledFields returned error: %v", err)
 	}
 	assertJSONEqual(t, `{"speed":"fast","store":true}`, string(out))
+}
+
+func TestRemoveDisabledFieldsPreservesRawJSON(t *testing.T) {
+	globalSettings := model_setting.GetGlobalSettings()
+	originalPassThrough := globalSettings.PassThroughRequestEnabled
+	globalSettings.PassThroughRequestEnabled = false
+	t.Cleanup(func() { globalSettings.PassThroughRequestEnabled = originalPassThrough })
+
+	for _, tc := range []struct {
+		name     string
+		input    string
+		want     string
+		settings dto.ChannelOtherSettings
+	}{
+		{
+			name:  "no matching fields keeps whitespace and nested names",
+			input: " \n" + `{ "model" : "test", "metadata": {"service_tier":"flex","include_obfuscation":false} }` + "\t",
+			want:  " \n" + `{ "model" : "test", "metadata": {"service_tier":"flex","include_obfuscation":false} }` + "\t",
+		},
+		{
+			name:  "all fields allowed",
+			input: ` { "service_tier":"flex","inference_geo":"eu","speed":"fast","store":false,"safety_identifier":"user","stream_options":{"include_obfuscation":false} } `,
+			want:  ` { "service_tier":"flex","inference_geo":"eu","speed":"fast","store":false,"safety_identifier":"user","stream_options":{"include_obfuscation":false} } `,
+			settings: dto.ChannelOtherSettings{
+				AllowServiceTier: true, AllowInferenceGeo: true, AllowSpeed: true,
+				AllowSafetyIdentifier: true, AllowIncludeObfuscation: true,
+			},
+		},
+		{
+			name:  "individual permissions preserve allowed fields during filtering",
+			input: `{"service_tier":"flex","speed":"fast","safety_identifier":"user","store":false,"stream_options":{"include_obfuscation":false}}`,
+			want:  `{"service_tier":"flex","safety_identifier":"user","stream_options":{"include_obfuscation":false}}`,
+			settings: dto.ChannelOtherSettings{
+				AllowServiceTier: true, AllowSafetyIdentifier: true,
+				AllowIncludeObfuscation: true, DisableStore: true,
+			},
+		},
+		{
+			name:  "null and false controlled values are still removed",
+			input: `{"service_tier":null,"inference_geo":null,"speed":null,"safety_identifier":null,"stream_options":{"include_obfuscation":null},"store":false}`,
+			want:  `{"store":false}`,
+		},
+		{
+			name:  "consecutive leading fields",
+			input: `{"service_tier":"flex","speed":"fast","model":"test"}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:  "consecutive middle fields",
+			input: `{"model":"test","service_tier":"flex","speed":"fast","store":true}`,
+			want:  `{"model":"test","store":true}`,
+		},
+		{
+			name:  "consecutive trailing fields",
+			input: `{"model":"test","service_tier":"flex","speed":"fast"}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:  "all members removed",
+			input: `{"service_tier":"flex","stream_options":{"include_obfuscation":false},"speed":"fast"}`,
+			want:  `{}`,
+		},
+		{
+			name:  "separated deletions preserve exact values and key order",
+			input: " \n" + `{"service_tier":"flex","z":9007199254740993,"text":"\u0061<>&\/\\\"","speed":"fast","a":1.2300e+04,"zero":-0,"metadata":{"service_tier":"flex"},"safety_identifier":"user"}` + "\t",
+			want:  " \n" + `{"z":9007199254740993,"text":"\u0061<>&\/\\\"","a":1.2300e+04,"zero":-0,"metadata":{"service_tier":"flex"}}` + "\t",
+		},
+		{
+			name:  "trailing deletion consumes comma and surrounding whitespace",
+			input: "{ \"model\" : \"test\" ,\n \"speed\" : \"fast\" ,\t \"service_tier\" : \"flex\" \n}",
+			want:  "{ \"model\" : \"test\" \n}",
+		},
+		{
+			name:  "leading and trailing nested fields",
+			input: `{"stream_options":{"include_obfuscation":false,"include_usage":true,"include_obfuscation":null,"include_obfuscation":true},"model":"test"}`,
+			want:  `{"stream_options":{"include_usage":true},"model":"test"}`,
+		},
+		{
+			name:  "middle nested field",
+			input: `{"stream_options":{"include_usage":true,"include_obfuscation":false,"metadata":{"include_obfuscation":false}}}`,
+			want:  `{"stream_options":{"include_usage":true,"metadata":{"include_obfuscation":false}}}`,
+		},
+		{
+			name:  "nested and trailing parent removals overlap",
+			input: `{"model":"test","speed":"fast","stream_options":{"include_obfuscation":false}}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:  "original empty stream options without filtering stays",
+			input: `{"model":"test","stream_options":{ }}`,
+			want:  `{"model":"test","stream_options":{ }}`,
+		},
+		{
+			name:  "original empty stream options before a hit is removed",
+			input: `{"stream_options":{},"model":"test","speed":"fast"}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:  "original empty stream options after a hit is removed",
+			input: `{"model":"test","speed":"fast","stream_options":{}}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:     "allowed empty stream options remains during filtering",
+			input:    `{"speed":"fast","stream_options":{ }}`,
+			want:     `{"stream_options":{ }}`,
+			settings: dto.ChannelOtherSettings{AllowIncludeObfuscation: true},
+		},
+		{
+			name:  "non object stream options are untouched",
+			input: `{"speed":"fast","stream_options":null,"stream_options":[{"include_obfuscation":false}],"stream_options":"include_obfuscation"}`,
+			want:  `{"stream_options":null,"stream_options":[{"include_obfuscation":false}],"stream_options":"include_obfuscation"}`,
+		},
+		{
+			name:  "escaped names are matched at the correct depth",
+			input: `{"service\u005ftier":"flex","stream\u005foptions":{"include\u005fobfuscation":false,"include_usage":true},"metadata":{"service_tier":"flex"}}`,
+			want:  `{"stream\u005foptions":{"include_usage":true},"metadata":{"service_tier":"flex"}}`,
+		},
+		{
+			name:  "every duplicate disabled field is removed",
+			input: `{"service_tier":"flex","service_tier":"auto","service_tier":null,"service_tier":false,"service_tier":0,"service_tier":[],"service_tier":{},"service_tier":"priority","service_tier":"default","service\u005ftier":"flex","model":"test"}`,
+			want:  `{"model":"test"}`,
+		},
+		{
+			name:  "duplicate stream options are each filtered",
+			input: `{"stream_options":{"include_obfuscation":false},"stream_options":{"include_obfuscation":true,"include_usage":true},"speed":"fast"}`,
+			want:  `{"stream_options":{"include_usage":true}}`,
+		},
+		{
+			name:  "missing closing brace returns original",
+			input: `{"service_tier":"flex","model":"test"`,
+			want:  `{"service_tier":"flex","model":"test"`,
+		},
+		{
+			name:  "invalid nested value returns original",
+			input: `{"service_tier":"flex","metadata":{"value":}}`,
+			want:  `{"service_tier":"flex","metadata":{"value":}}`,
+		},
+		{
+			name:  "trailing data returns original",
+			input: `{"speed":"fast"} {"model":"test"}`,
+			want:  `{"speed":"fast"} {"model":"test"}`,
+		},
+		{
+			name:  "non object document returns original",
+			input: `[{"service_tier":"flex"}]`,
+			want:  `[{"service_tier":"flex"}]`,
+		},
+		{
+			name: "empty input",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte(tc.input)
+			original := bytes.Clone(input)
+			out, err := RemoveDisabledFields(input, tc.settings, false)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(out))
+			assert.Equal(t, original, input, "filter must not modify the input buffer")
+			if len(input) == 0 {
+				return
+			}
+			require.NotEmpty(t, out)
+			if tc.want == tc.input {
+				assert.Same(t, &input[0], &out[0], "unchanged bodies must reuse the original slice")
+				return
+			}
+			assert.NotSame(t, &input[0], &out[0], "filtered output must have its own buffer")
+			input[0] = '!'
+			assert.Equal(t, tc.want, string(out), "filtered output must not retain a view of the input")
+		})
+	}
 }
 
 func TestApplyParamOverrideWithRelayInfoRecordsOperationAuditInDebugMode(t *testing.T) {
