@@ -5,32 +5,10 @@
 package common
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
-
-type stringWriter interface {
-	io.Writer
-	writeString(string) (int, error)
-}
-
-type stringWrapper struct {
-	io.Writer
-}
-
-func (w stringWrapper) writeString(str string) (int, error) {
-	return w.Writer.Write([]byte(str))
-}
-
-func checkWriter(writer io.Writer) stringWriter {
-	if w, ok := writer.(stringWriter); ok {
-		return w
-	} else {
-		return stringWrapper{writer}
-	}
-}
 
 // Server-Sent Events
 // W3C Working Draft 29 October 2009
@@ -57,14 +35,14 @@ type CustomEvent struct {
 }
 
 func encode(writer io.Writer, event CustomEvent) error {
-	w := checkWriter(writer)
-	return writeData(w, event.Data)
+	return writeData(writer, event.Data)
 }
 
-func writeData(w stringWriter, data any) error {
-	dataReplacer.WriteString(w, fmt.Sprint(data))
-	if strings.HasPrefix(data.(string), "data") {
-		w.writeString("\n\n")
+func writeData(w io.Writer, data any) error {
+	str := data.(string)
+	_, _ = dataReplacer.WriteString(w, str)
+	if strings.HasPrefix(str, "data") {
+		_, _ = io.WriteString(w, "\n\n")
 	}
 	return nil
 }

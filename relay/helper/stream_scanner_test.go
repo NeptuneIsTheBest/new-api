@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -53,6 +54,143 @@ func buildSSEBody(n int) string {
 	}
 	b.WriteString("data: [DONE]\n")
 	return b.String()
+}
+
+type sseOutputRecorder struct {
+	*httptest.ResponseRecorder
+	flushedBodies []string
+}
+
+func (w *sseOutputRecorder) Flush() {
+	w.flushedBodies = append(w.flushedBodies, w.Body.String())
+	w.ResponseRecorder.Flush()
+}
+
+func TestSSEOutput(t *testing.T) {
+	cases := []struct {
+		name         string
+		write        func(*gin.Context) error
+		want         string
+		cancelErr    bool
+		cacheControl string
+	}{
+		{
+			name:      "string",
+			write:     func(c *gin.Context) error { return StringData(c, `{"delta":"hello"}`) },
+			want:      "data: {\"delta\":\"hello\"}\n\n",
+			cancelErr: true,
+		},
+		{
+			name:      "empty",
+			write:     func(c *gin.Context) error { return StringData(c, "") },
+			want:      "data: \n\n",
+			cancelErr: true,
+		},
+		{
+			name:      "unicode",
+			write:     func(c *gin.Context) error { return StringData(c, "你好，世界 🌍") },
+			want:      "data: 你好，世界 🌍\n\n",
+			cancelErr: true,
+		},
+		{
+			name:      "line_endings",
+			write:     func(c *gin.Context) error { return StringData(c, "a\rb\nc\r\nd\n") },
+			want:      "data: a\\rb\nc\\r\nd\n\n\n",
+			cancelErr: true,
+		},
+		{
+			name: "claude_object",
+			write: func(c *gin.Context) error {
+				return ClaudeData(c, dto.ClaudeResponse{Type: "message_stop"})
+			},
+			want: "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		},
+		{
+			name: "claude_chunk",
+			write: func(c *gin.Context) error {
+				ClaudeChunkData(c, dto.ClaudeResponse{Type: "content_block_delta"}, `{"delta":"hello"}`)
+				return nil
+			},
+			want: "event: content_block_delta\ndata: {\"delta\":\"hello\"}\n\n\n",
+		},
+		{
+			name: "responses_chunk",
+			write: func(c *gin.Context) error {
+				return ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "response.output_text.delta"}, `{"delta":"hello"}`)
+			},
+			want:      "event: response.output_text.delta\ndata: {\"delta\":\"hello\"}\n\n",
+			cancelErr: true,
+		},
+		{
+			name: "done",
+			write: func(c *gin.Context) error {
+				Done(c)
+				return nil
+			},
+			want: "data: [DONE]\n\n",
+		},
+		{
+			name:         "existing_cache_control",
+			write:        func(c *gin.Context) error { return StringData(c, "hello") },
+			want:         "data: hello\n\n",
+			cancelErr:    true,
+			cacheControl: "private, no-store",
+		},
+	}
+
+	for _, tc := range cases {
+		for _, stringWriter := range []bool{true, false} {
+			for _, cancelled := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/string_writer=%t/cancelled=%t", tc.name, stringWriter, cancelled), func(t *testing.T) {
+					recorder := &sseOutputRecorder{ResponseRecorder: httptest.NewRecorder()}
+					var writer http.ResponseWriter = recorder
+					if !stringWriter {
+						// Hide WriteString to exercise io.WriteString's byte fallback.
+						writer = struct {
+							http.ResponseWriter
+							http.Flusher
+						}{recorder, recorder}
+					}
+					c, _ := gin.CreateTestContext(writer)
+					ctx, cancel := context.WithCancel(context.Background())
+					t.Cleanup(cancel)
+					c.Request = httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+					c.Status(http.StatusAccepted)
+					c.Header("Content-Type", "application/json")
+					if tc.cacheControl != "" {
+						c.Header("Cache-Control", tc.cacheControl)
+					}
+					if cancelled {
+						cancel()
+					}
+
+					err := tc.write(c)
+					if cancelled && tc.cancelErr {
+						require.ErrorIs(t, err, context.Canceled)
+					} else {
+						require.NoError(t, err)
+					}
+					if cancelled {
+						assert.Empty(t, recorder.Body.String())
+						assert.Empty(t, recorder.flushedBodies)
+						assert.False(t, c.Writer.Written())
+						assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+						return
+					}
+
+					assert.Equal(t, tc.want, recorder.Body.String())
+					assert.Equal(t, []string{tc.want}, recorder.flushedBodies)
+					assert.Equal(t, http.StatusAccepted, recorder.Code)
+					assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+					cacheControl := tc.cacheControl
+					if cacheControl == "" {
+						cacheControl = "no-cache"
+					}
+					assert.Equal(t, cacheControl, recorder.Header().Get("Cache-Control"))
+				})
+			}
+		}
+	}
 }
 
 // ---------- Basic correctness ----------

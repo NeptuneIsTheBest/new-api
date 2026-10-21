@@ -67,7 +67,7 @@ func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 	if err != nil {
 		common.SysError(common.LogText("error marshalling stream response: %s", err.Error()))
 	} else {
-		c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
+		c.Render(-1, common.CustomEvent{Data: "event: " + resp.Type + "\n"})
 		c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonData)})
 	}
 	_ = FlushWriter(c)
@@ -79,8 +79,8 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 		return
 	}
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s\n", data)})
+	c.Render(-1, common.CustomEvent{Data: "event: " + resp.Type + "\n"})
+	c.Render(-1, common.CustomEvent{Data: "data: " + data + "\n"})
 	_ = FlushWriter(c)
 }
 
@@ -89,8 +89,8 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
+	c.Render(-1, common.CustomEvent{Data: "event: " + resp.Type + "\n"})
+	c.Render(-1, common.CustomEvent{Data: "data: " + data})
 	return FlushWriter(c)
 }
 
