@@ -151,40 +151,46 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	CacheQuotaDataLock.Unlock()
 
 	LogQuotaData(QuotaDataLogParams{
-		UserID:    1,
-		Username:  "alice",
-		ModelName: "gpt-a",
-		CreatedAt: 3661,
-		UseGroup:  "vip",
-		TokenID:   11,
-		ChannelID: 1,
-		NodeName:  "node-a",
-		Quota:     100,
-		TokenUsed: 40,
+		UserID:              1,
+		Username:            "alice",
+		ModelName:           "gpt-a",
+		CreatedAt:           3661,
+		UseGroup:            "vip",
+		TokenID:             11,
+		ChannelID:           1,
+		NodeName:            "node-a",
+		Quota:               100,
+		TokenUsed:           40,
+		CacheReadTokens:     20,
+		CacheCreationTokens: 5,
 	})
 	LogQuotaData(QuotaDataLogParams{
-		UserID:    1,
-		Username:  "alice",
-		ModelName: "gpt-a",
-		CreatedAt: 3700,
-		UseGroup:  "vip",
-		TokenID:   11,
-		ChannelID: 1,
-		NodeName:  "node-a",
-		Quota:     50,
-		TokenUsed: 20,
+		UserID:              1,
+		Username:            "alice",
+		ModelName:           "gpt-a",
+		CreatedAt:           3700,
+		UseGroup:            "vip",
+		TokenID:             11,
+		ChannelID:           1,
+		NodeName:            "node-a",
+		Quota:               50,
+		TokenUsed:           20,
+		CacheReadTokens:     10,
+		CacheCreationTokens: 2,
 	})
 	LogQuotaData(QuotaDataLogParams{
-		UserID:    1,
-		Username:  "alice",
-		ModelName: "gpt-a",
-		CreatedAt: 3700,
-		UseGroup:  "default",
-		TokenID:   11,
-		ChannelID: 1,
-		NodeName:  "node-a",
-		Quota:     25,
-		TokenUsed: 10,
+		UserID:              1,
+		Username:            "alice",
+		ModelName:           "gpt-a",
+		CreatedAt:           3700,
+		UseGroup:            "default",
+		TokenID:             11,
+		ChannelID:           1,
+		NodeName:            "node-a",
+		Quota:               25,
+		TokenUsed:           10,
+		CacheReadTokens:     -10,
+		CacheCreationTokens: -2,
 	})
 
 	SaveQuotaDataCache()
@@ -200,8 +206,32 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 2, rows[0].Count)
 	require.Equal(t, 150, rows[0].Quota)
 	require.Equal(t, 60, rows[0].TokenUsed)
+	assert.Equal(t, int64(30), rows[0].CacheReadTokens)
+	assert.Equal(t, int64(7), rows[0].CacheCreationTokens)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+	assert.Zero(t, rows[1].CacheReadTokens)
+	assert.Zero(t, rows[1].CacheCreationTokens)
+
+	for _, query := range []struct {
+		name  string
+		fetch func() ([]*QuotaData, error)
+	}{
+		{"username", func() ([]*QuotaData, error) { return GetQuotaDataByUsername("alice", 3600, 7200) }},
+		{"user ID", func() ([]*QuotaData, error) { return GetQuotaDataByUserId(1, 3600, 7200) }},
+		{"grouped by user", func() ([]*QuotaData, error) { return GetQuotaDataGroupByUser(3600, 7200) }},
+		{"all models", func() ([]*QuotaData, error) { return GetAllQuotaDates(3600, 7200, "") }},
+	} {
+		t.Run(query.name, func(t *testing.T) {
+			stats, err := query.fetch()
+			require.NoError(t, err)
+			require.Len(t, stats, 1)
+			assert.Equal(t, 175, stats[0].Quota)
+			assert.Equal(t, 70, stats[0].TokenUsed)
+			assert.Equal(t, int64(30), stats[0].CacheReadTokens)
+			assert.Equal(t, int64(7), stats[0].CacheCreationTokens)
+		})
+	}
 }
 
 func setupQuotaDataCacheTestDB(t *testing.T, dialect string) *gorm.DB {
@@ -267,19 +297,23 @@ func TestSaveQuotaDataCacheDatabaseMatrix(t *testing.T) {
 				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
 				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
 				Quota: 100, TokenUsed: 40,
+				CacheReadTokens: 20, CacheCreationTokens: 5,
 			}
 			zeroUsage := params
 			zeroUsage.Quota, zeroUsage.TokenUsed = 0, 0
+			zeroUsage.CacheReadTokens, zeroUsage.CacheCreationTokens = 0, 0
 			for _, tc := range []struct {
 				name       string
 				params     *QuotaDataLogParams
 				operations []string
 				count      int
+				usageCount int
 			}{
 				{name: "empty", operations: []string{}},
-				{name: "new bucket", params: &params, operations: []string{"UPDATE", "INSERT"}, count: 1},
-				{name: "existing bucket with zero usage", params: &zeroUsage, operations: []string{"UPDATE"}, count: 2},
-				{name: "already flushed", operations: []string{}, count: 2},
+				{name: "new bucket", params: &params, operations: []string{"UPDATE", "INSERT"}, count: 1, usageCount: 1},
+				{name: "existing bucket", params: &params, operations: []string{"UPDATE"}, count: 2, usageCount: 2},
+				{name: "existing bucket with zero usage", params: &zeroUsage, operations: []string{"UPDATE"}, count: 3, usageCount: 2},
+				{name: "already flushed", operations: []string{}, count: 3, usageCount: 2},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					if tc.params != nil {
@@ -300,8 +334,10 @@ func TestSaveQuotaDataCacheDatabaseMatrix(t *testing.T) {
 					}
 					require.Len(t, rows, 1)
 					assert.Equal(t, tc.count, rows[0].Count)
-					assert.Equal(t, 100, rows[0].Quota)
-					assert.Equal(t, 40, rows[0].TokenUsed)
+					assert.Equal(t, 100*tc.usageCount, rows[0].Quota)
+					assert.Equal(t, 40*tc.usageCount, rows[0].TokenUsed)
+					assert.Equal(t, int64(20*tc.usageCount), rows[0].CacheReadTokens)
+					assert.Equal(t, int64(5*tc.usageCount), rows[0].CacheCreationTokens)
 					assert.Equal(t, int64(3600), rows[0].CreatedAt)
 				})
 			}
@@ -315,6 +351,7 @@ func TestSaveQuotaDataCacheAcceptsRecordsDuringFlush(t *testing.T) {
 		UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
 		UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
 		Quota: 100, TokenUsed: 40,
+		CacheReadTokens: 20, CacheCreationTokens: 5,
 	}
 	LogQuotaData(params)
 	entered, resume := make(chan struct{}), make(chan struct{})
@@ -357,6 +394,8 @@ func TestSaveQuotaDataCacheAcceptsRecordsDuringFlush(t *testing.T) {
 	assert.Equal(t, 2, rows[0].Count)
 	assert.Equal(t, 200, rows[0].Quota)
 	assert.Equal(t, 80, rows[0].TokenUsed)
+	assert.Equal(t, int64(40), rows[0].CacheReadTokens)
+	assert.Equal(t, int64(10), rows[0].CacheCreationTokens)
 }
 
 func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
@@ -367,14 +406,18 @@ func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
 				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
 				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
 				Quota: 100, TokenUsed: 40,
+				CacheReadTokens: 20, CacheCreationTokens: 5,
 			}
 			initialCount, initialQuota, initialTokens := 0, 0, 0
+			var initialRead, initialCreation int64
 			if operation == "update" {
 				initialCount, initialQuota, initialTokens = 1, 10, 4
+				initialRead, initialCreation = 2, 1
 				require.NoError(t, db.Create(&QuotaData{
 					UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3600,
 					UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
 					Count: initialCount, Quota: initialQuota, TokenUsed: initialTokens,
+					CacheReadTokens: initialRead, CacheCreationTokens: initialCreation,
 				}).Error)
 			}
 			LogQuotaData(params)
@@ -383,6 +426,7 @@ func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
 			LogQuotaData(success)
 			newUsage := params
 			newUsage.Quota, newUsage.TokenUsed = 50, 20
+			newUsage.CacheReadTokens, newUsage.CacheCreationTokens = 10, 2
 			writeErr := errors.New("forced dashboard write failure")
 			callbacks, after := db.Callback().Update(), "gorm:update"
 			if operation == "insert" {
@@ -415,6 +459,8 @@ func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
 				assert.Equal(t, initialCount, rows[0].Count)
 				assert.Equal(t, initialQuota, rows[0].Quota)
 				assert.Equal(t, initialTokens, rows[0].TokenUsed)
+				assert.Equal(t, initialRead, rows[0].CacheReadTokens)
+				assert.Equal(t, initialCreation, rows[0].CacheCreationTokens)
 			} else {
 				require.Len(t, rows, 1)
 				assert.Equal(t, success.UserID, rows[0].UserID)
@@ -429,9 +475,13 @@ func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
 			assert.Equal(t, initialCount+2, rows[0].Count)
 			assert.Equal(t, initialQuota+150, rows[0].Quota)
 			assert.Equal(t, initialTokens+60, rows[0].TokenUsed)
+			assert.Equal(t, initialRead+30, rows[0].CacheReadTokens)
+			assert.Equal(t, initialCreation+7, rows[0].CacheCreationTokens)
 			assert.Equal(t, 1, rows[1].Count, "successfully saved buckets must not be retried")
 			assert.Equal(t, success.Quota, rows[1].Quota)
 			assert.Equal(t, success.TokenUsed, rows[1].TokenUsed)
+			assert.Equal(t, success.CacheReadTokens, rows[1].CacheReadTokens)
+			assert.Equal(t, success.CacheCreationTokens, rows[1].CacheCreationTokens)
 			assert.Equal(t, 1, rows[2].Count)
 		})
 	}

@@ -2,8 +2,10 @@ package advancedcustom
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -73,6 +76,16 @@ func TestAdaptorMasksDialedHostsInDialFailure(t *testing.T) {
 		{name: "channel proxy host", proxy: "http://egress.private.invalid:8080", hidden: "egress.private.invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.proxy != "" {
+				originalDialer := websocket.DefaultDialer
+				dialer := *originalDialer
+				dialer.NetDialContext = func(_ context.Context, _ string, address string) (net.Conn, error) {
+					assert.Equal(t, "egress.private.invalid:8080", address)
+					return nil, &net.DNSError{Name: tc.hidden, Err: "no such host", IsNotFound: true}
+				}
+				websocket.DefaultDialer = &dialer
+				t.Cleanup(func() { websocket.DefaultDialer = originalDialer })
+			}
 			info := advancedCustomRelayInfo(&dto.AdvancedCustomConfig{
 				Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/realtime", UpstreamPath: "http://localhost:" + upstreamURL.Port() + "/v1/realtime", Converter: relayconvert.ConverterNone}},
 			})
