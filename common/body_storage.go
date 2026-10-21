@@ -308,10 +308,32 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	threshold := GetDiskCacheThresholdBytes()
 
 	// 如果启用了磁盘缓存且内容长度超过阈值，直接使用磁盘存储
-	if IsDiskCacheEnabled() &&
+	useDisk := IsDiskCacheEnabled() &&
 		contentLength > 0 &&
 		contentLength >= threshold &&
-		IsDiskCacheAvailable(contentLength) {
+		IsDiskCacheAvailable(contentLength)
+
+	// The remaining size may be unknown or larger than ContentLength (e.g.
+	// after decompression). Check capacity for the request limit before
+	// buffering only the prefix needed to decide whether to spill to disk.
+	if !useDisk && IsDiskCacheAvailable(maxBytes) {
+		data, err := io.ReadAll(io.LimitReader(reader, min(threshold, maxBytes+1)))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, ErrRequestBodyTooLarge
+		}
+		if int64(len(data)) < threshold {
+			IncrementMemoryCacheHits()
+			return newMemoryStorage(data), nil
+		}
+
+		reader = io.MultiReader(bytes.NewReader(data), reader)
+		useDisk = true
+	}
+
+	if useDisk {
 		storage, err := newDiskStorageFromReader(reader, maxBytes, GetDiskCachePath())
 		if err != nil {
 			if IsRequestBodyTooLargeError(err) {
