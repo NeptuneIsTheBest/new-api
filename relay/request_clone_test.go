@@ -4,19 +4,189 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/copier"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPrepareResponsesRequestRetryIsolation(t *testing.T) {
+	request := &dto.OpenAIResponsesRequest{
+		Model: "client-model", Input: common.RawMessage(`"hello"`),
+		Instructions: common.RawMessage(`"client instructions"`),
+		Reasoning:    &dto.Reasoning{Effort: "low", Summary: "detailed"},
+		ReasoningConversion: &dto.ReasoningConversionState{
+			Mode: "enabled", Effort: "low", IncludeThoughts: common.GetPointer(true),
+		},
+		Temperature: common.GetPointer(0.7), TopP: common.GetPointer(0.0),
+		MaxOutputTokens: common.GetPointer(uint(128)), MaxToolCalls: common.GetPointer(uint(0)),
+		Stream: common.GetPointer(false), Store: common.RawMessage(`true`),
+		FrequencyPenalty: common.RawMessage(`0`), PresencePenalty: common.RawMessage(`0`),
+	}
+	want, err := common.DeepCopy(request)
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, request.Model)
+	info := relaycommon.GenRelayInfoResponses(c, request)
+
+	// Every attempt uses the same source and RelayInfo, as a channel retry does.
+	for _, tc := range []struct {
+		name, mapped, model, effort, converter string
+		channel                                int
+		temperature                            float64
+		failMarshal                            bool
+	}{
+		{name: "model modifiers", channel: constant.ChannelTypeOpenAI, mapped: "gpt-4.1@thinking:on@effort:high@temperature:0.3", model: "gpt-4.1", effort: "high", temperature: 0.3},
+		{name: "failure after reasoning mutation", channel: constant.ChannelTypeOpenAI, mapped: "gpt-4.1@thinking:on@effort:high", failMarshal: true},
+		{name: "codex replacements", channel: constant.ChannelTypeCodex, mapped: "gpt-5-codex", model: "gpt-5-codex", effort: "low"},
+		{name: "cross protocol", channel: constant.ChannelTypeAdvancedCustom, mapped: "gpt-4.1", model: "gpt-4.1", converter: relayconvert.ConverterOpenAIResponsesToOpenAIChat, temperature: 0.7},
+		{name: "native custom after conversion", channel: constant.ChannelTypeAdvancedCustom, mapped: "gpt-4.1@thinking:on@effort:high", model: "gpt-4.1", effort: "high", temperature: 0.7},
+		{name: "adaptor reasoning mutation", channel: constant.ChannelTypeDeepSeek, mapped: "deepseek-v4-pro-none", model: "deepseek-v4-pro", effort: "none", temperature: 0.7},
+		{name: "unmodified retry", channel: constant.ChannelTypeOpenAI, mapped: "gpt-4.1", model: "gpt-4.1", effort: "low", temperature: 0.7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			common.SetContextKey(c, constant.ContextKeyChannelType, tc.channel)
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{
+				SystemPrompt: "gateway instructions", SystemPromptOverride: true,
+			})
+			common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{
+				AdvancedCustom: &dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{
+					{IncomingPath: "/v1/responses", UpstreamPath: "/v1/chat/completions", Models: []string{"other-model"}, Converter: relayconvert.ConverterOpenAIResponsesToOpenAIChat},
+					{IncomingPath: "/v1/responses", UpstreamPath: "/upstream", Models: []string{want.Model}, Converter: tc.converter},
+				}},
+			})
+			c.Set("model_mapping", fmt.Sprintf(`{"client-model":%q}`, tc.mapped))
+			input := request.Input
+			if tc.failMarshal {
+				request.Input = common.RawMessage(`{`)
+			}
+			_, body, closer, apiErr := PrepareResponsesRequest(c, info, request)
+			if tc.failMarshal {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, types.ErrorCodeConvertRequestFailed, apiErr.GetErrorCode())
+				assert.Equal(t, common.RawMessage(`{`), request.Input)
+				request.Input = input
+			} else {
+				require.Nil(t, apiErr)
+				defer closer.Close()
+				payload, err := io.ReadAll(body)
+				require.NoError(t, err)
+				if tc.converter != "" {
+					var converted dto.GeneralOpenAIRequest
+					require.NoError(t, common.Unmarshal(payload, &converted))
+					assert.Equal(t, tc.model, converted.Model)
+					require.Len(t, converted.Messages, 2)
+					assert.Equal(t, "hello", converted.Messages[1].StringContent())
+					assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses, types.RelayFormatOpenAI}, info.RequestConversionChain)
+				} else {
+					var converted dto.OpenAIResponsesRequest
+					require.NoError(t, common.Unmarshal(payload, &converted))
+					assert.Equal(t, tc.model, converted.Model)
+					require.NotNil(t, converted.Reasoning)
+					assert.Equal(t, tc.effort, converted.Reasoning.Effort)
+					assert.Equal(t, want.Input, converted.Input)
+					assert.Equal(t, want.TopP, converted.TopP)
+					assert.Equal(t, want.MaxToolCalls, converted.MaxToolCalls)
+					assert.Equal(t, want.Stream, converted.Stream)
+					assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
+					if tc.channel == constant.ChannelTypeCodex {
+						assert.Nil(t, converted.Temperature)
+						assert.Nil(t, converted.MaxOutputTokens)
+						assert.Empty(t, converted.FrequencyPenalty)
+						assert.Empty(t, converted.PresencePenalty)
+						assert.Equal(t, common.RawMessage(`false`), converted.Store)
+						assert.Equal(t, common.RawMessage(`"gateway instructions\nclient instructions"`), converted.Instructions)
+					} else {
+						require.NotNil(t, converted.Temperature)
+						assert.Equal(t, tc.temperature, *converted.Temperature)
+						assert.Equal(t, want.MaxOutputTokens, converted.MaxOutputTokens)
+						assert.Equal(t, want.Store, converted.Store)
+					}
+				}
+			}
+			// Model synchronization is intentional; nested source fields must
+			// remain pristine for the next attempt, even after a failed marshal.
+			actual := *request
+			actual.Model = want.Model
+			assert.Equal(t, *want, actual)
+		})
+	}
+}
+
+func TestPrepareResponsesRequestPassthroughReplay(t *testing.T) {
+	previousDiskConfig := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(previousDiskConfig) })
+	settings := model_setting.GetGlobalSettings()
+	previousPassthrough := settings.PassThroughRequestEnabled
+	t.Cleanup(func() { settings.PassThroughRequestEnabled = previousPassthrough })
+	for _, disk := range []bool{false, true} {
+		for _, mode := range []string{"channel", "global", "route"} {
+			t.Run(fmt.Sprintf("disk_%t/%s", disk, mode), func(t *testing.T) {
+				common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 64, Path: t.TempDir()})
+				settings.PassThroughRequestEnabled = mode == "global"
+				payload := []byte(" {\n\"model\":\"client-model@opaque:abc\",\"input\":\"hello\",\"store\":false,\"vendor\":9007199254740993} \n")
+				var request dto.OpenAIResponsesRequest
+				require.NoError(t, common.Unmarshal(payload, &request))
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, request.Model)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: mode == "channel"})
+				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"input": "override"})
+				if mode == "route" {
+					common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeAdvancedCustom)
+					common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{AdvancedCustom: &dto.AdvancedCustomConfig{
+						Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/responses", UpstreamPath: "/v1/responses", PassThroughBodyEnabled: true}},
+					}})
+				}
+				info := relaycommon.GenRelayInfoResponses(c, &request)
+				c.Set("model_mapping", `{`)
+				_, _, _, apiErr := PrepareResponsesRequest(c, info, &request)
+				require.NotNil(t, apiErr, "passthrough must still validate model mapping")
+				assert.Equal(t, types.ErrorCodeChannelModelMappedError, apiErr.GetErrorCode())
+				c.Set("model_mapping", fmt.Sprintf(`{%q:"mapped-model"}`, request.Model))
+				storage, err := common.GetBodyStorage(c)
+				require.NoError(t, err)
+				defer storage.Close()
+				assert.Equal(t, disk, storage.IsDisk())
+				for range 2 {
+					_, body, closer, apiErr := PrepareResponsesRequest(c, info, &request)
+					require.Nil(t, apiErr)
+					assert.Equal(t, "mapped-model", info.UpstreamModelName)
+					assert.EqualValues(t, len(payload), body.Size())
+					got, err := io.ReadAll(body)
+					require.NoError(t, err)
+					assert.Equal(t, payload, got)
+					replay, err := body.NewReader()
+					require.NoError(t, err)
+					replayed, err := io.ReadAll(replay)
+					require.NoError(t, err)
+					require.NoError(t, replay.Close())
+					assert.Equal(t, payload, replayed)
+					require.NoError(t, closer.Close())
+					stored, err := storage.Bytes()
+					require.NoError(t, err, "closing the attempt must not close the inbound body")
+					assert.Equal(t, payload, stored)
+				}
+			})
+		}
+	}
+}
 
 func TestRequestDeepCopyResponses(t *testing.T) {
 	t.Run("nil source", func(t *testing.T) {

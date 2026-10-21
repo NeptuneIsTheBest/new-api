@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -408,36 +409,103 @@ func TestNormalizeResponsesWSCreateEventFlat(t *testing.T) {
 }
 
 func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
-	payload := []byte(`{
-		"model": "gpt-5.3-codex-spark",
-		"input": "hi",
-		"store": false,
-		"event_id": "evt_upstream",
-		"stream": true,
-		"background": true,
-		"stream_options": {"include_usage": true}
-	}`)
+	for _, tc := range []struct {
+		name, body, generate, streamID, want string
+	}{
+		{
+			name: "flat event", generate: "false",
+			body: `{"model":"gpt-5.3-codex-spark","input":"hi","store":false,"event_id":"evt_upstream","stream":true,"background":true,"stream_options":{"include_usage":true}}`,
+			want: `{"type":"response.create","generate":false,"model":"gpt-5.3-codex-spark","input":"hi","store":false}`,
+		},
+		{
+			name: "envelope wins", generate: "false", streamID: "planner.A-1",
+			body: `{"type":"wrong","type":"wrong-again","stream_id":"override","generate":true,"event_id":"event","background":true,"stream":false,"stream_options":{},"input":[]}`,
+			want: `{"type":"response.create","stream_id":"planner.A-1","generate":false,"input":[]}`,
+		},
+		{
+			name: "absent envelope generate keeps override",
+			body: `{"stream_id":"override","generate":false,"input":null}`,
+			want: `{"type":"response.create","generate":false,"input":null}`,
+		},
+		{
+			name: "escaped and duplicate keys",
+			body: `{"\u0074ype":"wrong","str\u0065am":true,"str\u0065am_id":"override","vendor":1,"vend\u006fr":2,"vendor":3,"input":{"stream":true,"event_id":"nested"},"a.b":0,"a\\b":false}`,
+			want: `{"type":"response.create","vendor":3,"input":{"stream":true,"event_id":"nested"},"a.b":0,"a\\b":false}`,
+		},
+		{name: "empty object", body: " \n{ }\t", want: `{"type":"response.create"}`},
+		{name: "null generate", body: `{"generate":true}`, generate: "null", want: `{"type":"response.create","generate":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(tc.body)
+			got, err := buildResponsesWSCreateEvent(payload, common.RawMessage(tc.generate), tc.streamID)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(got))
+			assert.Equal(t, tc.body, string(payload))
+		})
+	}
+	for _, invalid := range []string{"", "{", "[]", "null", `"text"`, "{} trailing", `{"input":1,}`} {
+		t.Run("invalid_"+invalid, func(t *testing.T) {
+			_, err := buildResponsesWSCreateEvent([]byte(invalid), nil, "")
+			require.Error(t, err)
+		})
+	}
+	_, err := buildResponsesWSCreateEvent([]byte(`{}`), common.RawMessage(`{`), "")
+	require.Error(t, err)
+}
 
-	got, err := buildResponsesWSCreateEvent(payload, common.RawMessage(`false`), "")
-	if err != nil {
-		t.Fatalf("buildResponsesWSCreateEvent() error = %v", err)
-	}
-	var data map[string]any
-	if err := common.Unmarshal(got, &data); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if data["type"] != responsesWSEventTypeResponseCreate {
-		t.Fatalf("type = %#v", data["type"])
-	}
-	if data["model"] != "gpt-5.3-codex-spark" || data["input"] != "hi" || data["store"] != false {
-		t.Fatalf("unexpected flat event fields: %s", got)
-	}
-	if data["generate"] != false {
-		t.Fatalf("generate = %#v, want false", data["generate"])
-	}
-	for _, key := range []string{"response", "event_id", "stream", "background", "stream_options"} {
-		if _, ok := data[key]; ok {
-			t.Fatalf("field %q should not be present in upstream event: %s", key, got)
+func TestBuildResponsesWSCreateEventPreservesLargeRawInput(t *testing.T) {
+	input := `[{"type":"input_image","image_url":"data:image/png;base64,` + strings.Repeat("a", 1<<20) + `"}]`
+	payload := []byte(`{"input":` + input + `,"vendor":{"id":9007199254740993,"price":1.2300e+4,"nested":{"stream":true}}}`)
+	original := bytes.Clone(payload)
+	got, err := buildResponsesWSCreateEvent(payload, nil, "")
+	require.NoError(t, err)
+	var event map[string]common.RawMessage
+	require.NoError(t, common.Unmarshal(got, &event))
+	assert.Equal(t, input, string(event["input"]))
+	assert.Equal(t, `{"id":9007199254740993,"price":1.2300e+4,"nested":{"stream":true}}`, string(event["vendor"]))
+	got[0] = '!'
+	assert.Equal(t, original, payload, "the output must not alias the input storage")
+}
+
+func TestResponsesWSCreatePayloadStorageAndOverrides(t *testing.T) {
+	previousConfig := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(previousConfig) })
+	for _, disk := range []bool{false, true} {
+		for _, passthrough := range []bool{false, true} {
+			t.Run(fmt.Sprintf("disk_%t/passthrough_%t", disk, passthrough), func(t *testing.T) {
+				common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 64, Path: t.TempDir()})
+				raw := []byte(`{"model":"gpt-4.1","input":"hello","service_tier":"priority","vendor":9007199254740993}`)
+				var request dto.OpenAIResponsesRequest
+				require.NoError(t, common.Unmarshal(raw, &request))
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(raw))
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, request.Model)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: passthrough})
+				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{
+					"type": "wrong", "event_id": "override", "background": true, "stream": true,
+					"stream_id": "override", "stream_options": map[string]any{"include_usage": true},
+					"generate": true, "input": "updated", "service_tier": "auto",
+				})
+				info := relaycommon.GenRelayInfoResponses(c, &request)
+				storage, err := common.GetBodyStorage(c)
+				require.NoError(t, err)
+				defer storage.Close()
+				assert.Equal(t, disk, storage.IsDisk())
+				before := common.GetDiskCacheStats()
+				payload, apiErr := buildResponsesWSCreatePayload(c, info, request, common.RawMessage(`false`), "planner")
+				require.Nil(t, apiErr)
+				assert.Equal(t, before, common.GetDiskCacheStats(), "event construction must not create outbound storage")
+				if passthrough {
+					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"hello","service_tier":"priority","vendor":9007199254740993}`, string(payload))
+				} else {
+					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"updated","service_tier":"auto"}`, string(payload))
+				}
+				stored, err := storage.Bytes()
+				require.NoError(t, err)
+				assert.Equal(t, raw, stored)
+				assert.Equal(t, common.RawMessage(`"hello"`), request.Input)
+			})
 		}
 	}
 }

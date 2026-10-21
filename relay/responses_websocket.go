@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
 )
 
 const responsesWSEventTypeResponseCreate = "response.create"
@@ -611,14 +613,16 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 }
 
 func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) ([]byte, *types.NewAPIError) {
-	_, body, closer, apiErr := PrepareResponsesRequest(c, info, &req)
+	_, jsonData, storage, apiErr := prepareResponsesRequest(c, info, &req)
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	defer closer.Close()
-	jsonData, err := io.ReadAll(body)
-	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+	if storage != nil {
+		var err error
+		jsonData, err = storage.Bytes()
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
 	}
 	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
 	if err != nil {
@@ -855,33 +859,61 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 }
 
 func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, streamID string) ([]byte, error) {
-	var event map[string]common.RawMessage
-	if err := common.Unmarshal(jsonData, &event); err != nil {
-		return nil, err
+	if !gjson.ValidBytes(jsonData) {
+		return nil, errors.New("invalid responses request JSON")
 	}
-	typeData, err := common.Marshal(responsesWSEventTypeResponseCreate)
+	// Borrow a read-only view for traversal; all offsets/keys stay in this call.
+	// The event gets a separate buffer, including when jsonData belongs to the
+	// incoming request's memory storage and must survive another attempt.
+	data := gjson.Parse(unsafe.String(unsafe.SliceData(jsonData), len(jsonData)))
+	if !data.IsObject() {
+		return nil, errors.New("responses request must be a JSON object")
+	}
+	envelope, err := common.Marshal(struct {
+		Type     string            `json:"type"`
+		StreamID string            `json:"stream_id,omitempty"`
+		Generate common.RawMessage `json:"generate,omitempty"`
+	}{Type: responsesWSEventTypeResponseCreate, StreamID: streamID, Generate: generate})
 	if err != nil {
 		return nil, err
 	}
-	event["type"] = typeData
-	// The normalized body never carries stream_id; a channel parameter
-	// override may inject one, and it must not shadow the envelope's value.
-	delete(event, "stream_id")
-	if streamID != "" {
-		streamData, err := common.Marshal(streamID)
-		if err != nil {
-			return nil, err
+
+	type memberSpan struct{ start, end int }
+	var localMembers [16]memberSpan
+	members := localMembers[:0]
+	positions := make(map[string]int)
+	data.ForEach(func(key, value gjson.Result) bool {
+		switch key.Str {
+		case "type", "stream_id", "event_id", "background", "stream", "stream_options":
+			// Channel overrides must not shadow the WebSocket envelope.
+			return true
+		case "generate":
+			if len(generate) > 0 {
+				return true
+			}
 		}
-		event["stream_id"] = streamData
+		span := memberSpan{start: key.Index, end: value.Index + len(value.Raw)}
+		if index, exists := positions[key.Str]; exists {
+			// Preserve the old map decoder's last-value-wins behavior, also
+			// for keys with different JSON escaping but the same decoded name.
+			members[index] = span
+		} else {
+			positions[key.Str] = len(members)
+			members = append(members, span)
+		}
+		return true
+	})
+	outputSize := len(envelope)
+	for _, span := range members {
+		outputSize += 1 + span.end - span.start
 	}
-	delete(event, "event_id")
-	delete(event, "background")
-	delete(event, "stream")
-	delete(event, "stream_options")
-	if len(generate) > 0 {
-		event["generate"] = generate
+	event := make([]byte, 0, outputSize)
+	event = append(event, envelope[:len(envelope)-1]...)
+	for _, span := range members {
+		event = append(event, ',')
+		event = append(event, jsonData[span.start:span.end]...)
 	}
-	return common.Marshal(event)
+	return append(event, '}'), nil
 }
 
 func buildResponsesWSErrorPayload(eventID, streamID string, apiErr *types.NewAPIError, upstreamURLs ...string) ([]byte, error) {
