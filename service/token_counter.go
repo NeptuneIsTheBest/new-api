@@ -131,6 +131,10 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 		if file.Source == nil {
 			continue
 		}
+		// Known images with size-independent token counts need no preload.
+		if file.FileType == types.FileTypeImage && !tokenkit.ImageNeedsSize(model, file.Detail) {
+			continue
+		}
 
 		// 如果文件类型未知且需要获取，通过 MIME 类型检测
 		if file.FileType == "" || (file.Source.IsURL() && shouldFetchFiles) {
