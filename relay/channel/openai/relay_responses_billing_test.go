@@ -247,6 +247,15 @@ func TestOaiResponsesStreamHandlerDeduplicatesCompletedImageOutput(t *testing.T)
 	)
 
 	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolImageGeneration].CallCount)
+
+	// The same output slot can be repeated without an ID and with a different
+	// payload; retaining output_index prevents a second charge in that case.
+	info = runResponsesImageBillingStream(
+		t,
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"image_generation_call","status":"completed","result":"base64-a"}}`,
+		`{"type":"response.completed","response":{"output":[{"type":"image_generation_call","status":"completed","result":"base64-b"}]}}`,
+	)
+	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolImageGeneration].CallCount)
 }
 
 func TestOaiResponsesStreamHandlerCountsImageOutputOnIncomplete(t *testing.T) {
@@ -451,4 +460,194 @@ func TestAzureHostedWebSearch(t *testing.T) {
 			assert.Equal(t, map[string]int{"bing_web_search": 5}, billed)
 		})
 	}
+}
+
+func TestGenRelayInfoResponsesToolTypes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name  string
+		tools string
+		want  []string
+	}{
+		{"nested and repeated declarations", `[{"type":"function","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}}}}},{"type":"web_search"},{"type":"web_search"}]`, []string{"function", "web_search"}},
+		{"missing and null types", `[{},null,{"type":null}]`, []string{""}},
+		{"scalar types", `[{"type":42},{"type":false}]`, []string{"42", "false"}},
+		{"absent tools", "", nil},
+		{"null tools", "null", nil},
+		{"empty tools", "[]", nil},
+		{"invalid JSON", `[{"type":"web_search"},`, nil},
+		{"non-array tools", `{"type":"web_search"}`, nil},
+		{"invalid entry retains other declarations", `[{"type":"web_search"},42,{"type":"file_search"}]`, []string{"web_search", "", "file_search"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := relaycommon.GenRelayInfoResponses(c, &dto.OpenAIResponsesRequest{Tools: common.RawMessage(tc.tools)})
+			tools := info.ResponsesUsageInfo.BuiltInTools
+			assert.Len(t, tools, len(tc.want))
+			for _, name := range tc.want {
+				require.Contains(t, tools, name)
+				assert.Equal(t, &relaycommon.BuildInToolInfo{ToolName: name, CallCount: 0}, tools[name])
+			}
+		})
+	}
+}
+
+func TestOaiResponsesHandlersPreserveWireData(t *testing.T) {
+	const body = `{ "id":"resp_1", "object":"response", "model":"gpt-4o", "created_at":1786588600.0, "status":"completed", "tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"value":{"type":"string","enum":["a","b"]}}}}},"required":["items"]}},{"type":"web_search"}], "metadata":{"nested":{"keep":[1,true,null]}}, "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}], "usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":2}} }`
+	for _, mode := range []string{"json", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			stream := mode == "stream"
+			payload, wantWire := body, body
+			if stream {
+				payload = `{"type":"response.completed","sequence_number":7,"response":` + body + `}`
+				wantWire = "event: response.completed\ndata: " + payload + "\n\n"
+			}
+			w, info, usage, apiErr := runResponsesRelay(t, stream, payload)
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, wantWire, w.Body.String())
+			assert.Equal(t, 20, usage.PromptTokens)
+			assert.Equal(t, 5, usage.CompletionTokens)
+			assert.Equal(t, 25, usage.TotalTokens)
+			assert.Equal(t, 4, usage.PromptTokensDetails.CachedTokens)
+			assert.Equal(t, 2, usage.CompletionTokenDetails.ReasoningTokens)
+			require.NotNil(t, info.ResponseModel)
+			assert.Equal(t, "gpt-4o", info.ResponseModel.ReturnedModel)
+			assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "web_search")
+		})
+	}
+}
+
+func TestOaiResponsesStreamHandlerAccountingFields(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		payload          string
+		promptTokens     int
+		completionTokens int
+		outcome          relaycommon.ResponseOutcome
+		errorCode        string
+		errorType        string
+		incompleteReason string
+	}{
+		{
+			name: "delta without response", payload: `{"type":"response.output_text.delta","delta":"hello"}`,
+			promptTokens: 9, completionTokens: 1,
+		},
+		{
+			name: "delta with null response", payload: `{"type":"response.output_text.delta","response":null,"delta":"hello"}`,
+			promptTokens: 9, completionTokens: 1,
+		},
+		{
+			name: "terminal output fallback", payload: `{"type":"response.completed","response":{"tools":null,"usage":null,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}`,
+			promptTokens: 9, completionTokens: 1, outcome: relaycommon.ResponseOutcomeCompleted,
+		},
+		{
+			name: "failed status and structured error", payload: `{"type":"response.done","response":{"status":"failed","error":{"code":"provider_error","type":"server_error","message":"failed"}}}`,
+			outcome: relaycommon.ResponseOutcomeFailed, errorCode: "provider_error", errorType: "server_error",
+		},
+		{
+			name: "flat error without response", payload: `{"type":"error","code":"context_length_exceeded","message":"too long"}`,
+			outcome: relaycommon.ResponseOutcomeFailed, errorCode: "context_length_exceeded",
+		},
+		{
+			name: "incomplete reason", payload: `{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}`,
+			promptTokens: 9, outcome: relaycommon.ResponseOutcomeIncomplete, incompleteReason: "max_output_tokens",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, info, usage, apiErr := runResponsesRelay(t, true, tc.payload)
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Contains(t, w.Body.String(), "data: "+tc.payload+"\n\n")
+			assert.Equal(t, tc.promptTokens, usage.PromptTokens)
+			assert.Equal(t, tc.completionTokens, usage.CompletionTokens)
+			assert.Equal(t, tc.promptTokens+tc.completionTokens, usage.TotalTokens)
+			outcome := info.StreamStatus.OutcomeSnapshot()
+			assert.False(t, outcome.HasErrors)
+			assert.Equal(t, tc.outcome, outcome.Response)
+			assert.Equal(t, tc.errorCode, outcome.ErrorCode)
+			assert.Equal(t, tc.errorType, outcome.ErrorType)
+			assert.Equal(t, tc.incompleteReason, outcome.IncompleteReason)
+		})
+	}
+}
+
+func TestOaiResponsesHandlersRejectInvalidJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"syntax error in skipped tools", `{"tools":[{"parameters":{"type":}}]}`},
+		{"invalid usage type", `{"usage":{"input_tokens":"invalid"}}`},
+	} {
+		for _, mode := range []string{"json", "stream"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				stream := mode == "stream"
+				payload := tc.body
+				if stream {
+					payload = `{"type":"response.completed","response":` + payload + `}`
+				}
+				w, info, usage, apiErr := runResponsesRelay(t, stream, payload)
+				assert.Empty(t, w.Body.String())
+				if stream {
+					require.Nil(t, apiErr)
+					require.NotNil(t, usage)
+					assert.Zero(t, usage.TotalTokens)
+					assert.Equal(t, 1, info.StreamStatus.TotalErrorCount())
+					return
+				}
+				require.NotNil(t, apiErr)
+				assert.Nil(t, usage)
+				assert.Equal(t, types.ErrorCodeBadResponseBody, apiErr.GetErrorCode())
+				assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+			})
+		}
+	}
+}
+
+func TestOaiResponsesHandlerPreservesUpstreamError(t *testing.T) {
+	_, _, usage, apiErr := runResponsesRelay(t, false, `{"error":{"type":"server_error","code":"provider_error","message":"upstream failed","param":"model"},"tools":[]}`)
+	require.NotNil(t, apiErr)
+	assert.Nil(t, usage)
+	oaiError := apiErr.ToOpenAIError()
+	assert.Equal(t, "server_error", oaiError.Type)
+	assert.Equal(t, "provider_error", oaiError.Code)
+	assert.Equal(t, "upstream failed", oaiError.Message)
+	assert.Equal(t, "model", oaiError.Param)
+}
+
+func runResponsesRelay(t *testing.T, stream bool, payload string) (*httptest.ResponseRecorder, *relaycommon.RelayInfo, *dto.Usage, *types.NewAPIError) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-4o",
+		DisablePing:     true,
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI, UpstreamModelName: "gpt-4o"},
+	}
+	info.SetEstimatePromptTokens(9)
+	contentType := "application/json"
+	if stream {
+		payload = "data: " + payload + "\n\ndata: [DONE]\n\n"
+		contentType = "text/event-stream"
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(payload)),
+		Header:     http.Header{"Content-Type": []string{contentType}},
+	}
+	var usage *dto.Usage
+	var apiErr *types.NewAPIError
+	if stream {
+		usage, apiErr = OaiResponsesStreamHandler(c, info, resp)
+	} else {
+		usage, apiErr = OaiResponsesHandler(c, info, resp)
+	}
+	return w, info, usage, apiErr
 }

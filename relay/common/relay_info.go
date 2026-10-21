@@ -516,8 +516,12 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 		BuiltInTools: make(map[string]*BuildInToolInfo),
 	}
 	if len(request.Tools) > 0 {
-		for _, tool := range request.GetToolsMap() {
-			toolType := common.Interface2String(tool["type"])
+		var tools []struct {
+			Type any `json:"type"`
+		}
+		_ = common.Unmarshal(request.Tools, &tools)
+		for _, tool := range tools {
+			toolType := common.Interface2String(tool.Type)
 			info.ResponsesUsageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
 				ToolName:  toolType,
 				CallCount: 0,

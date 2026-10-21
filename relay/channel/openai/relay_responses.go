@@ -19,11 +19,32 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// responsesRelayResponse decodes only the fields used by the relay. The full
+// response, including tool declarations, is forwarded from the original bytes.
+type responsesRelayResponse struct {
+	CreatedAt         dto.IntValue           `json:"created_at"`
+	Status            common.RawMessage      `json:"status"`
+	Error             any                    `json:"error"`
+	IncompleteDetails *dto.IncompleteDetails `json:"incomplete_details"`
+	Model             string                 `json:"model"`
+	Output            []dto.ResponsesOutput  `json:"output"`
+	Usage             *dto.Usage             `json:"usage"`
+}
+
+type responsesRelayStreamEvent struct {
+	Type        string                  `json:"type"`
+	Response    *responsesRelayResponse `json:"response"`
+	Code        string                  `json:"code"`
+	Delta       string                  `json:"delta"`
+	Item        *dto.ResponsesOutput    `json:"item"`
+	OutputIndex *int                    `json:"output_index"`
+}
+
 func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// read response body
-	var responsesResponse dto.OpenAIResponsesResponse
+	var responsesResponse responsesRelayResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -32,7 +53,7 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+	if oaiError := dto.GetOpenAIError(responsesResponse.Error); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
@@ -80,11 +101,29 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
-		var streamResponse dto.ResponsesStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		var event responsesRelayStreamEvent
+		if err := common.UnmarshalJsonStr(data, &event); err != nil {
 			logger.LogError(c, common.LogText("failed to unmarshal stream response: %s", err.Error()))
 			sr.Error(err)
 			return
+		}
+		streamResponse := dto.ResponsesStreamResponse{
+			Type:        event.Type,
+			Code:        event.Code,
+			Delta:       event.Delta,
+			Item:        event.Item,
+			OutputIndex: event.OutputIndex,
+		}
+		if event.Response != nil {
+			streamResponse.Response = &dto.OpenAIResponsesResponse{
+				CreatedAt:         event.Response.CreatedAt,
+				Status:            event.Response.Status,
+				Error:             event.Response.Error,
+				IncompleteDetails: event.Response.IncompleteDetails,
+				Model:             event.Response.Model,
+				Output:            event.Response.Output,
+				Usage:             event.Response.Usage,
+			}
 		}
 		if streamResponse.Response != nil && info.GetChannelType() == constant.ChannelTypeSGLang {
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
