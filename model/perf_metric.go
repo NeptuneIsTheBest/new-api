@@ -115,22 +115,22 @@ func GetPerfMetricsSummaryBucketsAll(startTs int64, endTs int64, groups []string
 	return summaries, err
 }
 
-// GetRecentPerfMetricSuccessBuckets reads the latest nonempty hours within
-// the supplied history window, independently of the summary's reporting window.
-func GetRecentPerfMetricSuccessBuckets(modelName string, startTs int64, endTs int64, groups []string, limit int) ([]PerfMetricSummaryBucket, error) {
-	if modelName == "" || limit <= 0 || (groups != nil && len(groups) == 0) {
+// GetRecentPerfMetricSummaryBuckets reads nonempty hours for the requested models
+// within the history window. Callers select the latest hours after merging hot buckets.
+func GetRecentPerfMetricSummaryBuckets(modelNames []string, startTs int64, endTs int64, groups []string) ([]PerfMetricSummaryBucket, error) {
+	if len(modelNames) == 0 || (groups != nil && len(groups) == 0) {
 		return nil, nil
 	}
 	const hourBucket = "bucket_ts - (bucket_ts % 3600)"
 	query := DB.Model(&PerfMetric{}).
-		Select("model_name, "+hourBucket+" AS bucket_ts, SUM(request_count) AS request_count, SUM(success_count) AS success_count").
-		Where("model_name = ? AND bucket_ts >= ? AND bucket_ts <= ? AND request_count > 0", modelName, startTs, endTs)
+		Select("model_name, "+hourBucket+" AS bucket_ts, SUM(request_count) AS request_count, SUM(success_count) AS success_count, SUM(total_latency_ms) AS total_latency_ms, SUM(output_tokens) AS output_tokens, SUM(generation_ms) AS generation_ms").
+		Where("model_name IN ? AND bucket_ts >= ? AND bucket_ts <= ? AND request_count > 0", modelNames, startTs, endTs)
 	if groups != nil {
 		query = query.Where(commonGroupCol+" IN ?", groups)
 	}
 	var buckets []PerfMetricSummaryBucket
 	err := query.Group("model_name, " + hourBucket).
-		Order("bucket_ts DESC").Limit(limit).Find(&buckets).Error
+		Order("bucket_ts ASC").Find(&buckets).Error
 	return buckets, err
 }
 

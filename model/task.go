@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"gorm.io/gorm"
 )
 
 type TaskStatus string
@@ -363,10 +364,23 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 	return tasks
 }
 
+// unfinishedSyncTasks keeps polling queries eligible for the status index.
+// UNKNOWN and empty statuses preserve legacy tasks; add new pending states here
+// so existence checks, polling batches, and timeout cleanup stay in sync.
+func unfinishedSyncTasks(db *gorm.DB) *gorm.DB {
+	return db.Where("status IN ?", []TaskStatus{
+		TaskStatusNotStart,
+		TaskStatusSubmitted,
+		TaskStatusQueued,
+		TaskStatusInProgress,
+		TaskStatusUnknown,
+		"",
+	}).Where("progress != ?", "100%")
+}
+
 func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 	var tasks []*Task
-	err := DB.Where("progress != ?", "100%").
-		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
+	err := DB.Scopes(unfinishedSyncTasks).
 		Where("submit_time < ?", cutoffUnix).
 		Order("submit_time").
 		Limit(limit).
@@ -379,9 +393,10 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 
 func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
-	var err error
-	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	err := DB.Scopes(unfinishedSyncTasks).
+		Limit(limit).
+		Order("id").
+		Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
@@ -389,15 +404,13 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 }
 
 // HasUnfinishedSyncTasks reports whether at least one async (Suno/video) task is
-// still in progress. It is a cheap existence check (LIMIT 1) used to decide
-// whether the async_task_poll system task needs to run; when no task is pending
-// the scheduler skips creating a row entirely.
+// still in progress. Its explicit status predicate allows an index lookup even
+// when no task is pending. The scheduler only creates an async_task_poll row
+// when this existence check (LIMIT 1) finds a candidate.
 func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
-		Where("progress != ?", "100%").
-		Where("status != ?", TaskStatusFailure).
-		Where("status != ?", TaskStatusSuccess).
+		Scopes(unfinishedSyncTasks).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0

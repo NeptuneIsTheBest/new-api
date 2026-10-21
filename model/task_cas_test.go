@@ -13,7 +13,10 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func TestMain(m *testing.M) {
@@ -101,6 +104,122 @@ func insertTask(t *testing.T, task *Task) {
 	task.CreatedAt = time.Now().Unix()
 	task.UpdatedAt = time.Now().Unix()
 	require.NoError(t, DB.Create(task).Error)
+}
+
+func TestUnfinishedSyncTaskQueriesDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var dialector gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				dialector = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				dialector = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				dialector = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(dialector, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "polling_test_"}})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(1)
+			previousDB := DB
+			DB = db
+			t.Cleanup(func() {
+				DB = previousDB
+				assert.NoError(t, db.Migrator().DropTable(&Task{}))
+				assert.NoError(t, sqlDB.Close())
+			})
+			require.NoError(t, db.AutoMigrate(&Task{}))
+			var version string
+			versionQuery := "SELECT version()"
+			if dialect == "sqlite" {
+				versionQuery = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+
+			const cutoff int64 = 100
+			assert.False(t, HasUnfinishedSyncTasks())
+			assert.Empty(t, GetAllUnFinishSyncTasks(10))
+			assert.Empty(t, GetTimedOutUnfinishedTasks(cutoff, 10))
+
+			for _, tc := range []struct {
+				name     string
+				status   any
+				progress any
+				pending  bool
+			}{
+				{name: "not started", status: TaskStatusNotStart, progress: "0%", pending: true},
+				{name: "submitted", status: TaskStatusSubmitted, progress: "0%", pending: true},
+				{name: "queued", status: TaskStatusQueued, progress: "0%", pending: true},
+				{name: "in progress", status: TaskStatusInProgress, progress: "50%", pending: true},
+				{name: "legacy unknown", status: TaskStatusUnknown, progress: "0%", pending: true},
+				{name: "legacy empty status", status: "", progress: "0%", pending: true},
+				{name: "empty progress", status: TaskStatusQueued, progress: "", pending: true},
+				{name: "success with stale progress", status: TaskStatusSuccess, progress: "50%"},
+				{name: "failure with stale progress", status: TaskStatusFailure, progress: "50%"},
+				{name: "completed progress", status: TaskStatusInProgress, progress: "100%"},
+				{name: "nonstandard status", status: "RETRYING", progress: "0%"},
+				{name: "null status", status: nil, progress: "0%"},
+				{name: "null progress", status: TaskStatusQueued, progress: nil},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					require.NoError(t, db.Where("1 = 1").Delete(&Task{}).Error)
+					require.NoError(t, db.Model(&Task{}).Create(map[string]any{
+						"task_id":     tc.name,
+						"status":      tc.status,
+						"progress":    tc.progress,
+						"submit_time": cutoff - 1,
+					}).Error)
+					assert.Equal(t, tc.pending, HasUnfinishedSyncTasks())
+					for _, tasks := range [][]*Task{GetAllUnFinishSyncTasks(10), GetTimedOutUnfinishedTasks(cutoff, 10)} {
+						if !tc.pending {
+							assert.Empty(t, tasks)
+							continue
+						}
+						require.Len(t, tasks, 1)
+						assert.Equal(t, tc.name, tasks[0].TaskID)
+					}
+				})
+			}
+
+			t.Run("ordering limits and timeout boundary", func(t *testing.T) {
+				require.NoError(t, db.Where("1 = 1").Delete(&Task{}).Error)
+				tasks := []Task{
+					{TaskID: "newest", Status: TaskStatusQueued, Progress: "0%", SubmitTime: cutoff + 1},
+					{TaskID: "older", Status: TaskStatusInProgress, Progress: "50%", SubmitTime: cutoff - 2},
+					{TaskID: "oldest", Status: TaskStatusNotStart, Progress: "0%", SubmitTime: cutoff - 3},
+					{TaskID: "at-cutoff", Status: TaskStatusSubmitted, Progress: "0%", SubmitTime: cutoff},
+					{TaskID: "latest-old", Status: TaskStatusUnknown, Progress: "", SubmitTime: cutoff - 1},
+					{TaskID: "finished", Status: TaskStatusSuccess, Progress: "100%", SubmitTime: cutoff - 4},
+				}
+				require.NoError(t, db.Create(&tasks).Error)
+
+				batch := GetAllUnFinishSyncTasks(2)
+				require.Len(t, batch, 2)
+				assert.Equal(t, []int64{tasks[0].ID, tasks[1].ID}, []int64{batch[0].ID, batch[1].ID})
+
+				timedOut := GetTimedOutUnfinishedTasks(cutoff, 2)
+				require.Len(t, timedOut, 2)
+				assert.Equal(t, []int64{tasks[2].ID, tasks[1].ID}, []int64{timedOut[0].ID, timedOut[1].ID})
+				timedOut = GetTimedOutUnfinishedTasks(cutoff, 10)
+				require.Len(t, timedOut, 3)
+				assert.Equal(t, []int64{tasks[2].ID, tasks[1].ID, tasks[4].ID}, []int64{timedOut[0].ID, timedOut[1].ID, timedOut[2].ID})
+
+				assert.Empty(t, GetAllUnFinishSyncTasks(0))
+				assert.Empty(t, GetTimedOutUnfinishedTasks(cutoff, 0))
+			})
+		})
+	}
 }
 
 func TestGetTaskForProtocolObservationScopesOwnerAndPlatform(t *testing.T) {

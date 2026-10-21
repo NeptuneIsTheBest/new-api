@@ -24,7 +24,7 @@ var hotBuckets sync.Map
 // hiding fields or making response-only privacy hardening changes.
 const seriesSchema = "dbcd0a3c01b55203"
 
-// MaxRecentModels bounds the historical lookups made by one summary request.
+// MaxRecentModels bounds the models fetched by one summary's historical lookup.
 const MaxRecentModels = 50
 const recentSuccessSampleLimit = 24
 const recentSuccessHistoryHours = 7 * 24
@@ -199,8 +199,8 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 	startTs, endTs := queryWindow(now, hours)
 	recentStartTs, _ := queryWindow(now, recentSuccessHistoryHours)
 	allowedGroups := allowedGroupSet(groups)
-	queryStartTs := startTs
 
+	uniqueModels := make([]string, 0, len(recentModels))
 	recentBuckets := make(map[string]map[int64]counters, len(recentModels))
 	for _, name := range recentModels {
 		if name == "" {
@@ -210,20 +210,23 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 			continue
 		}
 		recentBuckets[name] = map[int64]counters{}
-		buckets, err := model.GetRecentPerfMetricSuccessBuckets(name, recentStartTs, endTs, groups, recentSuccessSampleLimit)
-		if err != nil {
-			return SummaryAllResult{}, err
-		}
-		for _, bucket := range buckets {
-			queryStartTs = min(queryStartTs, bucket.BucketTs)
-			mergeModelBucket(recentBuckets, name, bucket.BucketTs, counters{
-				requestCount: bucket.RequestCount,
-				successCount: bucket.SuccessCount,
-			})
-		}
+		uniqueModels = append(uniqueModels, name)
+	}
+	recentRows, err := model.GetRecentPerfMetricSummaryBuckets(uniqueModels, recentStartTs, endTs, groups)
+	if err != nil {
+		return SummaryAllResult{}, err
+	}
+	for _, bucket := range recentRows {
+		mergeModelBucket(recentBuckets, bucket.ModelName, bucket.BucketTs, counters{
+			requestCount:   bucket.RequestCount,
+			successCount:   bucket.SuccessCount,
+			totalLatencyMs: bucket.TotalLatencyMs,
+			outputTokens:   bucket.OutputTokens,
+			generationMs:   bucket.GenerationMs,
+		})
 	}
 
-	rows, err := model.GetPerfMetricsSummaryBucketsAll(queryStartTs, endTs, groups)
+	rows, err := model.GetPerfMetricsSummaryBucketsAll(startTs, endTs, groups)
 	if err != nil {
 		return SummaryAllResult{}, err
 	}
@@ -255,9 +258,10 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 			return true
 		}
 		if _, requested := recentBuckets[k.model]; requested && k.bucketTs >= recentStartTs {
-			mergeModelBucket(recentBuckets, k.model, k.bucketTs, snap)
+			hourTs := k.bucketTs - k.bucketTs%3600
+			mergeModelBucket(recentBuckets, k.model, hourTs, snap)
 		}
-		if k.bucketTs < queryStartTs {
+		if k.bucketTs < startTs {
 			return true
 		}
 		mergeModelBucket(modelBuckets, k.model, k.bucketTs, snap)
@@ -270,21 +274,20 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 		if len(points) == 0 {
 			continue
 		}
-		recentSeries[name] = points[max(0, len(points)-recentSuccessSampleLimit):]
+		points = points[max(0, len(points)-recentSuccessSampleLimit):]
+		recentSeries[name] = points
+		for bucketTs := range buckets {
+			if bucketTs < points[0].Ts {
+				delete(buckets, bucketTs)
+			}
+		}
+		// Replace overlapping reporting buckets so each sample is counted once.
+		modelBuckets[name] = buckets
 	}
 
-	// Requested models are summarized over the same hours as their status samples.
 	totals := map[string]counters{}
 	for name, buckets := range modelBuckets {
-		fromTs := startTs
-		if points, ok := recentSeries[name]; ok {
-			fromTs = points[0].Ts
-		}
-		for bucketTs, value := range buckets {
-			if bucketTs < fromTs {
-				delete(buckets, bucketTs)
-				continue
-			}
+		for _, value := range buckets {
 			mergeModelTotals(totals, name, value)
 		}
 	}

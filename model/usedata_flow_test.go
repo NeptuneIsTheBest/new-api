@@ -1,10 +1,22 @@
 package model
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
@@ -190,4 +202,237 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 60, rows[0].TokenUsed)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+}
+
+func setupQuotaDataCacheTestDB(t *testing.T, dialect string) *gorm.DB {
+	t.Helper()
+	var driver gorm.Dialector
+	switch dialect {
+	case "sqlite":
+		driver = sqlite.Open(":memory:")
+	case "mysql":
+		dsn := os.Getenv("TEST_MYSQL_DSN")
+		if dsn == "" {
+			t.Skip("TEST_MYSQL_DSN is not configured")
+		}
+		driver = mysql.Open(dsn)
+	case "postgres":
+		dsn := os.Getenv("TEST_POSTGRES_DSN")
+		if dsn == "" {
+			t.Skip("TEST_POSTGRES_DSN is not configured")
+		}
+		driver = postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true})
+	default:
+		t.Fatalf("unsupported test database %q", dialect)
+	}
+	db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{
+		TablePrefix: fmt.Sprintf("quota_cache_%d_", time.Now().UnixNano()),
+	}})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	previousDB := DB
+	DB = db
+	CacheQuotaDataLock.Lock()
+	previousCache := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+	t.Cleanup(func() {
+		DB = previousDB
+		CacheQuotaDataLock.Lock()
+		CacheQuotaData = previousCache
+		CacheQuotaDataLock.Unlock()
+		assert.NoError(t, db.Migrator().DropTable(&QuotaData{}))
+		assert.NoError(t, sqlDB.Close())
+	})
+	require.NoError(t, db.AutoMigrate(&QuotaData{}))
+	return db
+}
+
+func TestSaveQuotaDataCacheDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := setupQuotaDataCacheTestDB(t, dialect)
+			var version string
+			versionQuery := "SELECT version()"
+			if dialect == "sqlite" {
+				versionQuery = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			recorder := &migrationSQLRecorder{}
+			DB = db.Session(&gorm.Session{Logger: recorder})
+			params := QuotaDataLogParams{
+				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
+				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+				Quota: 100, TokenUsed: 40,
+			}
+			zeroUsage := params
+			zeroUsage.Quota, zeroUsage.TokenUsed = 0, 0
+			for _, tc := range []struct {
+				name       string
+				params     *QuotaDataLogParams
+				operations []string
+				count      int
+			}{
+				{name: "empty", operations: []string{}},
+				{name: "new bucket", params: &params, operations: []string{"UPDATE", "INSERT"}, count: 1},
+				{name: "existing bucket with zero usage", params: &zeroUsage, operations: []string{"UPDATE"}, count: 2},
+				{name: "already flushed", operations: []string{}, count: 2},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if tc.params != nil {
+						LogQuotaData(*tc.params)
+					}
+					recorder.reset()
+					SaveQuotaDataCache()
+					operations := make([]string, 0, len(recorder.statements))
+					for _, statement := range recorder.statements {
+						operations = append(operations, strings.Fields(statement)[0])
+					}
+					assert.Equal(t, tc.operations, operations)
+					var rows []QuotaData
+					require.NoError(t, db.Find(&rows).Error)
+					if tc.count == 0 {
+						assert.Empty(t, rows)
+						return
+					}
+					require.Len(t, rows, 1)
+					assert.Equal(t, tc.count, rows[0].Count)
+					assert.Equal(t, 100, rows[0].Quota)
+					assert.Equal(t, 40, rows[0].TokenUsed)
+					assert.Equal(t, int64(3600), rows[0].CreatedAt)
+				})
+			}
+		})
+	}
+}
+
+func TestSaveQuotaDataCacheAcceptsRecordsDuringFlush(t *testing.T) {
+	db := setupQuotaDataCacheTestDB(t, "sqlite")
+	params := QuotaDataLogParams{
+		UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
+		UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+		Quota: 100, TokenUsed: 40,
+	}
+	LogQuotaData(params)
+	entered, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	var once sync.Once
+	require.NoError(t, db.Callback().Update().Before("gorm:begin_transaction").Register("quota_cache_pause", func(tx *gorm.DB) {
+		once.Do(func() {
+			close(entered)
+			<-resume
+		})
+	}))
+	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		release()
+		workers.Wait()
+		assert.NoError(t, db.Callback().Update().Remove("quota_cache_pause"))
+	})
+	workers.Go(SaveQuotaDataCache)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush did not reach the database callback")
+	}
+	recorded := make(chan struct{})
+	workers.Go(func() {
+		LogQuotaData(params)
+		close(recorded)
+	})
+	select {
+	case <-recorded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recording statistics blocked on the paused database write")
+	}
+	workers.Go(SaveQuotaDataCache)
+	release()
+	workers.Wait()
+	var rows []QuotaData
+	require.NoError(t, db.Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 2, rows[0].Count)
+	assert.Equal(t, 200, rows[0].Quota)
+	assert.Equal(t, 80, rows[0].TokenUsed)
+}
+
+func TestSaveQuotaDataCacheRetriesOnlyFailedBuckets(t *testing.T) {
+	for _, operation := range []string{"update", "insert"} {
+		t.Run(operation, func(t *testing.T) {
+			db := setupQuotaDataCacheTestDB(t, "sqlite")
+			params := QuotaDataLogParams{
+				UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3661,
+				UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+				Quota: 100, TokenUsed: 40,
+			}
+			initialCount, initialQuota, initialTokens := 0, 0, 0
+			if operation == "update" {
+				initialCount, initialQuota, initialTokens = 1, 10, 4
+				require.NoError(t, db.Create(&QuotaData{
+					UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3600,
+					UseGroup: "vip", TokenID: 11, ChannelID: 1, NodeName: "node-a",
+					Count: initialCount, Quota: initialQuota, TokenUsed: initialTokens,
+				}).Error)
+			}
+			LogQuotaData(params)
+			success := params
+			success.UserID, success.Username = 2, "bob"
+			LogQuotaData(success)
+			newUsage := params
+			newUsage.Quota, newUsage.TokenUsed = 50, 20
+			writeErr := errors.New("forced dashboard write failure")
+			callbacks, after := db.Callback().Update(), "gorm:update"
+			if operation == "insert" {
+				callbacks, after = db.Callback().Create(), "gorm:create"
+			}
+			require.NoError(t, callbacks.After(after).Register("quota_cache_failure", func(tx *gorm.DB) {
+				if tx.Error != nil || tx.RowsAffected == 0 {
+					return
+				}
+				if operation == "insert" {
+					row := tx.Statement.Dest.(*QuotaData)
+					if row.UserID != params.UserID {
+						return
+					}
+					assert.NotZero(t, row.Id, "the rolled-back insert assigned a primary key")
+				}
+				LogQuotaData(newUsage)
+				tx.AddError(writeErr)
+			}))
+			removeFailure := sync.OnceFunc(func() {
+				assert.NoError(t, callbacks.Remove("quota_cache_failure"))
+			})
+			t.Cleanup(removeFailure)
+			SaveQuotaDataCache()
+			removeFailure()
+			var rows []QuotaData
+			require.NoError(t, db.Order("user_id").Find(&rows).Error)
+			if operation == "update" {
+				require.Len(t, rows, 2)
+				assert.Equal(t, initialCount, rows[0].Count)
+				assert.Equal(t, initialQuota, rows[0].Quota)
+				assert.Equal(t, initialTokens, rows[0].TokenUsed)
+			} else {
+				require.Len(t, rows, 1)
+				assert.Equal(t, success.UserID, rows[0].UserID)
+			}
+			// Occupy any primary key released by the failed insert before retrying it.
+			require.NoError(t, db.Create(&QuotaData{UserID: 3, CreatedAt: 3600, Count: 1}).Error)
+			SaveQuotaDataCache()
+			SaveQuotaDataCache()
+			rows = nil
+			require.NoError(t, db.Order("user_id").Find(&rows).Error)
+			require.Len(t, rows, 3)
+			assert.Equal(t, initialCount+2, rows[0].Count)
+			assert.Equal(t, initialQuota+150, rows[0].Quota)
+			assert.Equal(t, initialTokens+60, rows[0].TokenUsed)
+			assert.Equal(t, 1, rows[1].Count, "successfully saved buckets must not be retried")
+			assert.Equal(t, success.Quota, rows[1].Quota)
+			assert.Equal(t, success.TokenUsed, rows[1].TokenUsed)
+			assert.Equal(t, 1, rows[2].Count)
+		})
+	}
 }

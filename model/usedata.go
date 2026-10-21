@@ -50,6 +50,7 @@ func UpdateQuotaData() {
 
 var CacheQuotaData = make(map[string]*QuotaData)
 var CacheQuotaDataLock = sync.Mutex{}
+var quotaDataFlushLock sync.Mutex
 
 func logQuotaDataCache(quotaData *QuotaData) {
 	key := fmt.Sprintf("%d\x00%s\x00%s\x00%d\x00%s\x00%d\x00%d\x00%s",
@@ -98,43 +99,57 @@ func LogQuotaData(params QuotaDataLogParams) {
 }
 
 func SaveQuotaDataCache() {
-	CacheQuotaDataLock.Lock()
-	defer CacheQuotaDataLock.Unlock()
-	size := len(CacheQuotaData)
-	// 如果缓存中有数据，就保存到数据库中
-	// 1. 先查询数据库中是否有数据
-	// 2. 如果有数据，就更新数据
-	// 3. 如果没有数据，就插入数据
-	for _, quotaData := range CacheQuotaData {
-		quotaDataDB := &QuotaData{}
-		DB.Table("quota_data").
-			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-				quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-			First(quotaDataDB)
-		if quotaDataDB.Id > 0 {
-			//quotaDataDB.Count += quotaData.Count
-			//quotaDataDB.Quota += quotaData.Quota
-			//DB.Table("quota_data").Save(quotaDataDB)
-			increaseQuotaData(quotaData)
-		} else {
-			DB.Table("quota_data").Create(quotaData)
-		}
-	}
-	CacheQuotaData = make(map[string]*QuotaData)
-	common.SysLog(common.LogText("saved dashboard data, %d records", size))
-}
+	// Shutdown must wait for any in-flight flush, even when the active cache is empty.
+	quotaDataFlushLock.Lock()
+	defer quotaDataFlushLock.Unlock()
 
-func increaseQuotaData(quotaData *QuotaData) {
-	err := DB.Table("quota_data").
-		Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-			quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-		Updates(map[string]any{
-			"count":      gorm.Expr("count + ?", quotaData.Count),
-			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
-			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
-		}).Error
-	if err != nil {
-		common.SysLog(common.LogText("increaseQuotaData error: %s", err))
+	CacheQuotaDataLock.Lock()
+	if len(CacheQuotaData) == 0 {
+		CacheQuotaDataLock.Unlock()
+		return
+	}
+	pending := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+
+	saved := 0
+	var lastErr error
+	for _, quotaData := range pending {
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&QuotaData{}).
+				Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
+					quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
+				Updates(map[string]any{
+					"count":      gorm.Expr("count + ?", quotaData.Count),
+					"quota":      gorm.Expr("quota + ?", quotaData.Quota),
+					"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected > 0 {
+				return nil
+			}
+
+			// Keep GORM's generated primary key out of the retry data.
+			row := *quotaData
+			row.Id = 0
+			return tx.Create(&row).Error
+		})
+		if err != nil {
+			CacheQuotaDataLock.Lock()
+			logQuotaDataCache(quotaData)
+			CacheQuotaDataLock.Unlock()
+			lastErr = err
+			continue
+		}
+		saved++
+	}
+	if saved > 0 {
+		common.SysLog(common.LogText("saved dashboard data, %d records", saved))
+	}
+	if failed := len(pending) - saved; failed > 0 {
+		common.SysError(common.LogText("failed to save dashboard data, %d records retained for retry, last error: %s", failed, sanitizeDBError(lastErr)))
 	}
 }
 
