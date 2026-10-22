@@ -32,7 +32,7 @@ GPT 用 `Count` 时和 tiktoken 基本一致。有两处已知差异：
 
 ## 安装
 
-TokenKit 要求 Go 1.26 或更高版本。
+TokenKit 要求 Go 1.27.3 或更高版本。
 
 ```bash
 go get github.com/QuantumNous/new-api/tokenkit@latest

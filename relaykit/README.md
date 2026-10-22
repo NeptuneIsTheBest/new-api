@@ -49,7 +49,7 @@ JSON 编解码默认用 `encoding/json`，宿主可以在启动时用 `kitutil.S
 
 ## 安装
 
-RelayKit 要求 Go 1.25.1 或更高版本。tag 的形式是 `relaykit/vX.Y.Z`，`@latest` 解析到最新的一个。
+RelayKit 要求 Go 1.27.3 或更高版本。tag 的形式是 `relaykit/vX.Y.Z`，`@latest` 解析到最新的一个。
 
 ```bash
 go get github.com/QuantumNous/new-api/relaykit@latest
