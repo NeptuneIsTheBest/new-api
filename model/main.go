@@ -233,10 +233,12 @@ func InitDB() (err error) {
 }
 
 func InitLogDB() (err error) {
+	mysqlLogStatsDB.Store(nil)
 	if os.Getenv("LOG_SQL_DSN") == "" {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
+		initMySQLLogStats()
 		if common.IsMasterNode {
 			return MigrateAuditLogs()
 		}
@@ -264,6 +266,7 @@ func InitLogDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
+		initMySQLLogStats()
 		if !common.IsMasterNode {
 			return nil
 		}

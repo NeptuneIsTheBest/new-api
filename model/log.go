@@ -766,8 +766,23 @@ func SumUsedQuota(ctx context.Context, userId int, filter LogFilter) (stat Stat,
 	stat.Rpm = rateStat.Rpm
 	stat.Tpm = rateStat.Tpm
 
-	// Parse metadata in Go so historical JSON and all log database dialects use
-	// the same token semantics, without loading the matching logs into memory.
+	if common.UsingLogDatabase(common.DatabaseTypeMySQL) && mysqlLogStatsDB.Load() == LOG_DB {
+		totals, err := sumMySQLLogTokens(tx)
+		if err != nil {
+			common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+			return stat, common.NewMessage("Failed to query statistics")
+		}
+		if !totals.NeedsFallback {
+			stat.TotalTokens = totals.TotalTokens
+			if totals.InputTotal > 0 {
+				stat.CacheHitRate = min(float64(totals.CacheTotal)/float64(totals.InputTotal)*100, 100)
+			}
+			return stat, nil
+		}
+	}
+
+	// Preserve Go's historical JSON semantics for ambiguous metadata and log
+	// databases without the MySQL aggregation capability. Stream the rows.
 	rows, err := tx.Select("prompt_tokens, completion_tokens, other").Rows()
 	if err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
