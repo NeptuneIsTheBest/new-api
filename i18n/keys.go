@@ -113,3 +113,13 @@ const (
 	MsgChannelUpstreamUpdateFailedChannels  = "channel.upstream_update_failed_channels"
 	MsgChannelUpstreamUpdateMoreOmitted     = "channel.upstream_update_more_omitted"
 )
+
+// Responses WebSocket protocol validation.
+const (
+	MsgResponsesWSInvalidStreamID           = "responses_ws.invalid_stream_id"
+	MsgResponsesWSStreamLimit               = "responses_ws.stream_limit_reached"
+	MsgResponsesWSInvalidSteer              = "responses_ws.invalid_steer"
+	MsgResponsesWSSteerContinuationRequired = "responses_ws.steer_continuation_required"
+	MsgResponsesWSSteerUnavailable          = "responses_ws.steer_unavailable"
+	MsgResponsesWSSteerLimit                = "responses_ws.steer_limit_reached"
+)

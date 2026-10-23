@@ -30,13 +30,15 @@ import (
 type BillingSession struct {
 	relayInfo        *relaycommon.RelayInfo
 	funding          FundingSource
-	preConsumedQuota int    // 实际预扣额度（信任用户可能为 0）
-	tokenConsumed    int    // 令牌额度实际扣减量
-	extraReserved    int    // 发送前补充预扣的额度（订阅退款时需要单独回滚）
-	trusted          bool   // 是否命中信任额度旁路
-	fundingSettled   bool   // funding.Settle 已成功，资金来源已提交
-	settled          bool   // Settle 全部完成（资金 + 令牌）
-	refunded         bool   // Refund 已调用
+	preConsumedQuota int  // 实际预扣额度（信任用户可能为 0）
+	tokenConsumed    int  // 令牌额度实际扣减量
+	extraReserved    int  // 发送前补充预扣的额度（订阅退款时需要单独回滚）
+	trusted          bool // 是否命中信任额度旁路
+	fundingSettled   bool // funding.Settle 已成功，资金来源已提交
+	settled          bool // Settle 全部完成（资金 + 令牌）
+	refunded         bool // Refund 已调用
+	refundDone       chan struct{}
+	refundErr        error
 	lang             string // 请求声明的语言，为空表示未声明
 	mu               sync.Mutex
 }
@@ -47,7 +49,7 @@ type BillingSession struct {
 func (s *BillingSession) Settle(actualQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.settled {
+	if s.settled || s.refunded {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
@@ -92,6 +94,7 @@ func (s *BillingSession) Refund(c *gin.Context) {
 		return
 	}
 	s.refunded = true
+	s.refundDone = make(chan struct{})
 	s.mu.Unlock()
 
 	logger.LogInfo(c, common.LogText("user %d request failed, refunding the pre-consumed quota (token_quota=%s, funding=%s)",
@@ -110,22 +113,45 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	funding := s.funding
 
 	gopool.Go(func() {
+		var refundErr error
 		// 1) 退还资金来源
 		if err := funding.Refund(); err != nil {
+			refundErr = errors.Join(refundErr, err)
 			common.SysLog(common.LogText("error refunding billing source: %s", err.Error()))
 		}
 		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
 			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
+				refundErr = errors.Join(refundErr, err)
 				common.SysLog(common.LogText("error refunding subscription extra reserved quota: %s", err.Error()))
 			}
 		}
 		// 2) 退还令牌额度
 		if tokenConsumed > 0 && !isPlayground {
 			if err := model.IncreaseTokenQuota(tokenId, tokenKey, tokenConsumed); err != nil {
+				refundErr = errors.Join(refundErr, err)
 				common.SysLog(common.LogText("error refunding token quota: %s", err.Error()))
 			}
 		}
+		s.mu.Lock()
+		s.refundErr = refundErr
+		close(s.refundDone)
+		s.mu.Unlock()
 	})
+}
+
+// RefundAndWait releases an unused reservation before another request can
+// spend it. It joins the same idempotent refund used by asynchronous callers.
+func (s *BillingSession) RefundAndWait(c *gin.Context) error {
+	s.Refund(c)
+	s.mu.Lock()
+	done := s.refundDone
+	s.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refundErr
 }
 
 // NeedsRefund 返回是否存在需要退还的预扣状态。

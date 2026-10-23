@@ -90,3 +90,10 @@ channel.upstream_update_added_models: "新增模型示例（展示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "删除模型示例（展示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
+
+responses_ws.invalid_stream_id: "stream_id 必须包含 1–256 个 ASCII 字母、数字、下划线、连字符或句点。"
+responses_ws.stream_limit_reached: "此 WebSocket 连接已达到 32 个不同流标识的上限。请复用已有的 stream_id 或建立新连接。"
+responses_ws.invalid_steer: "response.steer 仅接受 type、previous_response_id 和 input，输入须为包含文本、图片或文件的用户消息。"
+responses_ws.steer_unavailable: "此 WebSocket 连接上的目标响应当前不接受追加输入。"
+responses_ws.steer_limit_reached: "此 WebSocket 连接上待处理的追加输入过多。"
+responses_ws.steer_continuation_required: "请先使用待续接响应的 previous_response_id 继续该响应，再在此流上发起其他响应。"

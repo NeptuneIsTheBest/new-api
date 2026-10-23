@@ -89,3 +89,10 @@ channel.upstream_update_added_models: "Added model examples (showing {{.Shown}}/
 channel.upstream_update_removed_models: "Removed model examples (showing {{.Shown}}/{{.Total}}): {{.Models}}"
 channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}/{{.Total}}): {{.Ids}}"
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
+
+responses_ws.invalid_stream_id: "The stream_id field must contain 1-256 ASCII letters, digits, underscores, hyphens, or periods."
+responses_ws.stream_limit_reached: "This WebSocket connection has reached its maximum of 32 distinct stream IDs. Reuse an existing stream_id or open a new connection."
+responses_ws.invalid_steer: "response.steer accepts only type, previous_response_id, and input containing user messages with text, images, or files."
+responses_ws.steer_unavailable: "The target response is not accepting steering on this WebSocket connection."
+responses_ws.steer_limit_reached: "Too much steering input is pending on this WebSocket connection."
+responses_ws.steer_continuation_required: "Continue the pending response with its previous_response_id before starting another response on this stream."
