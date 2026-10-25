@@ -169,6 +169,9 @@ type responsesWSSession struct {
 	completedResponses map[string]bool
 	completedOrder     []string
 
+	// clientWriteBudget is guarded by clientWriteMu.
+	clientWriteBudget helper.StreamWriteBudget
+
 	// The first worker publishes these immutable connection bindings before
 	// connected becomes true and other request workers can start.
 	lockedModel     string
@@ -1170,7 +1173,7 @@ func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
 func (s *responsesWSSession) writeClient(kind int, message []byte) error {
 	s.clientWriteMu.Lock()
 	defer s.clientWriteMu.Unlock()
-	if err := s.client.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
+	if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(message))); err != nil {
 		return err
 	}
 	return s.client.WriteMessage(kind, message)
