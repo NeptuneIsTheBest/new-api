@@ -1,9 +1,12 @@
 package common
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,12 +62,16 @@ func CreateDiskCacheFile(cacheType DiskCacheType) (string, *os.File, error) {
 // WriteDiskCacheFile 写入数据到磁盘缓存文件
 // 返回文件路径
 func WriteDiskCacheFile(cacheType DiskCacheType, data []byte) (string, error) {
+	return writeDiskCacheFile(cacheType, bytes.NewReader(data))
+}
+
+func writeDiskCacheFile(cacheType DiskCacheType, data io.Reader) (string, error) {
 	filePath, file, err := CreateDiskCacheFile(cacheType)
 	if err != nil {
 		return "", err
 	}
 
-	_, err = file.Write(data)
+	_, err = io.Copy(file, data)
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
@@ -81,7 +88,7 @@ func WriteDiskCacheFile(cacheType DiskCacheType, data []byte) (string, error) {
 
 // WriteDiskCacheFileString 写入字符串到磁盘缓存文件
 func WriteDiskCacheFileString(cacheType DiskCacheType, data string) (string, error) {
-	return WriteDiskCacheFile(cacheType, []byte(data))
+	return writeDiskCacheFile(cacheType, strings.NewReader(data))
 }
 
 // ReadDiskCacheFile 读取磁盘缓存文件
@@ -91,11 +98,21 @@ func ReadDiskCacheFile(filePath string) ([]byte, error) {
 
 // ReadDiskCacheFileString 读取磁盘缓存文件为字符串
 func ReadDiskCacheFileString(filePath string) (string, error) {
-	data, err := os.ReadFile(filePath)
+	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	var data strings.Builder
+	data.Grow(int(info.Size()))
+	if _, err := io.Copy(&data, file); err != nil {
+		return "", err
+	}
+	return data.String(), nil
 }
 
 // RemoveDiskCacheFile 删除磁盘缓存文件

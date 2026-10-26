@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestModelJSONRoutingPreservesValidationAndReplay(t *testing.T) {
+	previous := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+	for _, disk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+			for _, tc := range []struct{ name, body, model, group, wantError string }{
+				{name: "large field before routing fields", body: `{"input":"` + strings.Repeat("a", 1<<20) + `","mo\u0064el":"m","group":"g"}`, model: "m", group: "g"},
+				{name: "nested and duplicate group", body: `{"nested":[{"model":"nested"}],"model":"m","group":"first","group":"last"}`, model: "m", group: "first"},
+				{name: "null fields", body: `{"model":null,"group":null}`},
+				{name: "missing fields", body: `{"Model":"case sensitive"}`},
+				{name: "duplicate escaped model", body: `{"model":"m","mo\u0064el":"m"}`, wantError: "model must be provided once"},
+				{name: "duplicate before type error", body: `{"model":1,"model":"m"}`, wantError: "model must be provided once"},
+				{name: "model type", body: `{"model":[]}`, wantError: "field model must be a string"},
+				{name: "group type", body: `{"group":true}`, wantError: "field group must be a string"},
+				{name: "invalid after routing fields", body: `{"model":"m","ignored":[1,]}`, wantError: "invalid JSON request body"},
+				{name: "trailing data", body: `{"model":"m"}null`, wantError: "invalid JSON request body"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+					c.Request.Header.Set("Content-Type", "application/json")
+					defer common.CleanupBodyStorage(c)
+					result, err := getModelFromJSONBody(c)
+					if tc.wantError != "" {
+						require.EqualError(t, err, tc.wantError)
+						return
+					}
+					require.NoError(t, err)
+					assert.Equal(t, &ModelRequest{Model: tc.model, Group: tc.group}, result)
+					body, err := io.ReadAll(c.Request.Body)
+					require.NoError(t, err)
+					assert.Equal(t, tc.body, string(body))
+					repeated, err := getModelFromJSONBody(c)
+					require.NoError(t, err)
+					assert.Equal(t, result, repeated)
+				})
+			}
+		})
+	}
+}
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
 	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin}

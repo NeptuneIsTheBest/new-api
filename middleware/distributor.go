@@ -23,7 +23,6 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 type ModelRequest struct {
@@ -261,25 +260,23 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	requestBody, err := storage.Bytes()
+	reader, err := storage.NewReader()
 	if err != nil {
 		return nil, err
 	}
-	if !gjson.ValidBytes(requestBody) {
-		return nil, errors.New("invalid JSON request body")
+	defer reader.Close()
+	fields, err := common.ReadJSONTopLevelStrings(reader, "model", "group")
+	if err != nil {
+		return nil, err
 	}
-	if countTopLevelJSONKey(requestBody, "model") > 1 {
+	if fields["model"].Count > 1 {
 		return nil, errors.New("model must be provided once")
 	}
-
-	values := gjson.GetManyBytes(requestBody, "model", "group")
-	model, err := getJSONStringValue(values[0], "model")
-	if err != nil {
-		return nil, err
-	}
-	group, err := getJSONStringValue(values[1], "group")
-	if err != nil {
-		return nil, err
+	for _, name := range []string{"model", "group"} {
+		field := fields[name]
+		if field.Count > 0 && !field.IsNull && !field.IsString {
+			return nil, fmt.Errorf("field %s must be a string", name)
+		}
 	}
 
 	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
@@ -288,77 +285,9 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	c.Request.Body = io.NopCloser(storage)
 
 	return &ModelRequest{
-		Model: model,
-		Group: group,
+		Model: fields["model"].Value,
+		Group: fields["group"].Value,
 	}, nil
-}
-
-func countTopLevelJSONKey(data []byte, target string) int {
-	depth := 0
-	inString := false
-	escaped := false
-	stringStart := 0
-	expectingKey := false
-	count := 0
-	for index, current := range data {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if current == '\\' {
-				escaped = true
-				continue
-			}
-			if current != '"' {
-				continue
-			}
-			inString = false
-			if depth == 1 && expectingKey {
-				key := string(data[stringStart:index])
-				var decodedKey string
-				if common.Unmarshal(data[stringStart-1:index+1], &decodedKey) == nil {
-					key = decodedKey
-				}
-				cursor := index + 1
-				for cursor < len(data) && (data[cursor] == ' ' || data[cursor] == '\t' || data[cursor] == '\r' || data[cursor] == '\n') {
-					cursor++
-				}
-				if cursor < len(data) && data[cursor] == ':' && key == target {
-					count++
-				}
-				expectingKey = false
-			}
-			continue
-		}
-		switch current {
-		case '"':
-			inString = true
-			stringStart = index + 1
-		case '{':
-			depth++
-			if depth == 1 {
-				expectingKey = true
-			}
-		case '}':
-			depth--
-		case ',':
-			if depth == 1 {
-				expectingKey = true
-			}
-		}
-	}
-	return count
-}
-
-func getJSONStringValue(result gjson.Result, field string) (string, error) {
-	if !result.Exists() || result.Type == gjson.Null {
-		return "", nil
-	}
-	if result.Type != gjson.String {
-		return "", fmt.Errorf("field %s must be a string", field)
-	}
-	return result.String(), nil
 }
 
 func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {

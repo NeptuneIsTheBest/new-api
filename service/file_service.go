@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
@@ -19,7 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/image/webp"
+	_ "golang.org/x/image/webp"
 )
 
 // FileService 统一的文件处理服务
@@ -155,94 +156,57 @@ func CleanupFileSources(c *gin.Context) {
 
 // loadFromURL 从 URL 加载文件
 func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFileData, error) {
-	// 下载文件
-	var maxFileSize = constant.MaxFileDownloadMB * 1024 * 1024
-
-	if common.DebugEnabled {
-		logger.LogDebug(c, "loadFromURL: initiating download")
-	}
 	resp, err := DoDownloadRequest(url, reason...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to download file, status code: %d", resp.StatusCode)
 	}
+	return cacheDownloadedFile(c, resp, url)
+}
 
-	// 读取文件内容（限制大小）
-	if common.DebugEnabled {
-		logger.LogDebug(c, "loadFromURL: reading response body")
-	}
-	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxFileSize+1)))
-	if err != nil {
+// cacheDownloadedFile limits the original bytes while encoding directly into
+// the cache. Response length is only an allocation hint, never a size check.
+func cacheDownloadedFile(c *gin.Context, resp *http.Response, url string) (*types.CachedFileData, error) {
+	maxBytes := int64(constant.MaxFileDownloadMB) << 20
+	reader := bufio.NewReader(io.LimitReader(resp.Body, maxBytes+1))
+	prefix, err := reader.Peek(512)
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to read file content: %w", err)
 	}
-	if len(fileBytes) > maxFileSize {
+	mimeType := smartDetectMimeType(resp, url, prefix)
+	writer := fileCacheWriter{context: c}
+	if resp.ContentLength > 0 {
+		writer.expectedSize = int64(base64.StdEncoding.EncodedLen(int(min(resp.ContentLength, maxBytes))))
+	}
+	defer writer.abort()
+	encoder := base64.NewEncoder(base64.StdEncoding, &writer)
+	size, err := io.Copy(encoder, reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cache file content: %w", err)
+	}
+	if size > maxBytes {
 		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
 	}
-
-	// 转换为 base64
-	base64Data := base64.StdEncoding.EncodeToString(fileBytes)
-
-	// 智能获取 MIME 类型
-	mimeType := smartDetectMimeType(resp, url, fileBytes)
-
-	// 判断是否使用磁盘缓存
-	base64Size := int64(len(base64Data))
-	var cachedData *types.CachedFileData
-
-	if shouldUseDiskCache(base64Size) {
-		// 使用磁盘缓存
-		diskPath, err := writeToDiskCache(base64Data)
-		if err != nil {
-			// 磁盘缓存失败，回退到内存
-			logger.LogWarn(c, common.LogText("Failed to write to disk cache, falling back to memory: %v", err))
-			cachedData = types.NewMemoryCachedData(base64Data, mimeType, int64(len(fileBytes)))
-		} else {
-			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(fileBytes)))
-			cachedData.DiskSize = base64Size
-			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
-			}
-			common.IncrementDiskFiles(base64Size)
-			if common.DebugEnabled {
-				logger.LogDebug(c, "File cached to disk: %s, size: %d bytes", diskPath, base64Size)
-			}
-		}
-	} else {
-		// 使用内存缓存
-		cachedData = types.NewMemoryCachedData(base64Data, mimeType, int64(len(fileBytes)))
+	if err := encoder.Close(); err != nil {
+		return nil, fmt.Errorf("failed to encode file content: %w", err)
 	}
-
-	// 如果是图片，尝试获取图片配置
-	if strings.HasPrefix(mimeType, "image/") {
-		if common.DebugEnabled {
-			logger.LogDebug(c, "loadFromURL: decoding image config")
-		}
-		config, format, err := decodeImageConfig(fileBytes)
-		if err == nil {
+	cachedData, err := writer.finish(mimeType, size)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(mimeType, "image/") || mimeType == "application/octet-stream" || mimeType == "" {
+		if config, format, err := readCachedImageConfig(cachedData); err == nil {
 			cachedData.ImageConfig = &config
 			cachedData.ImageFormat = format
-			// 如果通过图片解码获取了更准确的格式，更新 MIME 类型
 			if mimeType == "application/octet-stream" || mimeType == "" {
 				cachedData.MimeType = "image/" + format
 			}
 		}
 	}
-
 	return cachedData, nil
-}
-
-// shouldUseDiskCache 判断是否应该使用磁盘缓存
-func shouldUseDiskCache(dataSize int64) bool {
-	return common.ShouldUseDiskCache(dataSize)
-}
-
-// writeToDiskCache 将数据写入磁盘缓存
-func writeToDiskCache(base64Data string) (string, error) {
-	return common.WriteDiskCacheFileString(common.DiskCacheTypeFile, base64Data)
 }
 
 // smartDetectMimeType 智能检测 MIME 类型
@@ -304,13 +268,6 @@ func smartDetectMimeType(resp *http.Response, url string, fileBytes []byte) stri
 		}
 	}
 
-	// 5. 尝试作为图片解码获取格式
-	if len(fileBytes) > 0 {
-		if _, format, err := decodeImageConfig(fileBytes); err == nil && format != "" {
-			return "image/" + strings.ToLower(format)
-		}
-	}
-
 	// 最终回退
 	return "application/octet-stream"
 }
@@ -345,33 +302,33 @@ func loadFromBase64(base64String string, providedMimeType string) (*types.Cached
 		mimeType = providedMimeType
 	}
 
-	decodedData, err := base64.StdEncoding.DecodeString(cleanBase64)
+	cachedData := types.NewMemoryCachedData(cleanBase64, mimeType, 0)
+	decoded, err := cachedData.OpenDecodedReader()
+	if err != nil {
+		return nil, err
+	}
+	size, err := io.Copy(io.Discard, decoded)
+	_ = decoded.Close()
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
-
 	base64Size := int64(len(cleanBase64))
-	var cachedData *types.CachedFileData
-
-	if shouldUseDiskCache(base64Size) {
-		diskPath, err := writeToDiskCache(cleanBase64)
-		if err != nil {
-			cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
-		} else {
-			cachedData = types.NewDiskCachedData(diskPath, mimeType, int64(len(decodedData)))
-			cachedData.DiskSize = base64Size
-			cachedData.OnClose = func(size int64) {
-				common.DecrementDiskFiles(size)
-			}
-			common.IncrementDiskFiles(base64Size)
+	cachedData.Size = size
+	if common.ShouldUseDiskCache(base64Size) {
+		writer := fileCacheWriter{expectedSize: base64Size}
+		defer writer.abort()
+		// Hide strings.Reader.WriteTo: its fallback for a Writer without
+		// WriteString would convert the entire string to []byte at once.
+		if _, err := io.Copy(&writer, struct{ io.Reader }{strings.NewReader(cleanBase64)}); err != nil {
+			return nil, fmt.Errorf("failed to cache base64 data: %w", err)
 		}
-	} else {
-		cachedData = types.NewMemoryCachedData(cleanBase64, mimeType, int64(len(decodedData)))
+		cachedData, err = writer.finish(mimeType, size)
+		if err != nil {
+			return nil, err
+		}
 	}
-
 	if mimeType == "" || strings.HasPrefix(mimeType, "image/") {
-		config, format, err := decodeImageConfig(decodedData)
-		if err == nil {
+		if config, format, err := readCachedImageConfig(cachedData); err == nil {
 			cachedData.ImageConfig = &config
 			cachedData.ImageFormat = format
 			if mimeType == "" {
@@ -394,16 +351,7 @@ func GetImageConfig(c *gin.Context, source types.FileSource) (image.Config, stri
 		return *cachedData.ImageConfig, cachedData.ImageFormat, nil
 	}
 
-	base64Str, err := cachedData.GetBase64Data()
-	if err != nil {
-		return image.Config{}, "", fmt.Errorf("failed to get base64 data: %w", err)
-	}
-	decodedData, err := base64.StdEncoding.DecodeString(base64Str)
-	if err != nil {
-		return image.Config{}, "", fmt.Errorf("failed to decode base64 for image config: %w", err)
-	}
-
-	config, format, err := decodeImageConfig(decodedData)
+	config, format, err := readCachedImageConfig(cachedData)
 	if err != nil {
 		return image.Config{}, "", err
 	}
@@ -461,34 +409,22 @@ func DetectFileType(mimeType string) types.FileType {
 	return types.FileTypeFile
 }
 
-// decodeImageConfig 从字节数据解码图片配置
-func decodeImageConfig(data []byte) (image.Config, string, error) {
-	reader := bytes.NewReader(data)
-
-	config, format, err := image.DecodeConfig(reader)
-	if err == nil {
-		return config, format, nil
+// readCachedImageConfig reads only the image headers needed by the decoder.
+func readCachedImageConfig(data *types.CachedFileData) (image.Config, string, error) {
+	reader, err := data.OpenDecodedReader()
+	if err != nil {
+		return image.Config{}, "", err
 	}
-
-	reader.Seek(0, io.SeekStart)
-	config, err = webp.DecodeConfig(reader)
-	if err == nil {
-		return config, "webp", nil
-	}
-
-	// Try HEIF/HEIC: parse ISOBMFF ispe box for dimensions
-	if heifMime := detectHEIF(data); heifMime != "" {
-		formatName := "heif"
-		if heifMime == "image/heic" {
-			formatName = "heic"
-		}
-		if w, h, ok := parseHEIFDimensions(data); ok {
-			return image.Config{Width: w, Height: h}, formatName, nil
+	defer reader.Close()
+	buffered := bufio.NewReader(reader)
+	prefix, _ := buffered.Peek(12)
+	if heifMime := detectHEIF(prefix); heifMime != "" {
+		if w, h, ok := readHEIFDimensions(buffered, data.Size, 0); ok {
+			return image.Config{Width: w, Height: h}, strings.TrimPrefix(heifMime, "image/"), nil
 		}
 		return image.Config{}, "", fmt.Errorf("failed to decode HEIF/HEIC image dimensions")
 	}
-
-	return image.Config{}, "", fmt.Errorf("failed to decode image config: unsupported format")
+	return image.DecodeConfig(buffered)
 }
 
 // detectHEIF checks ISOBMFF magic bytes to detect HEIC/HEIF files.
@@ -515,75 +451,65 @@ func detectHEIF(data []byte) string {
 // parseHEIFDimensions parses ISOBMFF box tree to find the ispe box
 // and extract image width/height. Returns (width, height, ok).
 func parseHEIFDimensions(data []byte) (int, int, bool) {
-	size := len(data)
-	if size < 12 {
-		return 0, 0, false
-	}
-
-	// Walk top-level boxes to find "meta"
-	offset := 0
-	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		boxType := string(data[offset+4 : offset+8])
-		headerLen := 8
-
-		if boxSize == 1 {
-			// 64-bit extended size
-			if offset+16 > size {
-				break
-			}
-			boxSize = int(binary.BigEndian.Uint64(data[offset+8 : offset+16]))
-			headerLen = 16
-		} else if boxSize == 0 {
-			// box extends to end of data
-			boxSize = size - offset
-		}
-
-		if boxSize < headerLen || offset+boxSize > size {
-			break
-		}
-
-		if boxType == "meta" {
-			// meta is a full box: 4 bytes version/flags after header
-			metaData := data[offset+headerLen : offset+boxSize]
-			if len(metaData) < 4 {
-				return 0, 0, false
-			}
-			return findISPE(metaData[4:])
-		}
-		offset += boxSize
-	}
-	return 0, 0, false
+	return readHEIFDimensions(bytes.NewReader(data), int64(len(data)), 0)
 }
 
-// findISPE recursively searches for the ispe box within container boxes.
-// Path: meta -> iprp -> ipco -> ispe
-func findISPE(data []byte) (int, int, bool) {
-	offset := 0
-	size := len(data)
-	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		boxType := string(data[offset+4 : offset+8])
-		if boxSize < 8 || offset+boxSize > size {
-			break
+// readHEIFDimensions walks bounded ISOBMFF containers without retaining their
+// payloads. The original byte-slice entry point also uses this parser.
+func readHEIFDimensions(reader io.Reader, size int64, depth int) (int, int, bool) {
+	if depth > 64 {
+		return 0, 0, false
+	}
+	var header [16]byte
+	for size >= 8 {
+		if _, err := io.ReadFull(reader, header[:8]); err != nil {
+			return 0, 0, false
 		}
-		content := data[offset+8 : offset+boxSize]
-		switch boxType {
-		case "iprp", "ipco":
-			if w, h, ok := findISPE(content); ok {
-				return w, h, true
+		boxSize := uint64(binary.BigEndian.Uint32(header[:4]))
+		boxType := string(header[4:8])
+		headerSize := uint64(8)
+		if boxSize == 1 {
+			if size < 16 {
+				return 0, 0, false
 			}
-		case "ispe":
-			// ispe is a full box: 4 bytes version/flags, then 4 bytes width, 4 bytes height
-			if len(content) >= 12 {
-				w := int(binary.BigEndian.Uint32(content[4:8]))
-				h := int(binary.BigEndian.Uint32(content[8:12]))
-				if w > 0 && h > 0 {
+			if _, err := io.ReadFull(reader, header[8:16]); err != nil {
+				return 0, 0, false
+			}
+			boxSize = binary.BigEndian.Uint64(header[8:16])
+			headerSize = 16
+		} else if boxSize == 0 {
+			boxSize = uint64(size)
+		}
+		if boxSize < headerSize || boxSize > uint64(size) {
+			return 0, 0, false
+		}
+		content := &io.LimitedReader{R: reader, N: int64(boxSize - headerSize)}
+		if depth == 0 && boxType == "meta" {
+			if _, err := io.ReadFull(content, header[:4]); err != nil {
+				return 0, 0, false
+			}
+			return readHEIFDimensions(content, content.N, depth+1)
+		}
+		if depth > 0 {
+			switch boxType {
+			case "iprp", "ipco":
+				if w, h, ok := readHEIFDimensions(content, content.N, depth+1); ok {
 					return w, h, true
+				}
+			case "ispe":
+				if _, err := io.ReadFull(content, header[:12]); err == nil {
+					w := int(binary.BigEndian.Uint32(header[4:8]))
+					h := int(binary.BigEndian.Uint32(header[8:12]))
+					if w > 0 && h > 0 {
+						return w, h, true
+					}
 				}
 			}
 		}
-		offset += boxSize
+		if _, err := io.Copy(io.Discard, content); err != nil || content.N != 0 {
+			return 0, 0, false
+		}
+		size -= int64(boxSize)
 	}
 	return 0, 0, false
 }

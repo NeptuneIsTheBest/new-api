@@ -2,8 +2,11 @@ package common
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/go-playground/validator/v10"
@@ -11,6 +14,65 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func TestReadJSONTopLevelStrings(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, model, group string
+		modelCount               int
+		modelString, modelNull   bool
+	}{
+		{name: "escaped keys and values", body: `{"mo\u0064el":"test\u002dmodel","group":"分组\n一"}`, model: "test-model", group: "分组\n一", modelCount: 1, modelString: true},
+		{name: "first values and duplicate count", body: `{"model":"first","mo\u0064el":"second","group":"a","group":"b"}`, model: "first", group: "a", modelCount: 2, modelString: true},
+		{name: "null first", body: `{"model":null,"model":"second","group":null,"group":"b"}`, modelCount: 2, modelNull: true},
+		{name: "wrong type is not retained", body: `{"model":{"model":"nested"},"group":false}`, modelCount: 1},
+		{name: "nested fields ignored", body: `{"input":[{"model":"nested","group":"nested"}],"Model":"case sensitive"}`},
+		{name: "non object root", body: `[{"model":"nested"}]`},
+		{name: "null root", body: `null`},
+		{name: "large ignored string and key", body: `{"` + strings.Repeat("k", 8192) + `":"` + strings.Repeat(`a\n`, 8192) + `","model":"at-end"}`, model: "at-end", modelCount: 1, modelString: true},
+		{name: "large numeric literal", body: `{"ignored":` + strings.Repeat("9", 8192) + `,"model":"m"}`, model: "m", modelCount: 1, modelString: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, chunked := range []bool{false, true} {
+				var reader io.Reader = strings.NewReader(tc.body)
+				if chunked {
+					reader = iotest.OneByteReader(reader)
+				}
+				fields, err := ReadJSONTopLevelStrings(reader, "model", "group")
+				require.NoError(t, err)
+				assert.Equal(t, JSONStringField{Value: tc.model, Count: tc.modelCount, IsString: tc.modelString, IsNull: tc.modelNull}, fields["model"])
+				assert.Equal(t, tc.group, fields["group"].Value)
+			}
+		})
+	}
+}
+
+func TestReadJSONTopLevelStringsValidatesWholeDocument(t *testing.T) {
+	for _, body := range []string{
+		`{}`, `[]`, ` true `, `false`, `"root"`, `-0`, `0.1`, `-123.45e+67`, `1E-9`,
+		`{"model":"m","ignored":[{},[],null,true,false,0,-1.2e3,"\\\"\/\b\f\n\r\t\u1234"]}`,
+		``, ` `, `{`, `[`, `{"model":"m",}`, `{"model":"m"} {}`, `{"model":"m"}x`,
+		`{"model":"m","ignored":[1,]}`, `{"model":"m","ignored":{"a" 1}}`,
+		`{"model":"m","ignored":"bad\q"}`, `{"model":"m","ignored":"bad\u12G4"}`,
+		`{"model":"m","ignored":"bad\u12"}`, "{\"ignored\":\"bad\n\"}",
+		`01`, `-01`, `-`, `1.`, `1e`, `1e+`, `1e-`, `1e--2`, `1.2.3`, `+1`, `.1`, `NaN`,
+		`nul`, `nullx`, `truE`, `fals`, `{"a":tru}`, `[1 2]`, `[1`, `[[}]`,
+		strings.Repeat("[", 10001) + strings.Repeat("]", 10001),
+	} {
+		t.Run(body[:min(len(body), 80)], func(t *testing.T) {
+			_, err := ReadJSONTopLevelStrings(iotest.OneByteReader(strings.NewReader(body)), "model", "group")
+			if json.Valid([]byte(body)) {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrInvalidJSON)
+			}
+		})
+	}
+	readErr := errors.New("cache read failed")
+	for _, prefix := range []string{`{"model":"`, `{"ignored":123`, `{"model":"m"}`} {
+		_, err := ReadJSONTopLevelStrings(io.MultiReader(strings.NewReader(prefix), iotest.ErrReader(readErr)), "model")
+		require.ErrorIs(t, err, readErr)
+	}
+}
 
 func TestJsonRawMessageToString(t *testing.T) {
 	tests := []struct {
