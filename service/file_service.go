@@ -3,6 +3,8 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -32,15 +34,13 @@ func getContextCacheKey(url string) string {
 }
 
 // getBase64ContextCacheKey 生成 base64 context 缓存的 key
-// 使用 length + MIME + 前 128 字符作为输入，避免对整个 base64 数据做 hash
+// 使用 length + MIME + 完整 base64 数据，避免不同文件因前缀相同而共享缓存
 func getBase64ContextCacheKey(data string, mimeType string) string {
-	keyMaterial := fmt.Sprintf("%d:%s:", len(data), mimeType)
-	if len(data) > 128 {
-		keyMaterial += data[:128]
-	} else {
-		keyMaterial += data
-	}
-	return fmt.Sprintf("b64_cache_%s", common.GenerateHMAC(keyMaterial))
+	h := hmac.New(sha256.New, []byte(common.CryptoSecret))
+	_, _ = fmt.Fprintf(h, "%d:%s:", len(data), mimeType)
+	// Hide strings.Reader.WriteTo to avoid copying the entire string to []byte.
+	_, _ = io.Copy(h, struct{ io.Reader }{strings.NewReader(data)})
+	return fmt.Sprintf("b64_cache_%x", h.Sum(nil))
 }
 
 // LoadFileSource 加载文件源数据

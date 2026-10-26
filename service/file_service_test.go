@@ -289,6 +289,80 @@ func TestFileBase64ValidationAndSharedCleanup(t *testing.T) {
 	assert.Equal(t, "cached string", text)
 }
 
+func TestFileBase64ContextCache(t *testing.T) {
+	const mimeType = "application/pdf"
+	firstEncoded := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 96) + "first"))
+	secondEncoded := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 96) + "other"))
+	require.Equal(t, len(firstEncoded), len(secondEncoded))
+	require.Equal(t, firstEncoded[:128], secondEncoded[:128])
+
+	for _, tc := range []struct {
+		name, prefix string
+		disk         bool
+	}{
+		{name: "memory/raw"},
+		{name: "memory/data URL", prefix: "data:application/pdf;base64,"},
+		{name: "disk/raw", disk: true},
+		{name: "disk/data URL", prefix: "data:application/pdf;base64,", disk: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureFileCache(t, 0)
+			config := common.GetDiskCacheConfig()
+			config.Enabled = tc.disk
+			common.SetDiskCacheConfig(config)
+			before := common.GetDiskCacheStats()
+			c, _ := gin.CreateTestContext(nil)
+			t.Cleanup(func() {
+				CleanupFileSources(c)
+				assert.Equal(t, before, common.GetDiskCacheStats())
+				count, _, err := common.GetDiskCacheInfo()
+				require.NoError(t, err)
+				assert.Zero(t, count)
+			})
+
+			providedMimeType := mimeType
+			if tc.prefix != "" {
+				providedMimeType = ""
+			}
+			first := types.NewBase64FileSource(tc.prefix+firstEncoded, providedMimeType)
+			second := types.NewBase64FileSource(tc.prefix+secondEncoded, providedMimeType)
+			for _, file := range []struct {
+				source *types.Base64Source
+				want   string
+			}{
+				{source: first, want: firstEncoded},
+				{source: second, want: secondEncoded},
+			} {
+				encoded, mime, err := GetBase64Data(c, file.source)
+				require.NoError(t, err)
+				assert.Equal(t, file.want, encoded)
+				assert.Equal(t, mimeType, mime)
+				assert.Equal(t, tc.disk, file.source.GetCache().IsDisk())
+			}
+			assert.NotSame(t, first.GetCache(), second.GetCache())
+
+			repeated, err := LoadFileSource(c, types.NewBase64FileSource(tc.prefix+firstEncoded, providedMimeType))
+			require.NoError(t, err)
+			assert.Same(t, first.GetCache(), repeated)
+			internal, err := LoadFileSource(c, first)
+			require.NoError(t, err)
+			assert.Same(t, first.GetCache(), internal)
+
+			otherMime := types.NewBase64FileSource(tc.prefix+firstEncoded, "text/plain")
+			encoded, mime, err := GetBase64Data(c, otherMime)
+			require.NoError(t, err)
+			assert.Equal(t, firstEncoded, encoded)
+			assert.Equal(t, "text/plain", mime)
+			assert.NotSame(t, first.GetCache(), otherMime.GetCache())
+
+			invalid := tc.prefix + firstEncoded[:len(firstEncoded)-1] + "!"
+			data, err := LoadFileSource(c, types.NewBase64FileSource(invalid, providedMimeType))
+			require.ErrorContains(t, err, "failed to decode base64 data")
+			assert.Nil(t, data)
+		})
+	}
+}
+
 func fileTestBox(kind string, content []byte, extended bool) []byte {
 	header := 8
 	if extended {
