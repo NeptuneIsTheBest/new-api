@@ -156,41 +156,91 @@ func newDiskStorage(data []byte, cachePath string) (*diskStorage, error) {
 	}, nil
 }
 
-func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string) (*diskStorage, error) {
+func newDiskStorageFromReader(reader io.Reader, maxBytes int64) (BodyStorage, error) {
 	// 使用统一的缓存目录管理
 	filePath, file, err := CreateDiskCacheFile(DiskCacheTypeBody)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if file != nil {
+			file.Close()
+			os.Remove(filePath)
+		}
+	}()
 
-	// 从 reader 读取并写入文件
-	written, err := io.Copy(file, io.LimitReader(reader, maxBytes+1))
-	if err != nil {
-		file.Close()
-		os.Remove(filePath)
-		return nil, fmt.Errorf("failed to write to temp file: %w", err)
-	}
+	// Keep the same limit when falling back to memory: the reader has already
+	// consumed both the on-disk prefix and the chunk that triggers the fallback.
+	reader = io.LimitReader(reader, maxBytes+1)
+	buffer := make([]byte, 32<<10)
+	var written int64
+	for {
+		n, readErr := reader.Read(buffer)
+		if readErr != nil && readErr != io.EOF {
+			return nil, readErr
+		}
+		nextSize := written + int64(n)
+		if nextSize > maxBytes {
+			return nil, ErrRequestBodyTooLarge
+		}
+		if n == 0 {
+			if readErr == io.EOF {
+				break
+			}
+			continue
+		}
 
-	if written > maxBytes {
-		file.Close()
-		os.Remove(filePath)
-		return nil, ErrRequestBodyTooLarge
+		// Unfinished files are not included in the shared usage statistics.
+		if !IsDiskCacheAvailable(nextSize) {
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("failed to seek temp file: %w", err)
+			}
+			var data bytes.Buffer
+			if _, err := io.CopyN(&data, file, written); err != nil {
+				return nil, fmt.Errorf("failed to read temp file: %w", err)
+			}
+			if err := file.Close(); err != nil {
+				return nil, fmt.Errorf("failed to close temp file: %w", err)
+			}
+			if err := os.Remove(filePath); err != nil {
+				return nil, fmt.Errorf("failed to remove temp file: %w", err)
+			}
+			file = nil
+
+			data.Write(buffer[:n])
+			if readErr != io.EOF {
+				if _, err := io.Copy(&data, reader); err != nil {
+					return nil, err
+				}
+			}
+			if int64(data.Len()) > maxBytes {
+				return nil, ErrRequestBodyTooLarge
+			}
+			return newMemoryStorage(data.Bytes()), nil
+		}
+
+		if _, err := file.Write(buffer[:n]); err != nil {
+			return nil, fmt.Errorf("failed to write to temp file: %w", err)
+		}
+		written = nextSize
+		if readErr == io.EOF {
+			break
+		}
 	}
 
 	// 重置文件指针
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		file.Close()
-		os.Remove(filePath)
 		return nil, fmt.Errorf("failed to seek temp file: %w", err)
 	}
 
 	IncrementDiskFiles(written)
-
-	return &diskStorage{
+	storage := &diskStorage{
 		file:     file,
 		filePath: filePath,
 		size:     written,
-	}, nil
+	}
+	file = nil // Ownership transfers to storage only after a successful read.
+	return storage, nil
 }
 
 func (d *diskStorage) Read(p []byte) (n int, err error) {
@@ -314,9 +364,9 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		IsDiskCacheAvailable(contentLength)
 
 	// The remaining size may be unknown or larger than ContentLength (e.g.
-	// after decompression). Check capacity for the request limit before
-	// buffering only the prefix needed to decide whether to spill to disk.
-	if !useDisk && IsDiskCacheAvailable(maxBytes) {
+	// after decompression). Only the threshold-sized prefix needs to fit;
+	// subsequent writes check capacity against the actual size as it grows.
+	if !useDisk && IsDiskCacheAvailable(threshold) {
 		data, err := io.ReadAll(io.LimitReader(reader, min(threshold, maxBytes+1)))
 		if err != nil {
 			return nil, err
@@ -334,16 +384,20 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	}
 
 	if useDisk {
-		storage, err := newDiskStorageFromReader(reader, maxBytes, GetDiskCachePath())
+		storage, err := newDiskStorageFromReader(reader, maxBytes)
 		if err != nil {
 			if IsRequestBodyTooLargeError(err) {
 				return nil, err
 			}
-			// 磁盘存储失败，reader 已被消费，无法安全回退
-			// 直接返回错误而非尝试回退（因为 reader 数据已丢失）
+			// Only cache capacity exhaustion falls back to memory. Input and
+			// file I/O errors still fail the request and clean up partial files.
 			return nil, fmt.Errorf("disk storage creation failed: %w", err)
 		}
-		IncrementDiskCacheHits()
+		if storage.IsDisk() {
+			IncrementDiskCacheHits()
+		} else {
+			IncrementMemoryCacheHits()
+		}
 		return storage, nil
 	}
 
