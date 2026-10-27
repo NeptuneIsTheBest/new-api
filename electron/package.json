@@ -24,9 +24,9 @@
     "url": "https://github.com/QuantumNous/new-api"
   },
   "devDependencies": {
-    "cross-env": "^7.0.3",
-    "electron": "41.10.7",
-    "electron-builder": "^26.15.3"
+    "cross-env": "^10.1.0",
+    "electron": "45.0.0",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.newapi.desktop",
