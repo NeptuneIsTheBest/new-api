@@ -203,10 +203,20 @@ export function RatioSettingsCard({
   const resetMutation = useMutation({
     mutationFn: async () => {
       if (!pricingBaseline) return
+      const versions = new Map(
+        pricingBaseline.entries.map((entry) => [
+          entry.model_name,
+          entry.version,
+        ])
+      )
+      const names = new Set([
+        ...versions.keys(),
+        ...(pricingBaseline.default_model_names ?? []),
+      ])
       await savePricing.mutateAsync(
-        pricingBaseline.entries.map((entry) => ({
-          model_name: entry.model_name,
-          expected_version: entry.version,
+        [...names].map((name) => ({
+          model_name: name,
+          expected_version: versions.get(name) ?? pricingBaseline.empty_version,
           pricing: {},
           reset: true,
         }))

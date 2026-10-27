@@ -19,9 +19,10 @@ import (
 //   - "tool_name"              → default price for all models
 //   - "tool_name:model_prefix*" → override for models matching the prefix
 //
-// Effective index: hardcoded defaults → hardcoded model overrides → valid
-// operator values. Lookup uses the longest model prefix before the tool
-// default, and a matched numeric zero is terminal.
+// The saved map is the complete configuration. Built-in defaults are seeded
+// once during database initialization, never while rebuilding the price index.
+// Lookup uses the longest model prefix before the tool default, and a matched
+// numeric zero is terminal.
 //
 // Built-in keys are written in the vendor's list currency.
 // ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ const (
 	defaultSearchPreviewModelPrice   = 25.0
 )
 
-// seedHardcodedToolPrices injects compile-time built-in fallbacks (tool
+// seedHardcodedToolPrices copies the compile-time built-in presets (tool
 // defaults and model-prefix overrides) into the destination. The source is
 // constants, not a mutable package map or operator configuration.
 func seedHardcodedToolPrices(prices map[string]float64) {
@@ -95,14 +96,21 @@ func seedHardcodedToolPrices(prices map[string]float64) {
 	prices["deepseek_fetch"] = 0.75
 }
 
+// GetDefaultToolPricesCopy returns initialization and reset presets, not runtime fallbacks.
+func GetDefaultToolPricesCopy() map[string]float64 {
+	prices := make(map[string]float64)
+	seedHardcodedToolPrices(prices)
+	return prices
+}
+
 // ToolPriceSetting is managed by config.GlobalConfig.Register.
-// Prices holds operator overrides only; hardcoded fallbacks live in the index.
+// Prices holds the complete saved price map, including any initialized defaults.
 type ToolPriceSetting struct {
 	Prices map[string]float64 `json:"prices"`
 }
 
 var toolPriceSetting = ToolPriceSetting{
-	Prices: make(map[string]float64),
+	Prices: GetDefaultToolPricesCopy(),
 }
 
 // builtInToolNames are the tool names (the part before ":") that
@@ -148,7 +156,8 @@ func isValidToolPrice(price float64) bool {
 	return price >= 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
 }
 
-func decodeToolPricesJSON(value string, ignoreInvalidEntries bool) (map[string]float64, error) {
+// DecodeToolPricesJSON parses saved prices, optionally tolerating invalid legacy entries.
+func DecodeToolPricesJSON(value string, ignoreInvalidEntries bool) (map[string]float64, error) {
 	rawValue := json.RawMessage(strings.TrimSpace(value))
 	if common.GetJsonType(rawValue) != "object" {
 		return nil, common.NewMessage("Tool prices must be a JSON object")
@@ -189,17 +198,17 @@ func decodeToolPricesJSON(value string, ignoreInvalidEntries bool) (map[string]f
 // ValidateToolPricesJSON validates an operator-supplied complete price map.
 // A numeric zero is valid and intentionally disables the matching rule.
 func ValidateToolPricesJSON(value string) error {
-	_, err := decodeToolPricesJSON(value, false)
+	_, err := DecodeToolPricesJSON(value, false)
 	return err
 }
 
 // LoadToolPricesFromJSONString replaces the complete operator price map.
 // Invalid legacy entries are ignored individually so valid sibling overrides
-// survive, while missing built-in keys continue to use hardcoded fallbacks.
+// survive. Missing keys stay unconfigured, including built-in tools.
 func LoadToolPricesFromJSONString(value string) {
-	prices, err := decodeToolPricesJSON(value, true)
+	prices, err := DecodeToolPricesJSON(value, true)
 	if err != nil {
-		common.SysError(common.LogText("failed to load tool prices, using hardcoded fallbacks: %s", err.Error()))
+		common.SysError(common.LogText("failed to load tool prices: %s", err.Error()))
 		prices = make(map[string]float64)
 	}
 	toolPriceSetting.Prices = prices
@@ -209,21 +218,15 @@ func LoadToolPricesFromJSONString(value string) {
 // RebuildToolPriceIndex rebuilds the lookup index from the current config.
 // Called on init and after config updates. Not on the billing hot path.
 func RebuildToolPriceIndex() {
-	merged := make(map[string]float64, 9+len(toolPriceSetting.Prices))
-	seedHardcodedToolPrices(merged)
-	for k, v := range toolPriceSetting.Prices {
-		if !isValidToolPrice(v) {
-			continue
-		}
-		merged[k] = v
-	}
-
 	idx := &toolPriceIndex{
 		defaults: make(map[string]float64),
 		prefixes: make(map[string][]prefixEntry),
 	}
 
-	for key, price := range merged {
+	for key, price := range toolPriceSetting.Prices {
+		if !isValidToolPrice(price) {
+			continue
+		}
 		before, after, ok := strings.Cut(key, ":")
 		if !ok {
 			idx.defaults[key] = price

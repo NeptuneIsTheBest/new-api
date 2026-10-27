@@ -4867,6 +4867,7 @@
     "Pricing conditions": "料金条件",
     "Pricing Configuration": "価格設定",
     "Pricing currency": "価格設定の通貨",
+    "Pricing defaults migration status is read-only": "デフォルト料金の移行状態は読み取り専用です",
     "Pricing group example": "料金グループの例",
     "Pricing groups": "料金グループ",
     "Pricing mode": "価格モード",

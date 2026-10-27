@@ -333,6 +333,10 @@ func InitResources() error {
 			common.SysError(common.LogText("failed to migrate retired frontend options: %s", err.Error()))
 		}
 	}
+	if err := model.InitializePricingDefaults(); err != nil {
+		common.FatalLog(common.LogText("failed to initialize pricing defaults: %s", err.Error()))
+		return err
+	}
 	model.InitOptionMap()
 
 	// 清理旧的磁盘缓存文件

@@ -70,6 +70,7 @@ export type ModelPricingEntry = ModelPricingDescription & {
 }
 
 export type ModelPricingConfig = {
+  default_model_names?: string[]
   entries: ModelPricingEntry[]
   options: PricingOptions
   empty_version: string
@@ -171,8 +172,7 @@ export function useSaveModelPricing() {
   })
 }
 
-// Only dirty model fields are applied to stored configuration. Display-only
-// built-in expressions for other models never become administrator overrides.
+// Only dirty model fields are applied to stored configuration.
 export function buildPricingChanges(
   snapshot: ModelPricingConfig,
   before: PricingOptions,

@@ -109,8 +109,7 @@ func GetOptions(c *gin.Context) {
 		Key: "ResendKeyConfigured", Value: strconv.FormatBool(strings.TrimSpace(common.OptionMap["ResendApiKey"]) != ""),
 	})
 	common.OptionMapRWMutex.Unlock()
-	// Display the same effective expressions used by pricing and settlement,
-	// including built-in defaults absent from persisted administrator options.
+	// Publish only saved expressions, matching pricing and settlement.
 	for key, values := range map[string]map[string]string{
 		"billing_setting.billing_mode": billing_setting.GetBillingModeCopy(),
 		"billing_setting.billing_expr": billing_setting.GetBillingExprCopy(),

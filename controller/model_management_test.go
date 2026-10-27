@@ -15,14 +15,18 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -81,6 +85,7 @@ func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 			require.NoError(t, value.restore(value.value))
 		}
 		config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": previousConfig["billing_setting.billing_mode"], "billing_expr": previousConfig["billing_setting.billing_expr"], "plugin_billing_expr": previousConfig[billing_setting.PluginBillingExprOption]})
+		operation_setting.LoadToolPricesFromJSONString(previousConfig[operation_setting.ToolPriceOptionKey])
 		common.OptionMap = previousOptions
 		common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite
 		common.RedisEnabled, common.MemoryCacheEnabled = previousRedis, previousMemory
@@ -880,7 +885,7 @@ export function parseTaskResult() { return {}; }
 					require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{change}))
 					reset, err := model.GetModelPricingSnapshot([]string{name})
 					require.NoError(t, err)
-					assert.Empty(t, reset.Entries[0].Configured)
+					assert.Equal(t, builtin, reset.Entries[0].Configured["billing_setting.billing_expr"])
 					assert.Equal(t, builtin, reset.Entries[0].Effective["billing_setting.billing_expr"])
 				}
 			})
@@ -1693,6 +1698,144 @@ export function parseTaskResult(){return {};}
 			require.NoError(t, err)
 			assert.Empty(t, final.Entries[0].Configured)
 			assert.Equal(t, "{}", final.Options[billing_setting.PluginBillingExprOption])
+		})
+	}
+}
+
+func TestPricingDefaultsMigrationDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			for _, legacy := range []bool{false, true} {
+				t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+					db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+					// A follower must never silently start with the old sparse maps.
+					require.ErrorContains(t, model.InitializePricingDefaults(), "master node")
+					common.IsMasterNode = true
+					if legacy {
+						// The released options schema stored sparse expression/tool maps.
+						// Preserve free legacy prices, explicit modes and custom expressions.
+						require.NoError(t, db.Create(&[]model.Option{
+							{Key: "ModelRatio", Value: `{"gpt-image-2":0,"custom-ratio":2}`},
+							{Key: "ModelPrice", Value: `{"deepseek-fetch":0.25}`},
+							{Key: "billing_setting.billing_mode", Value: `{"deepseek-search":"ratio","deepseek-flash":"tiered_expr"}`},
+							{Key: "billing_setting.billing_expr", Value: `{"deepseek-flash":"tier(\"custom\", p * 7)"}`},
+							{Key: operation_setting.ToolPriceOptionKey, Value: `{"web_search":0,"web_search_preview:gpt-4o*":7,"custom_fn":2,"file_search":null}`},
+						}).Error)
+					}
+					require.NoError(t, model.InitializePricingDefaults())
+					var migrated []model.Option
+					require.NoError(t, db.Find(&migrated).Error)
+					require.NoError(t, model.InitializePricingDefaults())
+					var repeated []model.Option
+					require.NoError(t, db.Find(&repeated).Error)
+					assert.ElementsMatch(t, migrated, repeated)
+					model.InitOptionMap()
+					common.IsMasterNode = false
+					require.NoError(t, model.InitializePricingDefaults())
+					common.IsMasterNode = true
+					assert.NotContains(t, common.OptionMap, "PricingDefaultsVersion")
+					assert.Error(t, model.UpdateOption("PricingDefaultsVersion", ""))
+					assert.Error(t, model.UpdateOptionsBulk(map[string]string{"PricingDefaultsVersion": ""}))
+					assert.Equal(t, 2.5, operation_setting.GetToolPrice("file_search"))
+					if legacy {
+						assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode("gpt-image-2"))
+						assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode("deepseek-fetch"))
+						assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode("deepseek-search"))
+						expression, ok := billing_setting.GetBillingExpr("deepseek-flash")
+						require.True(t, ok)
+						assert.Equal(t, `tier("custom", p * 7)`, expression)
+						assert.Equal(t, 0.0, operation_setting.GetToolPrice("web_search"))
+						assert.Equal(t, 7.0, operation_setting.GetToolPriceForModel("web_search_preview", "gpt-4o"))
+						assert.Equal(t, 2.0, operation_setting.GetToolPrice("custom_fn"))
+					}
+
+					const name = "gpt-6-astra"
+					before, err := model.GetModelPricingSnapshot([]string{name})
+					require.NoError(t, err)
+					preset, exists := billing_setting.GetBuiltinBillingExpr(name)
+					require.True(t, exists)
+					assert.Equal(t, preset, before.Entries[0].Configured["billing_setting.billing_expr"])
+					change := model.ModelPricingChange{ModelName: name, ExpectedVersion: before.Entries[0].Version, Pricing: model.PricingValues{}}
+					require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{change}))
+					assert.ErrorIs(t, model.UpdateModelPricing([]model.ModelPricingChange{change}), model.ErrModelPricingConflict)
+					// Removing a prefix falls through to the remaining tool rule; an
+					// absent tool has no fee. Loading the map twice cannot seed it again.
+					require.NoError(t, model.UpdateOption(operation_setting.ToolPriceOptionKey, `{"web_search_preview":4,"web_search_preview:gpt-4o-mini*":0}`))
+					for range 2 {
+						require.NoError(t, model.InitializePricingDefaults())
+						model.InitOptionMap()
+						assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode(name))
+						_, exists := billing_setting.GetBillingExpr(name)
+						assert.False(t, exists)
+						assert.NotContains(t, billing_setting.GetBillingModeCopy(), name)
+						assert.NotContains(t, billing_setting.GetBillingExprCopy(), name)
+						assert.Equal(t, 0.0, operation_setting.GetToolPrice("web_search"))
+						assert.Equal(t, 4.0, operation_setting.GetToolPriceForModel("web_search_preview", "gpt-4o"))
+						assert.Equal(t, 0.0, operation_setting.GetToolPriceForModel("web_search_preview", "gpt-4o-mini"))
+					}
+					snapshot, err := model.GetModelPricingSnapshot(nil)
+					require.NoError(t, err)
+					assert.Contains(t, snapshot.DefaultModelNames, name)
+					for _, entry := range snapshot.Entries {
+						assert.NotEqual(t, name, entry.ModelName)
+					}
+					assert.NotContains(t, snapshot.Options["billing_setting.billing_expr"], name)
+					assert.ErrorContains(t, model.ValidateModelPricing(name, model.PricingValues{"billing_setting.billing_mode": "tiered_expr"}), "billing expression is required")
+					preview, err := model.PreviewModelPricing(name, model.PricingValues{})
+					require.NoError(t, err)
+					assert.NotContains(t, preview, "billing_setting.billing_expr")
+					assert.NotContains(t, preview, "ModelRatio")
+					assert.NotContains(t, preview, "ModelPrice")
+					ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+					ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+					info := &relaycommon.RelayInfo{OriginModelName: name, UserGroup: "default", UsingGroup: "default"}
+					_, err = relayhelper.ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+					require.Error(t, err, "an unpriced model must be rejected before upstream submission")
+					assert.Nil(t, info.TieredBillingSnapshot)
+					change.ExpectedVersion, change.Reset = snapshot.EmptyVersion, true
+					require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{change}))
+					expression, exists := billing_setting.GetBillingExpr(name)
+					require.True(t, exists)
+					assert.Equal(t, preset, expression)
+					require.NoError(t, model.UpdateOption(operation_setting.ToolPriceOptionKey, `{}`))
+					model.InitOptionMap()
+					assert.Equal(t, 0.0, operation_setting.GetToolPriceForModel("web_search_preview", "gpt-4o"))
+					tools, err := common.Marshal(operation_setting.GetDefaultToolPricesCopy())
+					require.NoError(t, err)
+					require.NoError(t, model.UpdateOption(operation_setting.ToolPriceOptionKey, string(tools)))
+					assert.Equal(t, 25.0, operation_setting.GetToolPriceForModel("web_search_preview", "gpt-4o"))
+				})
+			}
+			t.Run("migration_failure_rolls_back_and_can_retry", func(t *testing.T) {
+				db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+				common.IsMasterNode = true
+				row := model.Option{Key: operation_setting.ToolPriceOptionKey, Value: `{"web_search":`}
+				require.NoError(t, db.Create(&row).Error)
+				require.Error(t, model.InitializePricingDefaults())
+				var after []model.Option
+				require.NoError(t, db.Find(&after).Error)
+				assert.Equal(t, []model.Option{row}, after)
+				require.NoError(t, db.Model(&row).Update("value", `{"web_search":0}`).Error)
+				require.NoError(t, db.Find(&after).Error)
+				require.NoError(t, db.Callback().Update().Before("gorm:update").Register("fail_pricing_migration_commit", func(tx *gorm.DB) {
+					if tx.Statement.Table == "options" {
+						tx.AddError(errors.New("migration commit failure"))
+					}
+				}))
+				err := model.InitializePricingDefaults()
+				require.NoError(t, db.Callback().Update().Remove("fail_pricing_migration_commit"))
+				require.ErrorContains(t, err, "migration commit failure")
+				var rolledBack []model.Option
+				require.NoError(t, db.Find(&rolledBack).Error)
+				assert.ElementsMatch(t, after, rolledBack)
+				require.NoError(t, model.InitializePricingDefaults())
+				model.InitOptionMap()
+				assert.Equal(t, 0.0, operation_setting.GetToolPrice("web_search"))
+			})
 		})
 	}
 }

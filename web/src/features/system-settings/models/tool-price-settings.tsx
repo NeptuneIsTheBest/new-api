@@ -100,32 +100,22 @@ function objectToRows(prices: Record<string, number>): ToolPriceRow[] {
 function parseInitialPrices(
   rawValue: string | undefined
 ): Record<string, number> {
-  if (!rawValue) return { ...DEFAULT_PRICES }
+  if (!rawValue) return {}
   try {
     const parsed = JSON.parse(rawValue) as unknown
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      Object.keys(parsed as object).length > 0
-    ) {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const validPrices: Record<string, number> = {}
       for (const [key, value] of Object.entries(parsed)) {
         if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
           validPrices[key] = value
         }
       }
-      // Merge defaults first so newly introduced tools appear for old stored
-      // configs, while explicit stored values (including 0) still win.
-      return {
-        ...DEFAULT_PRICES,
-        ...validPrices,
-      }
+      return validPrices
     }
   } catch {
-    // fall through to defaults
+    // Invalid saved data must not restore deleted prices.
   }
-  return { ...DEFAULT_PRICES }
+  return {}
 }
 
 type ToolPriceSettingsProps = {

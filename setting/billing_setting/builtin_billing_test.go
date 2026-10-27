@@ -28,7 +28,11 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
 	})
-	common.OptionMap = map[string]string{"billing_setting.billing_mode": `{}`, "billing_setting.billing_expr": `{}`}
+	preset, exists := billing_setting.GetBuiltinBillingExpr("gpt-6-astra")
+	require.True(t, exists)
+	encodedPreset, err := common.Marshal(map[string]string{"gpt-6-astra": preset})
+	require.NoError(t, err)
+	common.OptionMap = map[string]string{"billing_setting.billing_mode": `{"gpt-6-astra":"tiered_expr"}`, "billing_setting.billing_expr": string(encodedPreset)}
 	require.NoError(t, config.GlobalConfig.LoadFromDB(common.OptionMap))
 	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
@@ -65,7 +69,7 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 		})
 	}
 
-	t.Run("admin options expose defaults without persisting them", func(t *testing.T) {
+	t.Run("admin options expose saved prices without adding other builtins", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
 		controller.GetOptions(ctx)
@@ -82,7 +86,7 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 				var values map[string]string
 				require.NoError(t, common.UnmarshalJsonStr(option.Value, &values))
 				found[option.Key] = values["gpt-6-astra"]
-				assert.Equal(t, `{}`, common.OptionMap[option.Key])
+				assert.JSONEq(t, common.OptionMap[option.Key], option.Value)
 			}
 		}
 		assert.Equal(t, map[string]string{"billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": expression}, found)
@@ -93,6 +97,8 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 	}{
 		{"custom expression overrides legacy price", "tiered_expr", "p * 7", `{"gpt-6-astra":8}`, `{}`, "tiered_expr"},
 		{"explicit ratio mode", "ratio", "", `{}`, `{}`, "ratio"},
+		{"deleted builtin stays unconfigured", "", "", `{}`, `{}`, "ratio"},
+		{"missing expression is not restored", "tiered_expr", "", `{}`, `{}`, "tiered_expr"},
 		{"existing free token price", "", "", `{"gpt-6-astra":0}`, `{}`, "ratio"},
 		{"existing per-call price", "", "", `{}`, `{"gpt-6-astra":0.1}`, "ratio"},
 	} {
@@ -128,6 +134,10 @@ func TestImageModelBuiltinPricesAndOverrides(t *testing.T) {
 			*settings = billing_setting.BillingSetting{BillingMode: map[string]string{}, BillingExpr: map[string]string{}}
 			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
 			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+			preset, exists := billing_setting.GetBuiltinBillingExpr(name)
+			require.True(t, exists)
+			settings.BillingMode[name] = billing_setting.BillingModeTieredExpr
+			settings.BillingExpr[name] = preset
 			expression, ok := billing_setting.GetBillingExpr(name)
 			require.True(t, ok)
 			usage := &dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{
@@ -139,6 +149,8 @@ func TestImageModelBuiltinPricesAndOverrides(t *testing.T) {
 			assert.Equal(t, 4113, result.ActualQuotaAfterGroup)
 			encoded, err := common.Marshal(map[string]float64{name: 0})
 			require.NoError(t, err)
+			delete(settings.BillingMode, name)
+			delete(settings.BillingExpr, name)
 			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(encoded)))
 			assert.Equal(t, "ratio", billing_setting.GetBillingMode(name))
 			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
@@ -167,6 +179,10 @@ func TestDeepSeekBuiltinBilling(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
 	})
 	*settings = billing_setting.BillingSetting{BillingMode: map[string]string{}, BillingExpr: map[string]string{}}
+	for name, expression := range billing_setting.GetBuiltinBillingExprCopy() {
+		settings.BillingMode[name] = billing_setting.BillingModeTieredExpr
+		settings.BillingExpr[name] = expression
+	}
 	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
 

@@ -17,13 +17,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
-import { beforeAll, describe, expect, test } from 'vitest'
+import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
+
+import { api } from '@/lib/api'
 
 import { ToolPriceSettings } from '../tool-price-settings'
 
 describe('tool price validation', () => {
+  afterEach(() => vi.restoreAllMocks())
   beforeAll(() => {
     i18next.addResourceBundle('en', 'translation', {
       'Price ($/1K calls)': 'Price ($/1K calls)',
@@ -79,7 +83,7 @@ describe('tool price validation', () => {
     queryClient.clear()
   })
 
-  test('shows the DeepSeek Search and Fetch prices for a config saved before they existed', () => {
+  test('does not add missing built-in tools to a saved configuration', () => {
     const queryClient = new QueryClient()
 
     render(
@@ -90,10 +94,78 @@ describe('tool price validation', () => {
 
     for (const key of ['deepseek_search', 'deepseek_fetch']) {
       expect(
-        screen.getByRole('spinbutton', { name: `Price ($/1K calls): ${key}` })
-      ).toHaveValue(0.75)
+        screen.queryByRole('spinbutton', { name: `Price ($/1K calls): ${key}` })
+      ).not.toBeInTheDocument()
     }
 
+    queryClient.clear()
+  })
+
+  test('keeps deletions and an empty map after saving and reloading until defaults are restored', async () => {
+    const user = userEvent.setup()
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <ToolPriceSettings defaultValue='{"web_search":10,"custom_tool":0}' />
+      </QueryClientProvider>
+    )
+    await user.click(screen.getAllByRole('button', { name: 'Delete' })[0])
+    await user.click(screen.getByRole('button', { name: 'Save tool prices' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/option/', {
+        key: 'tool_price_setting.prices',
+        value: '{"custom_tool":0}',
+      })
+    )
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <ToolPriceSettings defaultValue='{"custom_tool":0}' />
+      </QueryClientProvider>
+    )
+    expect(
+      screen.queryByRole('spinbutton', {
+        name: 'Price ($/1K calls): web_search',
+      })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('spinbutton', {
+        name: 'Price ($/1K calls): custom_tool',
+      })
+    ).toHaveValue(0)
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Save tool prices' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/option/', {
+        key: 'tool_price_setting.prices',
+        value: '{}',
+      })
+    )
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <ToolPriceSettings defaultValue='{}' />
+      </QueryClientProvider>
+    )
+    expect(screen.getByText('No tools configured')).toBeVisible()
+    expect(screen.queryAllByRole('spinbutton')).toHaveLength(0)
+    await user.click(screen.getByRole('button', { name: 'Switch to JSON' }))
+    put.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Save tool prices' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/option/', {
+        key: 'tool_price_setting.prices',
+        value: '{}',
+      })
+    )
+    await user.click(screen.getByRole('button', { name: 'Restore defaults' }))
+    await user.click(screen.getByRole('button', { name: 'Switch to Visual' }))
+    expect(
+      screen.getByRole('spinbutton', { name: 'Price ($/1K calls): web_search' })
+    ).toHaveValue(10)
     queryClient.clear()
   })
 })

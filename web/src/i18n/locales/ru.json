@@ -4867,6 +4867,7 @@
     "Pricing conditions": "Условия тарификации",
     "Pricing Configuration": "Конфигурация ценообразования",
     "Pricing currency": "Валюта цен",
+    "Pricing defaults migration status is read-only": "Статус переноса цен по умолчанию доступен только для чтения",
     "Pricing group example": "Пример группы тарификации",
     "Pricing groups": "Группы тарификации",
     "Pricing mode": "Режим ценообразования",

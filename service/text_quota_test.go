@@ -16,6 +16,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
@@ -1517,9 +1518,9 @@ func TestCalculateTextToolCallSurchargeGeminiFunctionCall(t *testing.T) {
 func TestCalculateTextToolCallSurchargeImageGenerationDefaultPrice(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	t.Cleanup(func() {
-		operation_setting.DeleteToolPriceForTest(dto.BuildInToolImageGeneration)
-	})
+	previousPrices := config.GlobalConfig.ExportAllConfigs()[operation_setting.ToolPriceOptionKey]
+	t.Cleanup(func() { operation_setting.LoadToolPricesFromJSONString(previousPrices) })
+	operation_setting.SetToolPriceForTest(dto.BuildInToolImageGeneration, 150)
 
 	relayInfo := &relaycommon.RelayInfo{
 		OriginModelName: "gpt-5.1",
@@ -1544,13 +1545,11 @@ func TestCalculateTextToolCallSurchargeImageGenerationDefaultPrice(t *testing.T)
 	assert.Equal(t, 150.0, summary.ToolSurchargeItems[0].Price)
 }
 
-func TestCalculateTextToolCallSurchargeImageGenerationExplicitZeroDisables(t *testing.T) {
+func TestCalculateTextToolCallSurchargeImageGenerationZeroAndDeletionDisable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	operation_setting.SetToolPriceForTest(dto.BuildInToolImageGeneration, 0)
-	t.Cleanup(func() {
-		operation_setting.DeleteToolPriceForTest(dto.BuildInToolImageGeneration)
-	})
+	previousPrices := config.GlobalConfig.ExportAllConfigs()[operation_setting.ToolPriceOptionKey]
+	t.Cleanup(func() { operation_setting.LoadToolPricesFromJSONString(previousPrices) })
 
 	relayInfo := &relaycommon.RelayInfo{
 		OriginModelName: "gpt-5.1",
@@ -1560,19 +1559,26 @@ func TestCalculateTextToolCallSurchargeImageGenerationExplicitZeroDisables(t *te
 			},
 		},
 	}
-	summary := &textQuotaSummary{ModelName: "gpt-5.1", GroupRatio: 1}
-
-	surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, summary)
-	assert.True(t, surcharge.IsZero())
-	assert.Empty(t, summary.ToolSurchargeItems)
+	for _, remove := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleted=%t", remove), func(t *testing.T) {
+			operation_setting.SetToolPriceForTest(dto.BuildInToolImageGeneration, 0)
+			if remove {
+				operation_setting.DeleteToolPriceForTest(dto.BuildInToolImageGeneration)
+			}
+			summary := &textQuotaSummary{ModelName: "gpt-5.1", GroupRatio: 1}
+			surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, summary)
+			assert.True(t, surcharge.IsZero())
+			assert.Empty(t, summary.ToolSurchargeItems)
+		})
+	}
 }
 
 func TestCalculateTextQuotaSummaryImageGenerationUsesStructuredSurcharge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	t.Cleanup(func() {
-		operation_setting.DeleteToolPriceForTest(dto.BuildInToolImageGeneration)
-	})
+	previousPrices := config.GlobalConfig.ExportAllConfigs()[operation_setting.ToolPriceOptionKey]
+	t.Cleanup(func() { operation_setting.LoadToolPricesFromJSONString(previousPrices) })
+	operation_setting.SetToolPriceForTest(dto.BuildInToolImageGeneration, 150)
 
 	relayInfo := &relaycommon.RelayInfo{
 		OriginModelName: "gpt-5.1",

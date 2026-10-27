@@ -658,9 +658,17 @@ func TestModelPriceHelperDeepSeekThinkingTailsBillAtBase(t *testing.T) {
 		return nil
 	}))
 	t.Cleanup(func() { require.NoError(t, config.GlobalConfig.LoadFromDB(saved)) })
+	expressions := make(map[string]string)
+	for _, name := range []string{"deepseek-flash", "deepseek-v4-pro"} {
+		expression, exists := billing_setting.GetBuiltinBillingExpr(name)
+		require.True(t, exists)
+		expressions[name] = expression
+	}
+	encodedExpressions, err := common.Marshal(expressions)
+	require.NoError(t, err)
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
-		"billing_setting.billing_mode": `{}`,
-		"billing_setting.billing_expr": `{}`,
+		"billing_setting.billing_mode": `{"deepseek-flash":"tiered_expr","deepseek-v4-pro":"tiered_expr"}`,
+		"billing_setting.billing_expr": string(encodedExpressions),
 	}))
 	oldSelfUse := operation_setting.SelfUseModeEnabled
 	operation_setting.SelfUseModeEnabled = false
@@ -695,7 +703,7 @@ func TestModelPriceHelperDeepSeekThinkingTailsBillAtBase(t *testing.T) {
 	}
 
 	info := &relaycommon.RelayInfo{OriginModelName: "deepseek-v4-pro-max", UserGroup: "default", UsingGroup: "default"}
-	_, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+	_, err = ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
 	require.Error(t, err)
 	assert.Equal(t, "deepseek-v4-pro-max", info.GetBillingModelName())
 }

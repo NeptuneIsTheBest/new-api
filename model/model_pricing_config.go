@@ -22,7 +22,7 @@ import (
 )
 
 // PricingValues is one model's configuration, keyed by the existing option
-// names. A missing key inherits the engine's default; an explicit zero is free.
+// names. Missing base prices stay unconfigured; an explicit zero is free.
 type PricingValues map[string]any
 
 type ModelPricingChange struct {
@@ -54,9 +54,10 @@ type ModelPricingPluginVariant struct {
 }
 
 type ModelPricingSnapshot struct {
-	Entries      []ModelPricingEntry `json:"entries"`
-	Options      map[string]string   `json:"options"`
-	EmptyVersion string              `json:"empty_version"`
+	DefaultModelNames []string            `json:"default_model_names"`
+	Entries           []ModelPricingEntry `json:"entries"`
+	Options           map[string]string   `json:"options"`
+	EmptyVersion      string              `json:"empty_version"`
 }
 
 var ErrModelPricingConflict = errors.New("model pricing changed; reload before saving")
@@ -177,21 +178,7 @@ func effectiveModelPricing(values map[string]map[string]any, name string) Pricin
 			result[key] = value
 		}
 	}
-	mode, _ := result["billing_setting.billing_mode"].(string)
-	if mode == "" {
-		_, hasPrice := result["ModelPrice"]
-		_, hasRatio := result["ModelRatio"]
-		if _, builtin := billing_setting.GetBuiltinBillingExpr(name); builtin && !hasPrice && !hasRatio {
-			mode = "tiered_expr"
-		}
-	}
-	if mode == "tiered_expr" {
-		result["billing_setting.billing_mode"] = mode
-		if _, exists := result["billing_setting.billing_expr"]; !exists {
-			if expression, ok := billing_setting.GetBuiltinBillingExpr(name); ok {
-				result["billing_setting.billing_expr"] = expression
-			}
-		}
+	if result["billing_setting.billing_mode"] == billing_setting.BillingModeTieredExpr {
 		return result
 	}
 	if _, exists := result["ModelPrice"]; exists {
@@ -255,15 +242,26 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 				nameSet[name] = true
 			}
 		}
-		for name := range billing_setting.GetBuiltinBillingExprCopy() {
-			nameSet[name] = true
-		}
 		for name := range nameSet {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	result := &ModelPricingSnapshot{Entries: make([]ModelPricingEntry, 0, len(names)), Options: make(map[string]string), EmptyVersion: ModelPricingVersion(PricingValues{})}
+	defaultNames := make(map[string]bool)
+	for _, entries := range defaultPricingMaps() {
+		for name := range entries {
+			defaultNames[name] = true
+		}
+	}
+	for name := range billing_setting.GetBuiltinBillingExprCopy() {
+		defaultNames[name] = true
+	}
+	result.DefaultModelNames = make([]string, 0, len(defaultNames))
+	for name := range defaultNames {
+		result.DefaultModelNames = append(result.DefaultModelNames, name)
+	}
+	slices.Sort(result.DefaultModelNames)
 	generation := jsplugin.DefaultRegistry.Generation()
 	for _, name := range names {
 		configured := modelPricingValues(values, name)
@@ -319,20 +317,6 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 			}
 		}
 		result.Entries = append(result.Entries, entry)
-	}
-	// Preserve the existing settings editor's full-map interface. Built-in
-	// expressions are display defaults only; per-model writes do not persist them.
-	for name, expression := range billing_setting.GetBuiltinBillingExprCopy() {
-		effective := effectiveModelPricing(values, name)
-		if effective["billing_setting.billing_mode"] != "tiered_expr" {
-			continue
-		}
-		if _, ok := values["billing_setting.billing_mode"][name]; !ok {
-			values["billing_setting.billing_mode"][name] = "tiered_expr"
-		}
-		if _, ok := values["billing_setting.billing_expr"][name]; !ok {
-			values["billing_setting.billing_expr"][name] = expression
-		}
 	}
 	for key, entries := range values {
 		encoded, err := common.Marshal(entries)
@@ -463,9 +447,7 @@ func validateModelPricing(name string, values, previous PricingValues) error {
 	}
 	if values["billing_setting.billing_mode"] == "tiered_expr" {
 		if _, exists := values["billing_setting.billing_expr"]; !exists {
-			if _, builtin := billing_setting.GetBuiltinBillingExpr(name); !builtin {
-				return errors.New("billing expression is required")
-			}
+			return errors.New("billing expression is required")
 		}
 	}
 	return nil
@@ -495,6 +477,10 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 			pricing := change.Pricing
 			if change.Reset {
 				pricing = modelPricingValues(defaults, change.ModelName)
+				if expression, exists := billing_setting.GetBuiltinBillingExpr(change.ModelName); exists {
+					pricing["billing_setting.billing_mode"] = billing_setting.BillingModeTieredExpr
+					pricing["billing_setting.billing_expr"] = expression
+				}
 			}
 			if err := validateModelPricing(change.ModelName, pricing, previous); err != nil {
 				return err

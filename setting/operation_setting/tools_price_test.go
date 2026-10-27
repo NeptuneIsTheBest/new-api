@@ -19,9 +19,9 @@ func preserveToolPrices(t *testing.T) {
 	})
 }
 
-func TestToolPriceHardcodedFallbacksSurviveMissingOperatorConfig(t *testing.T) {
+func TestToolPriceInitializedDefaults(t *testing.T) {
 	preserveToolPrices(t)
-	toolPriceSetting.Prices = map[string]float64{}
+	toolPriceSetting.Prices = GetDefaultToolPricesCopy()
 	RebuildToolPriceIndex()
 
 	tests := []struct {
@@ -83,16 +83,16 @@ func TestToolPriceOperatorOverridePrecedenceAndExplicitZero(t *testing.T) {
 	assert.Equal(t, 0.0, GetToolPriceForModel("web_search_preview", "o1"))
 	assert.Equal(t, 30.0, GetToolPriceForModel("web_search_preview", "gpt-4o"))
 	assert.Equal(t, 0.0, GetToolPriceForModel("web_search_preview", "gpt-4o-mini"))
-	assert.Equal(t, 25.0, GetToolPriceForModel("web_search_preview", "gpt-4.1"))
+	assert.Equal(t, 0.0, GetToolPriceForModel("web_search_preview", "gpt-4.1"))
 	assert.Equal(t, 7.0, GetToolPriceForModel("web_search_preview", "custom-model-v2"))
 
 	delete(toolPriceSetting.Prices, "web_search_preview:gpt-4o*")
 	RebuildToolPriceIndex()
-	assert.Equal(t, 25.0, GetToolPriceForModel("web_search_preview", "gpt-4o"))
+	assert.Equal(t, 0.0, GetToolPriceForModel("web_search_preview", "gpt-4o"))
 
 	delete(toolPriceSetting.Prices, "web_search")
 	RebuildToolPriceIndex()
-	assert.Equal(t, 10.0, GetToolPrice("web_search"))
+	assert.Equal(t, 0.0, GetToolPrice("web_search"))
 }
 
 func TestToolPriceCustomFunctionHasNoHardcodedFallback(t *testing.T) {
@@ -153,15 +153,15 @@ func TestLoadToolPricesFromJSONStringReplacesMapAndKeepsValidSiblings(t *testing
 	assert.Equal(t, 3.0, toolPriceSetting.Prices["custom_fn"])
 	assert.Equal(t, 0.0, GetToolPrice("web_search"))
 	assert.Equal(t, 3.0, GetToolPrice("custom_fn"))
-	assert.Equal(t, 2.5, GetToolPrice("file_search"))
-	assert.Equal(t, 14.0, GetToolPrice("google_search"))
-	assert.Equal(t, 150.0, GetToolPrice("image_generation"))
+	assert.Equal(t, 0.0, GetToolPrice("file_search"))
+	assert.Equal(t, 0.0, GetToolPrice("google_search"))
+	assert.Equal(t, 0.0, GetToolPrice("image_generation"))
 
 	LoadToolPricesFromJSONString(`{"image_generation":0}`)
 	require.Len(t, toolPriceSetting.Prices, 1)
 	assert.NotContains(t, toolPriceSetting.Prices, "web_search")
 	assert.NotContains(t, toolPriceSetting.Prices, "custom_fn")
-	assert.Equal(t, 10.0, GetToolPrice("web_search"))
+	assert.Equal(t, 0.0, GetToolPrice("web_search"))
 	assert.Equal(t, 0.0, GetToolPrice("custom_fn"))
 	assert.Equal(t, 0.0, GetToolPrice("image_generation"))
 }
@@ -176,8 +176,8 @@ func TestRebuildToolPriceIndexIgnoresInvalidDirectValues(t *testing.T) {
 	}
 	RebuildToolPriceIndex()
 
-	assert.Equal(t, 10.0, GetToolPrice("web_search"))
-	assert.Equal(t, 2.5, GetToolPrice("file_search"))
-	assert.Equal(t, 150.0, GetToolPrice("image_generation"))
+	assert.Equal(t, 0.0, GetToolPrice("web_search"))
+	assert.Equal(t, 0.0, GetToolPrice("file_search"))
+	assert.Equal(t, 0.0, GetToolPrice("image_generation"))
 	assert.Equal(t, 0.0, GetToolPrice("custom_fn"))
 }

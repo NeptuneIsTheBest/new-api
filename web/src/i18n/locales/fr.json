@@ -4867,6 +4867,7 @@
     "Pricing conditions": "Conditions tarifaires",
     "Pricing Configuration": "Configuration de la tarification",
     "Pricing currency": "Devise de tarification",
+    "Pricing defaults migration status is read-only": "L’état de migration des tarifs par défaut est en lecture seule",
     "Pricing group example": "Exemple de groupe tarifaire",
     "Pricing groups": "Groupes tarifaires",
     "Pricing mode": "Mode de tarification",
