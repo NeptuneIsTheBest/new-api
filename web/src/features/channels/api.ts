@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { getGroups as getUserGroups } from '@/features/users/api'
 import { api, type ApiRequestConfig } from '@/lib/api'
+import { authResult, AuthOperationError } from '@/lib/secure-verification'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type { PriorityMove, PriorityOrder } from './lib/channel-priority-order'
@@ -384,6 +385,59 @@ export async function getChannelKey(
 // ============================================================================
 // Codex Channel Operations
 // ============================================================================
+
+export type CodexOAuthAuthorization = {
+  authorize_url: string
+  flow_token: string
+  expires_at: number
+}
+
+export type CodexOAuthCredential = {
+  key: string
+  account_id: string
+  email: string
+  expires_at: string
+  last_refresh: string
+}
+
+export async function startCodexOAuth(
+  signal: AbortSignal
+): Promise<CodexOAuthAuthorization> {
+  const data = await authResult<CodexOAuthAuthorization>(
+    api.post(
+      '/api/channel/codex/oauth/start',
+      {},
+      channelActionConfig({ signal, singleUseAuthorization: true })
+    ),
+    'Codex authorization failed. Start a new authorization and try again.'
+  )
+  if (!data.authorize_url || !data.flow_token || !data.expires_at) {
+    throw new AuthOperationError(
+      'Codex authorization failed. Start a new authorization and try again.'
+    )
+  }
+  return data
+}
+
+export async function completeCodexOAuth(
+  input: { flow_token: string; input: string; proxy?: string },
+  signal: AbortSignal
+): Promise<CodexOAuthCredential> {
+  const data = await authResult<CodexOAuthCredential>(
+    api.post(
+      '/api/channel/codex/oauth/complete',
+      input,
+      channelActionConfig({ signal, singleUseAuthorization: true })
+    ),
+    'Codex authorization failed. Start a new authorization and try again.'
+  )
+  if (!data.key) {
+    throw new AuthOperationError(
+      'Codex authorization failed. Start a new authorization and try again.'
+    )
+  }
+  return data
+}
 
 export async function refreshCodexCredential(
   channelId: number

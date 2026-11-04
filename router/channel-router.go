@@ -49,6 +49,10 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 		controller.GetChannelKey,
 	)
 
+	codexOAuthRoute := channelRoute.Group("/codex/oauth", middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("codex-oauth"), middleware.DisableCache())
+	handlePermissionRoute(codexOAuthRoute, http.MethodPost, "/start", authz.ChannelSensitiveWrite, controller.StartCodexOAuth)
+	handlePermissionRoute(codexOAuthRoute, http.MethodPost, "/complete", authz.ChannelSensitiveWrite, controller.CompleteCodexOAuth)
+
 	for _, route := range channelPermissionRoutes {
 		handlePermissionRoute(channelRoute, route.method, route.path, route.permission, route.handler)
 	}

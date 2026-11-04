@@ -211,6 +211,7 @@ import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
+import { CodexOAuthDialog } from '../dialogs/codex-oauth-dialog'
 import { ConfigureModelsDialog } from '../dialogs/configure-models-dialog'
 import {
   MissingModelsConfirmationDialog,
@@ -411,6 +412,8 @@ export function ChannelMutateDrawer({
   const queryClient = useQueryClient()
   const { setOpen } = useChannels()
   const currentUser = useAuthStore((s) => s.auth.user)
+  const sessionId = useAuthStore((s) => s.auth.session?.sid)
+  const [codexOAuthDialogOpen, setCodexOAuthDialogOpen] = useState(false)
   const canEditSensitive = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
@@ -606,6 +609,9 @@ export function ChannelMutateDrawer({
   const currentAdvancedCustom = formValues.advanced_custom
   const currentHeaderOverride = formValues.header_override
   const currentProxy = formValues.proxy
+  useEffect(() => {
+    setCodexOAuthDialogOpen(false)
+  }, [open, channelId, currentType, sessionId, canEditSensitive])
   const currentHttpProtocol = formValues.http_protocol
   const {
     unlocked: doubaoApiEditUnlocked,
@@ -4529,6 +4535,17 @@ export function ChannelMutateDrawer({
                       )}
                     </div>
                     <div className='flex flex-wrap items-center gap-2'>
+                      {canEditSensitive && (
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={() => setCodexOAuthDialogOpen(true)}
+                          disabled={isSubmitting || isCodexCredentialRefreshing}
+                        >
+                          {t('Assisted login')}
+                        </Button>
+                      )}
                       {isEditing && channelId && (
                         <Button
                           type='button'
@@ -5134,6 +5151,24 @@ export function ChannelMutateDrawer({
       )}
 
       <SecureVerificationDialog {...verification.dialogProps} />
+
+      {open &&
+        currentType === 57 &&
+        canEditSensitive &&
+        codexOAuthDialogOpen && (
+          <CodexOAuthDialog
+            key={`${channelId ?? 'new'}:${sessionId ?? ''}`}
+            open
+            proxy={currentProxy}
+            onOpenChange={setCodexOAuthDialogOpen}
+            onKeyGenerated={(key) => {
+              form.setValue('key', key, {
+                shouldDirty: true,
+                shouldValidate: true,
+              })
+            }}
+          />
+        )}
 
       {/* Missing Models Confirmation Dialog */}
       <MissingModelsConfirmationDialog

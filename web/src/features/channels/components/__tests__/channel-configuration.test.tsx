@@ -204,6 +204,140 @@ afterEach(() => {
   })
 })
 
+test.each(['create', 'edit'])(
+  'Codex assisted login fills a %s draft and only persists on save',
+  async (mode) => {
+    editingChannel.type = 57
+    const key =
+      '{"access_token":"generated-access","refresh_token":"generated-refresh","account_id":"account-1"}'
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+      if (url === '/api/channel/codex/oauth/start') {
+        return {
+          data: {
+            success: true,
+            data: {
+              authorize_url:
+                'https://auth.openai.com/oauth/authorize?state=first',
+              flow_token: 'first',
+              expires_at: 2000000000,
+            },
+          },
+        }
+      }
+      if (url === '/api/channel/codex/oauth/complete') {
+        return {
+          data: { success: true, data: { key, account_id: 'account-1' } },
+        }
+      }
+      return { data: { success: true } }
+    })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    const user = userEvent.setup()
+    render(
+      <ConfigurationHarness
+        currentRow={mode === 'edit' ? editingChannel : undefined}
+      />
+    )
+    if (mode === 'create') {
+      await user.click(
+        await screen.findByRole('option', { name: /ChatGPT Subscription/ })
+      )
+      await user.click(
+        screen.getByRole('combobox', {
+          name: 'Select models or add custom ones',
+        })
+      )
+      await user.click(screen.getByRole('option', { name: 'custom-model' }))
+      await user.keyboard('{Escape}')
+    }
+    await user.click(
+      await screen.findByRole('button', { name: 'Assisted login' })
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Start authorization' })
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: 'Callback URL' }), {
+      target: {
+        value: 'http://localhost:1455/auth/callback?code=private&state=first',
+      },
+    })
+    await user.click(
+      screen.getByRole('button', { name: 'Generate credential' })
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', {
+          name: 'ChatGPT subscription assisted login',
+        })
+      ).not.toBeInTheDocument()
+    )
+    const keyInput = screen.getByLabelText('API Key *') as HTMLTextAreaElement
+    expect(JSON.parse(keyInput.value)).toEqual(JSON.parse(key))
+    expect(put).not.toHaveBeenCalled()
+    expect(
+      post.mock.calls.every(([url]) => String(url).includes('/codex/oauth/'))
+    ).toBe(true)
+    await user.click(
+      screen.getByRole('button', {
+        name: mode === 'edit' ? 'Update Channel' : 'Create Channel',
+      })
+    )
+    if (mode === 'edit') {
+      await waitFor(() => expect(put).toHaveBeenCalledOnce())
+      const payload = put.mock.calls[0][1] as { key: string }
+      expect(JSON.parse(payload.key)).toEqual(JSON.parse(key))
+    } else {
+      await waitFor(() =>
+        expect(post).toHaveBeenCalledWith(
+          '/api/channel',
+          expect.anything(),
+          expect.anything()
+        )
+      )
+      const payload = post.mock.calls.find(
+        ([url]) => url === '/api/channel'
+      )?.[1] as { channel: { key: string } }
+      expect(JSON.parse(payload.channel.key)).toEqual(JSON.parse(key))
+    }
+  }
+)
+
+test('Codex assisted login is hidden without sensitive write permission', async () => {
+  editingChannel.type = 57
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 2, username: 'admin', role: ROLE.ADMIN },
+    },
+  })
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByText(
+    'Codex channels use an OAuth JSON credential as the key.'
+  )
+  expect(
+    screen.queryByRole('button', { name: 'Assisted login' })
+  ).not.toBeInTheDocument()
+})
+
+test('canceling Codex assisted login preserves the existing key draft', async () => {
+  editingChannel.type = 57
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const keyInput = screen.getByLabelText('API Key *')
+  const draft = '{"access_token":"draft-access","account_id":"draft-account"}'
+  fireEvent.change(keyInput, { target: { value: draft } })
+  await user.click(screen.getByRole('button', { name: 'Assisted login' }))
+  const dialog = screen.getByRole('dialog', {
+    name: 'ChatGPT subscription assisted login',
+  })
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+  expect(keyInput).toHaveValue(draft)
+})
+
 // Editing opens the sheet on the left, so the sheet spans x = 0..900 and the
 // free space for the floating panel is on its right.
 function useWideScreen() {
