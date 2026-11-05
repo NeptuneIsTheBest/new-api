@@ -4,10 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -215,5 +219,92 @@ func TestToWebSocketURL(t *testing.T) {
 		"ws://127.0.0.1:3000/backend-api/codex/responses": "ws://127.0.0.1:3000/backend-api/codex/responses",
 	} {
 		assert.Equal(t, want, toWebSocketURL(input), input)
+	}
+}
+
+type websocketTestAdaptor struct {
+	Adaptor
+	url string
+}
+
+func (a websocketTestAdaptor) GetRequestURL(*relaycommon.RelayInfo) (string, error) {
+	return a.url, nil
+}
+
+func (a websocketTestAdaptor) SetupRequestHeader(*gin.Context, *http.Header, *relaycommon.RelayInfo) error {
+	return nil
+}
+
+func TestDoWssRequestChannelCompression(t *testing.T) {
+	tests := []struct {
+		name                string
+		enabled             bool
+		upstreamCompression bool
+	}{
+		{name: "disabled by default", upstreamCompression: true},
+		{name: "negotiates compression", enabled: true, upstreamCompression: true},
+		{name: "another channel remains uncompressed", upstreamCompression: true},
+		{name: "upstream declines compression", enabled: true},
+	}
+	messages := []struct {
+		kind    int
+		payload []byte
+	}{
+		{kind: websocket.TextMessage, payload: []byte(strings.Repeat("压缩消息 / compressed message\n", 32))},
+		{kind: websocket.BinaryMessage, payload: []byte{0, 1, 2, 255, 0, 1, 2, 255}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				offer := r.Header.Get("Sec-WebSocket-Extensions")
+				assert.Equal(t, tt.enabled, strings.Contains(offer, "permessage-deflate"))
+				upgrader := websocket.Upgrader{EnableCompression: tt.upstreamCompression}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer conn.Close()
+				if !assert.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second))) {
+					return
+				}
+				if !assert.NoError(t, conn.SetWriteDeadline(time.Now().Add(5*time.Second))) {
+					return
+				}
+				for _, message := range messages {
+					kind, payload, err := conn.ReadMessage()
+					if !assert.NoError(t, err) {
+						return
+					}
+					assert.Equal(t, message.kind, kind)
+					assert.Equal(t, message.payload, payload)
+					if !assert.NoError(t, conn.WriteMessage(kind, payload)) {
+						return
+					}
+				}
+			}))
+			defer upstream.Close()
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			// Client-side compression must not enable upstream compression, even
+			// when the channel passes through other request headers.
+			ctx.Request.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelSetting:  dto.ChannelSettings{WebSocketCompressionEnabled: tt.enabled},
+				HeadersOverride: map[string]any{"*": ""},
+			}}
+			conn, err := DoWssRequest(websocketTestAdaptor{url: upstream.URL}, ctx, info, nil)
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+			require.NoError(t, conn.SetWriteDeadline(time.Now().Add(5*time.Second)))
+			for _, message := range messages {
+				require.NoError(t, conn.WriteMessage(message.kind, message.payload))
+				kind, payload, err := conn.ReadMessage()
+				require.NoError(t, err)
+				assert.Equal(t, message.kind, kind)
+				assert.Equal(t, message.payload, payload)
+			}
+		})
 	}
 }

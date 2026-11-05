@@ -407,6 +407,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = info.ChannelSetting.WebSocketCompressionEnabled
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {

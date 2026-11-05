@@ -304,6 +304,7 @@ const SENSITIVE_FORM_FIELDS = [
   'http_protocol',
   'http2_connection_shards',
   'tls_insecure_skip_verify',
+  'websocket_compression_enabled',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
   'system_prompt',
@@ -2188,6 +2189,37 @@ export function ChannelMutateDrawer({
               disabled={sensitiveLocked}
               checked={field.value}
               onCheckedChange={field.onChange}
+            />
+          </FormControl>
+        </FormItem>
+      )}
+    />
+  )
+
+  const websocketCompressionFields = (
+    <FormField
+      control={form.control}
+      name='websocket_compression_enabled'
+      render={({ field }) => (
+        <FormItem className='flex items-center justify-between gap-4 px-4 py-3'>
+          <div className='space-y-0.5'>
+            <FormLabel>
+              {t('Enable WebSocket compression (permessage-deflate)')}
+            </FormLabel>
+            <FormDescription>
+              {t(
+                'Negotiate compression for new upstream WebSocket connections. Connections remain uncompressed if the upstream does not accept it.'
+              )}
+            </FormDescription>
+          </div>
+          <FormControl>
+            <Switch
+              checked={field.value === true}
+              onCheckedChange={field.onChange}
+              disabled={sensitiveLocked || isSubmitting}
+              onBlur={field.onBlur}
+              name={field.name}
+              ref={field.ref}
             />
           </FormControl>
         </FormItem>
@@ -4835,6 +4867,7 @@ export function ChannelMutateDrawer({
                 {httpProtocolFields}
                 {httpShardsFields}
                 {tlsInsecureSkipVerifyFields}
+                {websocketCompressionFields}
               </fieldset>
             </div>
             {upstreamModelDetectionFields}

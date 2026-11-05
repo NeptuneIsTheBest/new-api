@@ -1891,6 +1891,81 @@ test('turning on the upstream TLS verification skip saves it in the channel sett
   })
 })
 
+test('saved WebSocket compression marks Other Settings and disabling it removes the setting', async () => {
+  editingChannel.setting = '{"websocket_compression_enabled":true}'
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const otherTab = screen.getByRole('tab', { name: /Other Settings/ })
+  expect(otherTab).toHaveAccessibleName(/Configured/)
+  expect(
+    screen.getByRole('tab', { name: /Request & Response/ })
+  ).not.toHaveAccessibleName(/Configured/)
+  await user.click(otherTab)
+  const toggle = screen.getByRole('switch', {
+    name: 'Enable WebSocket compression (permessage-deflate)',
+  })
+  expect(toggle).toBeChecked()
+  await user.click(toggle)
+  expect(toggle).not.toBeChecked()
+  expect(otherTab).not.toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { setting: string }
+  expect(JSON.parse(payload.setting)).not.toHaveProperty(
+    'websocket_compression_enabled'
+  )
+})
+
+test.each(['create', 'edit'])(
+  'WebSocket compression defaults off and can be saved in a %s form',
+  async (mode) => {
+    const save = vi
+      .spyOn(api, mode === 'create' ? 'post' : 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(
+      <ConfigurationHarness
+        currentRow={mode === 'edit' ? editingChannel : undefined}
+      />
+    )
+    if (mode === 'create') {
+      await user.click(await screen.findByRole('option', { name: /Video A/ }))
+      fireEvent.change(screen.getByLabelText('API Key *'), {
+        target: { value: 'test-key' },
+      })
+    } else {
+      await screen.findByDisplayValue('Existing channel')
+    }
+    const otherTab = screen.getByRole('tab', { name: /Other Settings/ })
+    await user.click(otherTab)
+    const toggle = screen.getByRole('switch', {
+      name: 'Enable WebSocket compression (permessage-deflate)',
+    })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    expect(otherTab).toHaveAccessibleName(/Configured/)
+    await user.click(
+      screen.getByRole('button', {
+        name: mode === 'create' ? 'Create Channel' : 'Update Channel',
+      })
+    )
+    await waitFor(() => expect(save).toHaveBeenCalled())
+    const payload = save.mock.calls[0]?.[1] as {
+      channel?: { setting: string }
+      setting: string
+    }
+    const setting = payload.channel?.setting ?? payload.setting
+    expect(JSON.parse(setting)).toMatchObject({
+      websocket_compression_enabled: true,
+      responses_websocket_enabled: false,
+    })
+  }
+)
+
 test('an invalid edit switches categories and replaces configured styling with the field error', async () => {
   const user = userEvent.setup()
   render(<ConfigurationHarness currentRow={editingChannel} />)
@@ -2269,6 +2344,12 @@ test('an operator without sensitive write permission can discover saved models a
   expect(thinking).not.toBeChecked()
   await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
   expect(screen.getByLabelText('Proxy Address')).toBeDisabled()
+  const compression = screen.getByRole('switch', {
+    name: 'Enable WebSocket compression (permessage-deflate)',
+  })
+  expect(compression).toHaveAttribute('aria-disabled', 'true')
+  await user.click(compression)
+  expect(compression).not.toBeChecked()
   await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
   fireEvent.change(screen.getByLabelText('Priority'), {
     target: { value: '8' },

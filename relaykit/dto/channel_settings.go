@@ -35,6 +35,9 @@ type ChannelSettings struct {
 	// TLSInsecureSkipVerify accepts upstream certificates that fail
 	// verification, such as self-signed ones, for this channel only.
 	TLSInsecureSkipVerify bool `json:"tls_insecure_skip_verify,omitempty"`
+	// WebSocketCompressionEnabled negotiates permessage-deflate on new upstream
+	// WebSocket connections. Compression remains disabled when unset.
+	WebSocketCompressionEnabled bool `json:"websocket_compression_enabled,omitempty"`
 }
 
 // BindsTaskPlugin reports whether the channel is bound to the task plugin,
