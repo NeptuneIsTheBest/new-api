@@ -188,7 +188,10 @@ function listedProfile(action, model) {
 // model the plugin does not list those of every Vidu model.
 function dearestSettings(action, model) {
   let profiles = [listedProfile(action, model)];
-  if (!profiles[0]) profiles = Object.keys(ENDPOINT_MODELS).map((name) => listedProfile(name, model)).filter(Boolean);
+  if (!profiles[0])
+    profiles = Object.keys(ENDPOINT_MODELS)
+      .map((name) => listedProfile(name, model))
+      .filter(Boolean);
   if (!profiles.length) {
     for (const name of Object.keys(ENDPOINT_MODELS)) profiles = profiles.concat(Object.keys(ENDPOINT_MODELS[name]).map((key) => ENDPOINT_MODELS[name][key]));
   }
