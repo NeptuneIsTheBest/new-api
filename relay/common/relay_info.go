@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
@@ -560,8 +561,8 @@ func reasoningEffortFromRequest(request dto.Request) string {
 		}
 		effort = req.ReasoningEffort
 		if strings.TrimSpace(effort) == "" && len(req.Reasoning) > 0 {
-			value := gjson.GetBytes(req.Reasoning, "effort")
-			if value.Type == gjson.String {
+			value := ojson.GetBytes(req.Reasoning, "effort")
+			if value.Type == ojson.String {
 				effort = value.String()
 			}
 		}
@@ -1144,6 +1145,50 @@ func FailTaskInfo(reason string) *TaskInfo {
 	}
 }
 
+// DeleteJSONMember removes every copy of the member at path. A client body
+// may repeat a key, and most upstream parsers read the last copy, so a
+// surviving copy could reach the upstream after the gateway removed or
+// replaced the first one.
+func DeleteJSONMember(doc *ojson.Doc, path string) error {
+	for doc.Get(path).Exists() {
+		size := doc.Len()
+		if err := doc.Delete(path); err != nil {
+			return err
+		}
+		if doc.Len() == size {
+			return fmt.Errorf("delete %s: member was not removed", path)
+		}
+	}
+	return nil
+}
+
+// SetJSONMember sets member key of the object at parent ("" for the root) to
+// value and leaves one copy. A key that appears once is replaced where it
+// stands, so the object keeps its member order; a repeated key is removed
+// everywhere, for the reason given on DeleteJSONMember, and written once at
+// the end.
+func SetJSONMember(doc *ojson.Doc, parent, key string, value any) error {
+	path := ojson.Escape(key)
+	object := doc.Get("@this")
+	if parent != "" {
+		path = parent + "." + path
+		object = doc.Get(parent)
+	}
+	copies := 0
+	object.ForEach(func(member, _ ojson.Result) bool {
+		if member.Str == key {
+			copies++
+		}
+		return copies < 2
+	})
+	if copies > 1 {
+		if err := DeleteJSONMember(doc, path); err != nil {
+			return err
+		}
+	}
+	return doc.Set(path, value)
+}
+
 // RemoveDisabledFields 从请求 JSON 数据中移除渠道设置中禁用的字段
 // service_tier: 服务层级字段，可能导致额外计费（OpenAI、Claude、Responses API 支持）
 // inference_geo: Claude 数据驻留推理区域字段（仅 Claude 支持，默认过滤）
@@ -1278,39 +1323,34 @@ func RemoveGeminiDisabledFields(jsonData []byte) ([]byte, error) {
 		return jsonData, nil
 	}
 
-	var data map[string]any
-	if err := common.Unmarshal(jsonData, &data); err != nil {
-		common.SysError(common.LogText("RemoveGeminiDisabledFields Unmarshal error: %s", err.Error()))
+	if !ojson.ValidBytes(jsonData) {
+		common.SysError(common.LogText("RemoveGeminiDisabledFields Unmarshal error: %s", "invalid JSON"))
 		return jsonData, nil
 	}
 
-	// Process contents array
+	// Process contents array; only the removed ids change, so inline data
+	// is never decoded or re-encoded.
 	// Handle both camelCase (functionResponse) and snake_case (function_response)
-	if contents, ok := data["contents"].([]any); ok {
-		for _, content := range contents {
-			if contentMap, ok := content.(map[string]any); ok {
-				if parts, ok := contentMap["parts"].([]any); ok {
-					for _, part := range parts {
-						if partMap, ok := part.(map[string]any); ok {
-							// Check functionResponse (camelCase)
-							if funcResp, ok := partMap["functionResponse"].(map[string]any); ok {
-								delete(funcResp, "id")
-							}
-							// Check function_response (snake_case)
-							if funcResp, ok := partMap["function_response"].(map[string]any); ok {
-								delete(funcResp, "id")
-							}
-						}
-					}
+	contents := ojson.GetBytesNoCopy(jsonData, "contents")
+	if !contents.IsArray() {
+		return jsonData, nil
+	}
+	doc := ojson.NewDoc(jsonData)
+	for i, content := range contents.Array() {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		for j, part := range parts.Array() {
+			for _, field := range []string{"functionResponse", "function_response"} {
+				if !part.Get(field + ".id").Exists() {
+					continue
+				}
+				if err := DeleteJSONMember(doc, fmt.Sprintf("contents.%d.parts.%d.%s.id", i, j, field)); err != nil {
+					return nil, err
 				}
 			}
 		}
 	}
-
-	jsonDataAfter, err := common.Marshal(data)
-	if err != nil {
-		common.SysError(common.LogText("RemoveGeminiDisabledFields Marshal error: %s", err.Error()))
-		return jsonData, nil
-	}
-	return jsonDataAfter, nil
+	return doc.Bytes(), nil
 }
