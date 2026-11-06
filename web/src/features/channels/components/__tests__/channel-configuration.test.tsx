@@ -57,12 +57,12 @@ const compressionSettings = [
   {
     name: 'WebSocket',
     key: 'websocket_compression_enabled',
-    label: 'Enable WebSocket compression (permessage-deflate)',
+    label: 'Enable WebSocket compression',
   },
   {
     name: 'Responses',
     key: 'responses_zstd_compression_enabled',
-    label: 'Enable Responses request compression (zstd)',
+    label: 'Enable Responses request compression',
   },
 ] as const
 let client: QueryClient
@@ -1992,7 +1992,7 @@ test('Responses compression stays disabled while saving the channel', async () =
   await screen.findByDisplayValue('Existing channel')
   await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
   const toggle = screen.getByRole('switch', {
-    name: 'Enable Responses request compression (zstd)',
+    name: 'Enable Responses request compression',
   })
   await user.click(toggle)
   await user.click(screen.getByRole('button', { name: 'Update Channel' }))
@@ -2003,7 +2003,7 @@ test('Responses compression stays disabled while saving the channel', async () =
   await waitFor(() =>
     expect(
       screen.queryByRole('switch', {
-        name: 'Enable Responses request compression (zstd)',
+        name: 'Enable Responses request compression',
       })
     ).not.toBeInTheDocument()
   )
@@ -2028,7 +2028,7 @@ test('Responses compression is disabled without sensitive channel write permissi
   await screen.findByDisplayValue('Existing channel')
   await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
   const toggle = screen.getByRole('switch', {
-    name: 'Enable Responses request compression (zstd)',
+    name: 'Enable Responses request compression',
   })
   expect(toggle).toHaveAttribute('aria-disabled', 'true')
   await user.click(toggle)
@@ -2414,7 +2414,7 @@ test('an operator without sensitive write permission can discover saved models a
   await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
   expect(screen.getByLabelText('Proxy Address')).toBeDisabled()
   const compression = screen.getByRole('switch', {
-    name: 'Enable WebSocket compression (permessage-deflate)',
+    name: 'Enable WebSocket compression',
   })
   expect(compression).toHaveAttribute('aria-disabled', 'true')
   await user.click(compression)

@@ -2207,12 +2207,10 @@ export function ChannelMutateDrawer({
       render={({ field }) => (
         <FormItem className='flex items-center justify-between gap-4 px-4 py-3'>
           <div className='space-y-0.5'>
-            <FormLabel>
-              {t('Enable WebSocket compression (permessage-deflate)')}
-            </FormLabel>
+            <FormLabel>{t('Enable WebSocket compression')}</FormLabel>
             <FormDescription>
               {t(
-                'Negotiate compression for new upstream WebSocket connections. Connections remain uncompressed if the upstream does not accept it.'
+                'Try to enable compression for new upstream WebSocket connections. Automatically use uncompressed connections if the upstream does not support it.'
               )}
             </FormDescription>
           </div>
@@ -2241,9 +2239,9 @@ export function ChannelMutateDrawer({
           checked={field.value === true}
           onCheckedChange={field.onChange}
           disabled={sensitiveLocked || isSubmitting}
-          label={t('Enable Responses request compression (zstd)')}
+          label={t('Enable Responses request compression')}
           description={t(
-            'Compress HTTP request bodies sent to Responses upstreams, including streaming and non-streaming requests. Enable only if the upstream supports zstd.'
+            'Compress Responses request bodies sent upstream, including streaming and non-streaming requests. Confirm upstream zstd support before enabling.'
           )}
           className='px-4 py-3'
         />
