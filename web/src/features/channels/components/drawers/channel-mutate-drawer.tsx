@@ -44,6 +44,7 @@ import {
 import {
   type ComponentProps,
   type ReactNode,
+  useId,
   useEffect,
   useState,
   useMemo,
@@ -105,6 +106,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { SecureVerificationDialog } from '@/features/auth/secure-verification'
+import { SettingsSwitchField } from '@/features/system-settings/components/settings-form-layout'
 import { PluginIcon } from '@/features/task-plugins/components/plugin-icon'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
@@ -305,6 +307,7 @@ const SENSITIVE_FORM_FIELDS = [
   'http2_connection_shards',
   'tls_insecure_skip_verify',
   'websocket_compression_enabled',
+  'responses_zstd_compression_enabled',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
   'system_prompt',
@@ -411,6 +414,7 @@ export function ChannelMutateDrawer({
   currentRow,
 }: ChannelMutateDrawerProps) {
   const { t } = useTranslation()
+  const responsesCompressionId = useId()
   const queryClient = useQueryClient()
   const { setOpen } = useChannels()
   const currentUser = useAuthStore((s) => s.auth.user)
@@ -2223,6 +2227,26 @@ export function ChannelMutateDrawer({
             />
           </FormControl>
         </FormItem>
+      )}
+    />
+  )
+
+  const responsesCompressionFields = (
+    <FormField
+      control={form.control}
+      name='responses_zstd_compression_enabled'
+      render={({ field }) => (
+        <SettingsSwitchField
+          controlId={responsesCompressionId}
+          checked={field.value === true}
+          onCheckedChange={field.onChange}
+          disabled={sensitiveLocked || isSubmitting}
+          label={t('Enable Responses request compression (zstd)')}
+          description={t(
+            'Compress HTTP request bodies sent to Responses upstreams, including streaming and non-streaming requests. Enable only if the upstream supports zstd.'
+          )}
+          className='px-4 py-3'
+        />
       )}
     />
   )
@@ -4868,6 +4892,7 @@ export function ChannelMutateDrawer({
                 {httpShardsFields}
                 {tlsInsecureSkipVerifyFields}
                 {websocketCompressionFields}
+                {responsesCompressionFields}
               </fieldset>
             </div>
             {upstreamModelDetectionFields}

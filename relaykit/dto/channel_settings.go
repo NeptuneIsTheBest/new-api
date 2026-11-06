@@ -38,6 +38,9 @@ type ChannelSettings struct {
 	// WebSocketCompressionEnabled negotiates permessage-deflate on new upstream
 	// WebSocket connections. Compression remains disabled when unset.
 	WebSocketCompressionEnabled bool `json:"websocket_compression_enabled,omitempty"`
+	// ResponsesZstdCompressionEnabled compresses outgoing Responses HTTP request
+	// bodies, including streaming and non-streaming requests. Disabled when unset.
+	ResponsesZstdCompressionEnabled bool `json:"responses_zstd_compression_enabled,omitempty"`
 }
 
 // BindsTaskPlugin reports whether the channel is bound to the task plugin,

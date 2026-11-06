@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/klauspost/compress/zstd"
 )
 
 // ApplyUpstreamBodyMetadata restores metadata that net/http cannot infer from
@@ -336,16 +338,86 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
-	// 这样可以覆盖默认的 Authorization header 设置
+	// Apply channel headers before finalizing the body's encoding and length.
 	if err = ApplyHeaderOverride(info, c, req); err != nil {
 		return nil, err
 	}
+	var compressedStorage io.Closer
+	if info.ChannelSetting.ResponsesZstdCompressionEnabled &&
+		req.Method == http.MethodPost &&
+		info.RelayMode != constant.RelayModeResponsesCompact &&
+		info.GetFinalRequestRelayFormat() == types.RelayFormatOpenAIResponses {
+		compressedStorage, err = compressResponsesRequestBody(req)
+		if err != nil {
+			return nil, fmt.Errorf("compress responses request body failed: %w", err)
+		}
+	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
+		if compressedStorage != nil {
+			_ = compressedStorage.Close()
+		}
 		return nil, fmt.Errorf("do request failed: %w", err)
 	}
+	if compressedStorage != nil {
+		// The transport may still be uploading after response headers arrive.
+		resp.Body = &responseBodyWithRequestStorage{ReadCloser: resp.Body, storage: compressedStorage}
+	}
 	return resp, nil
+}
+
+type responseBodyWithRequestStorage struct {
+	io.ReadCloser
+	storage   io.Closer
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (b *responseBodyWithRequestStorage) Close() error {
+	b.closeOnce.Do(func() {
+		b.closeErr = errors.Join(b.ReadCloser.Close(), b.storage.Close())
+	})
+	return b.closeErr
+}
+
+// compressResponsesRequestBody keeps the compressed payload replayable for
+// transport retries. The caller must keep the storage alive until the response
+// body is closed, or release it if the request fails without a response.
+func compressResponsesRequestBody(req *http.Request) (io.Closer, error) {
+	var compressed bytes.Buffer
+	encoder, err := zstd.NewWriter(&compressed,
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderConcurrency(1),
+	)
+	if err != nil {
+		return nil, err
+	}
+	source := req.Body
+	if source == nil {
+		source = http.NoBody
+	}
+	// ApplyUpstreamBodyMetadata hides the storage's Close method, preserving
+	// its caller-owned lifetime when releasing this request's source reader.
+	defer source.Close()
+	_, readErr := io.Copy(encoder, source)
+	closeErr := encoder.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	body, closer, err := common.NewOutboundJSONBody(compressed.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	req.Body = io.NopCloser(body)
+	req.ContentLength = body.Size()
+	req.GetBody = body.NewReader
+	req.Header.Del("Content-Length")
+	req.Header.Set("Content-Encoding", "zstd")
+	req.Header.Set("Content-Type", "application/json")
+	return closer, nil
 }
 
 func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {

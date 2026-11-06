@@ -290,7 +290,7 @@ func TestDoWssRequestChannelCompression(t *testing.T) {
 			// when the channel passes through other request headers.
 			ctx.Request.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate")
 			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
-				ChannelSetting:  dto.ChannelSettings{WebSocketCompressionEnabled: tt.enabled},
+				ChannelSetting:  dto.ChannelSettings{WebSocketCompressionEnabled: tt.enabled, ResponsesZstdCompressionEnabled: true},
 				HeadersOverride: map[string]any{"*": ""},
 			}}
 			conn, err := DoWssRequest(websocketTestAdaptor{url: upstream.URL}, ctx, info, nil)

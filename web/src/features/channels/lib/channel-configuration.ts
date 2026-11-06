@@ -86,6 +86,7 @@ const CONFIGURATION_BLOCKS = {
       'http2_connection_shards',
       'tls_insecure_skip_verify',
       'websocket_compression_enabled',
+      'responses_zstd_compression_enabled',
       'disable_task_polling_sleep',
     ],
   },
@@ -179,6 +180,7 @@ export function getChannelConfigurationState(
       (values.http2_connection_shards ?? 1) > 1 ||
       values.tls_insecure_skip_verify ||
       values.websocket_compression_enabled ||
+      values.responses_zstd_compression_enabled ||
       values.disable_task_polling_sleep
     ),
     upstreamModelDetection:

@@ -4,24 +4,432 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )
+
+func TestDoApiRequestResponsesZstd(t *testing.T) {
+	service.InitHttpClient()
+	payload := []byte("{\n\"model\":\"test-model\",\"input\":\"零 / hello\",\"parallel_tool_calls\":false,\"unknown\":0}\n")
+	readErr := errors.New("request body read failed")
+	tests := []struct {
+		name       string
+		enabled    bool
+		stream     bool
+		format     types.RelayFormat
+		converted  types.RelayFormat
+		mode       int
+		method     string
+		overrides  map[string]any
+		status     int
+		readError  bool
+		compressed bool
+	}{
+		{name: "disabled by default", format: types.RelayFormatOpenAIResponses},
+		{name: "streaming Responses", enabled: true, stream: true, format: types.RelayFormatOpenAIResponses, compressed: true},
+		{name: "non-streaming Responses", enabled: true, format: types.RelayFormatOpenAIResponses, compressed: true},
+		{name: "another channel stays disabled", format: types.RelayFormatOpenAIResponses},
+		{name: "converted to Responses", enabled: true, format: types.RelayFormatOpenAI, converted: types.RelayFormatOpenAIResponses, compressed: true},
+		{name: "converted away from Responses", enabled: true, format: types.RelayFormatOpenAIResponses, converted: types.RelayFormatOpenAI},
+		{name: "other protocol", enabled: true, format: types.RelayFormatClaude},
+		{name: "compact", enabled: true, format: types.RelayFormatOpenAIResponses, mode: relayconstant.RelayModeResponsesCompact},
+		{name: "non-POST", enabled: true, format: types.RelayFormatOpenAIResponses, method: http.MethodGet},
+		{name: "body metadata overrides conflicting headers", enabled: true, format: types.RelayFormatOpenAIResponses, compressed: true, overrides: map[string]any{"Content-Encoding": "gzip", "Content-Length": "999", "Content-Type": "text/plain"}},
+		{name: "upstream refuses compression without fallback", enabled: true, format: types.RelayFormatOpenAIResponses, compressed: true, status: http.StatusUnsupportedMediaType},
+		{name: "source read failure sends nothing", enabled: true, format: types.RelayFormatOpenAIResponses, readError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				sent, err := io.ReadAll(r.Body)
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.EqualValues(t, len(sent), r.ContentLength)
+				if tt.compressed {
+					assert.Equal(t, "zstd", r.Header.Get("Content-Encoding"))
+					assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+					decoder, err := zstd.NewReader(nil)
+					if !assert.NoError(t, err) {
+						return
+					}
+					defer decoder.Close()
+					sent, err = decoder.DecodeAll(sent, nil)
+					assert.NoError(t, err)
+				} else {
+					assert.Empty(t, r.Header.Get("Content-Encoding"))
+				}
+				assert.Equal(t, payload, sent)
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+					return
+				}
+				if tt.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\"}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"status":"completed"}`)
+			}))
+			defer upstream.Close()
+			method := tt.method
+			if method == "" {
+				method = http.MethodPost
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(method, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{
+				RelayFormat: tt.format,
+				RelayMode:   tt.mode,
+				IsStream:    tt.stream,
+				DisablePing: true,
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelSetting:  dto.ChannelSettings{ResponsesZstdCompressionEnabled: tt.enabled},
+					HeadersOverride: tt.overrides,
+				},
+			}
+			info.InitRequestConversionChain()
+			info.AppendRequestConversion(tt.converted)
+			var body io.Reader = bytes.NewReader(payload)
+			if tt.readError {
+				body = iotest.ErrReader(readErr)
+			}
+			resp, err := DoApiRequest(websocketTestAdaptor{url: upstream.URL + "/custom/responses"}, ctx, info, body)
+			if tt.readError {
+				require.ErrorIs(t, err, readErr)
+				assert.Nil(t, resp)
+				assert.Zero(t, requests.Load())
+				return
+			}
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			_, err = io.Copy(io.Discard, resp.Body)
+			require.NoError(t, err)
+			status := tt.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			assert.Equal(t, status, resp.StatusCode)
+			assert.EqualValues(t, 1, requests.Load())
+		})
+	}
+}
+
+func TestCompressedResponsesBodyStorageAndReplay(t *testing.T) {
+	originalConfig := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(originalConfig) })
+	for _, disk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+			payload := []byte(`{}`)
+			storage, err := common.CreateBodyStorage(payload)
+			require.NoError(t, err)
+			defer storage.Close()
+			req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", storage)
+			require.NoError(t, err)
+			ApplyUpstreamBodyMetadata(req, storage)
+			closer, err := compressResponsesRequestBody(req)
+			require.NoError(t, err)
+			defer closer.Close()
+			assert.Equal(t, disk, closer.(common.BodyStorage).IsDisk())
+			sent, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			require.NoError(t, req.Body.Close())
+			assert.EqualValues(t, len(sent), req.ContentLength)
+			assert.Greater(t, len(sent), len(payload), "small requests must still be compressed")
+			decoder, err := zstd.NewReader(nil)
+			require.NoError(t, err)
+			defer decoder.Close()
+			decoded, err := decoder.DecodeAll(sent, nil)
+			require.NoError(t, err)
+			assert.Equal(t, payload, decoded)
+			for range 2 {
+				replayed, err := req.GetBody()
+				require.NoError(t, err)
+				data, err := io.ReadAll(replayed)
+				require.NoError(t, err)
+				require.NoError(t, replayed.Close())
+				assert.Equal(t, sent, data)
+			}
+			source, err := storage.NewReader()
+			require.NoError(t, err, "compression must not close caller-owned passthrough storage")
+			original, err := io.ReadAll(source)
+			require.NoError(t, err)
+			require.NoError(t, source.Close())
+			assert.Equal(t, payload, original)
+			require.NoError(t, closer.Close())
+			_, err = req.GetBody()
+			assert.ErrorIs(t, err, common.ErrStorageClosed)
+			require.NoError(t, storage.Close())
+			if disk {
+				count, size, err := common.GetDiskCacheInfo()
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				assert.Zero(t, size)
+			}
+		})
+	}
+}
+
+type requestBodyLifecycleTransport func(*http.Request) (*http.Response, error)
+
+func (f requestBodyLifecycleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type requestBodyLifecycleCloser struct {
+	io.Reader
+	close func() error
+}
+
+func (b requestBodyLifecycleCloser) Close() error {
+	return b.close()
+}
+
+func TestDoApiRequestResponsesZstdStorageLifetime(t *testing.T) {
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	originalTransport := client.Transport
+	originalConfig := common.GetDiskCacheConfig()
+	t.Cleanup(func() {
+		client.Transport = originalTransport
+		common.SetDiskCacheConfig(originalConfig)
+	})
+
+	for _, disk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+			before := common.GetDiskCacheStats()
+			payload := []byte(`{"model":"test-model","input":"finish uploading after response headers"}`)
+			const responsePayload = "data: {\"type\":\"response.completed\"}\n\n"
+			resumeUpload := make(chan struct{})
+			uploadDone := make(chan struct{})
+			releaseUpload := sync.OnceFunc(func() { close(resumeUpload) })
+			var request *http.Request
+			var uploaded []byte
+			var uploadErr error
+			var responseCloses int
+			client.Transport = requestBodyLifecycleTransport(func(req *http.Request) (*http.Response, error) {
+				request = req
+				go func() {
+					defer close(uploadDone)
+					<-resumeUpload
+					uploaded, uploadErr = io.ReadAll(req.Body)
+					uploadErr = errors.Join(uploadErr, req.Body.Close())
+				}()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"text/event-stream"}},
+					Body: requestBodyLifecycleCloser{
+						Reader: strings.NewReader(responsePayload),
+						close: func() error {
+							responseCloses++
+							releaseUpload()
+							<-uploadDone
+							// The upload and its replay source remain usable until
+							// the underlying response body has finished closing.
+							replay, err := req.GetBody()
+							if err != nil {
+								return err
+							}
+							return replay.Close()
+						},
+					},
+				}, nil
+			})
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{
+				RelayFormat: types.RelayFormatOpenAIResponses,
+				IsStream:    true,
+				DisablePing: true,
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelSetting: dto.ChannelSettings{ResponsesZstdCompressionEnabled: true},
+				},
+			}
+			resp, err := DoApiRequest(websocketTestAdaptor{url: "https://upstream.test/v1/responses"}, ctx, info, bytes.NewReader(payload))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			require.NotNil(t, request)
+			require.NotNil(t, request.GetBody)
+			assert.Zero(t, responseCloses)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+			// Even response EOF must not release storage while upload is pending.
+			response, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, responsePayload, string(response))
+			active := common.GetDiskCacheStats()
+			if disk {
+				assert.Equal(t, before.ActiveDiskFiles+1, active.ActiveDiskFiles)
+			} else {
+				assert.Equal(t, before.ActiveMemoryBuffers+1, active.ActiveMemoryBuffers)
+			}
+
+			releaseUpload()
+			select {
+			case <-uploadDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for the request upload")
+			}
+			require.NoError(t, uploadErr)
+			replay, err := request.GetBody()
+			require.NoError(t, err)
+			wireBody, err := io.ReadAll(replay)
+			require.NoError(t, err)
+			require.NoError(t, replay.Close())
+			assert.Equal(t, wireBody, uploaded)
+			assert.EqualValues(t, len(uploaded), request.ContentLength)
+			decoder, err := zstd.NewReader(nil)
+			require.NoError(t, err)
+			defer decoder.Close()
+			decoded, err := decoder.DecodeAll(uploaded, nil)
+			require.NoError(t, err)
+			assert.Equal(t, payload, decoded)
+
+			for range 2 {
+				require.NoError(t, resp.Body.Close())
+			}
+			assert.Equal(t, 1, responseCloses)
+			_, err = request.GetBody()
+			assert.ErrorIs(t, err, common.ErrStorageClosed)
+			assert.Equal(t, before, common.GetDiskCacheStats())
+			count, size, err := common.GetDiskCacheInfo()
+			require.NoError(t, err)
+			assert.Zero(t, count)
+			assert.Zero(t, size)
+		})
+	}
+}
+
+func TestDoApiRequestResponsesZstdStorageCleanupOnFailure(t *testing.T) {
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	originalTransport := client.Transport
+	originalConfig := common.GetDiskCacheConfig()
+	t.Cleanup(func() {
+		client.Transport = originalTransport
+		common.SetDiskCacheConfig(originalConfig)
+	})
+	requestErr := errors.New("upstream request failed")
+	tests := []struct {
+		name          string
+		proxy         string
+		requestError  bool
+		responseError bool
+	}{
+		{name: "client setup failure", proxy: "://invalid"},
+		{name: "transport failure", requestError: true},
+		{name: "error response read failure", responseError: true},
+	}
+	for _, disk := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("disk=%t/%s", disk, tt.name), func(t *testing.T) {
+				common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+				before := common.GetDiskCacheStats()
+				var request *http.Request
+				var responseCloses int
+				client.Transport = requestBodyLifecycleTransport(func(req *http.Request) (*http.Response, error) {
+					request = req
+					defer req.Body.Close()
+					if tt.requestError {
+						return nil, requestErr
+					}
+					return &http.Response{
+						StatusCode: http.StatusBadGateway,
+						Body: requestBodyLifecycleCloser{
+							Reader: iotest.ErrReader(io.ErrUnexpectedEOF),
+							close: func() error {
+								responseCloses++
+								return nil
+							},
+						},
+					}, nil
+				})
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				info := &relaycommon.RelayInfo{
+					RelayFormat: types.RelayFormatOpenAIResponses,
+					ChannelMeta: &relaycommon.ChannelMeta{
+						ChannelSetting: dto.ChannelSettings{ResponsesZstdCompressionEnabled: true, Proxy: tt.proxy},
+					},
+				}
+				resp, err := DoApiRequest(websocketTestAdaptor{url: "https://upstream.test/v1/responses"}, ctx, info, strings.NewReader(`{}`))
+				if tt.responseError {
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = resp.Body.Close() })
+					apiErr := service.RelayErrorHandler(ctx.Request.Context(), resp, false)
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+					assert.Equal(t, 1, responseCloses)
+				} else {
+					require.Error(t, err)
+					assert.Nil(t, resp)
+				}
+				if tt.proxy != "" {
+					assert.Nil(t, request, "client setup failure must not reach the transport")
+				} else {
+					require.NotNil(t, request)
+					_, err = request.GetBody()
+					assert.ErrorIs(t, err, common.ErrStorageClosed)
+				}
+				assert.Equal(t, before, common.GetDiskCacheStats())
+				count, size, err := common.GetDiskCacheInfo()
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				assert.Zero(t, size)
+			})
+		}
+	}
+}
+
+func TestResponseBodyWithRequestStorageCloseErrors(t *testing.T) {
+	responseErr := errors.New("response close failed")
+	storageErr := errors.New("storage close failed")
+	var closed []string
+	body := &responseBodyWithRequestStorage{
+		ReadCloser: requestBodyLifecycleCloser{close: func() error {
+			closed = append(closed, "response")
+			return responseErr
+		}},
+		storage: requestBodyLifecycleCloser{close: func() error {
+			closed = append(closed, "storage")
+			return storageErr
+		}},
+	}
+	for range 2 {
+		err := body.Close()
+		assert.ErrorIs(t, err, responseErr)
+		assert.ErrorIs(t, err, storageErr)
+	}
+	assert.Equal(t, []string{"response", "storage"}, closed)
+}
 
 func TestApplyUpstreamBodyMetadataSetsReplayableMetadata(t *testing.T) {
 	t.Parallel()
@@ -459,38 +867,52 @@ func newPassThroughBody(t *testing.T, payload []byte) (common.ReplayableBody, co
 // up the transport must transparently retry, and the retried request must
 // carry the complete body.
 func TestUpstreamGetBody_HTTP2RetryAfterUpstreamStreamReset(t *testing.T) {
-	payload := []byte(`{"model":"test-model","messages":[{"role":"user","content":"retry me"}]}`)
+	payload := []byte(`{"model":"test-model","input":"retry me"}`)
+	for _, compressed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compressed=%t", compressed), func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer ln.Close()
+			resCh := runResetOnFirstStreamServer(ln, true)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	resCh := runResetOnFirstStreamServer(ln, true)
+			client, transport := newH2PriorKnowledgeClient(ln)
+			defer transport.CloseIdleConnections()
 
-	client, transport := newH2PriorKnowledgeClient(ln)
-	defer transport.CloseIdleConnections()
+			body, closer, err := relaycommon.NewOutboundJSONBody(payload)
+			require.NoError(t, err)
+			defer closer.Close()
+			req, err := http.NewRequest(http.MethodPost, "http://upstream.test/v1/responses", body)
+			require.NoError(t, err)
+			ApplyUpstreamBodyMetadata(req, body)
+			if compressed {
+				closer, err := compressResponsesRequestBody(req)
+				require.NoError(t, err)
+				defer closer.Close()
+			}
+			require.NotNil(t, req.GetBody)
 
-	// Build the upstream request exactly the way DoApiRequest does: pass the
-	// original replayable body to the metadata helper after NewRequest.
-	body, closer, err := relaycommon.NewOutboundJSONBody(payload)
-	require.NoError(t, err)
-	defer closer.Close()
+			resp, err := client.Do(req)
+			require.NoError(t, err, "the transport must transparently retry after RST_STREAM")
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	req, err := http.NewRequest(http.MethodPost, "http://upstream.test/v1/chat/completions", body)
-	require.NoError(t, err)
-	ApplyUpstreamBodyMetadata(req, body)
-	require.NotNil(t, req.GetBody)
-
-	resp, err := client.Do(req)
-	require.NoError(t, err, "the transport must transparently retry after RST_STREAM")
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	srv := awaitH2ServerResult(t, resCh)
-	require.NoError(t, srv.err)
-	assert.Equal(t, 2, srv.streamCount, "the request must have been attempted twice")
-	require.Len(t, srv.attemptBodies, 2)
-	assert.Equal(t, payload, srv.attemptBodies[0], "first attempt must carry the full body")
-	assert.Equal(t, payload, srv.attemptBodies[1], "the retried request must carry the complete body")
+			srv := awaitH2ServerResult(t, resCh)
+			require.NoError(t, srv.err)
+			assert.Equal(t, 2, srv.streamCount)
+			require.Len(t, srv.attemptBodies, 2)
+			assert.Equal(t, srv.attemptBodies[0], srv.attemptBodies[1], "retry must replay identical wire bytes")
+			sent := srv.attemptBodies[0]
+			assert.EqualValues(t, len(sent), req.ContentLength)
+			if compressed {
+				decoder, err := zstd.NewReader(nil)
+				require.NoError(t, err)
+				defer decoder.Close()
+				sent, err = decoder.DecodeAll(sent, nil)
+				require.NoError(t, err)
+			}
+			assert.Equal(t, payload, sent)
+		})
+	}
 }
 
 func TestUpstreamGetBody_HTTP2RetryAfterUpstreamStreamReset_PassThrough(t *testing.T) {

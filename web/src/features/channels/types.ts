@@ -93,6 +93,7 @@ export interface ChannelSettings {
   http2_connection_shards?: number
   tls_insecure_skip_verify?: boolean
   websocket_compression_enabled?: boolean
+  responses_zstd_compression_enabled?: boolean
 }
 
 export interface ChannelOtherSettings {
