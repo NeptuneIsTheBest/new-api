@@ -2209,9 +2209,7 @@ export function ChannelMutateDrawer({
           <div className='space-y-0.5'>
             <FormLabel>{t('Enable WebSocket compression')}</FormLabel>
             <FormDescription>
-              {t(
-                'Try to enable compression for new upstream WebSocket connections. Automatically use uncompressed connections if the upstream does not support it.'
-              )}
+              {t('Compress upstream WebSocket messages.')}
             </FormDescription>
           </div>
           <FormControl>
@@ -2241,7 +2239,7 @@ export function ChannelMutateDrawer({
           disabled={sensitiveLocked || isSubmitting}
           label={t('Enable Responses request compression')}
           description={t(
-            'Compress Responses request bodies sent upstream, including streaming and non-streaming requests. Confirm upstream zstd support before enabling.'
+            'Compress Responses request bodies sent upstream.'
           )}
           className='px-4 py-3'
         />
