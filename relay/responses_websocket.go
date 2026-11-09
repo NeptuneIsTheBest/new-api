@@ -80,6 +80,8 @@ type responsesWSMessage struct {
 	kind int
 	body []byte
 	err  error
+	// Control replies preserve lane ordering without becoming usage events.
+	control bool
 }
 
 // responsesWSControl is a client control event (response.cancel) whose
@@ -97,19 +99,24 @@ type responsesWSCallState struct {
 	done     chan struct{}
 	terminal *responsesWSMessage
 	// A nonzero closeCode ends the connection after this request.
-	closeCode          int
-	closeReason        string
-	upstreamRejected   bool
-	streamID           string
-	previousResponseID string
+	closeCode             int
+	closeReason           string
+	upstreamRejected      bool
+	rejectionHeaders      common.RawMessage
+	rejectionErrorHeaders common.RawMessage
+	streamID              string
+	previousResponseID    string
 	// Routing metadata is protected by the session's stateMu. Billing remains
 	// exclusively owned by this request's worker.
-	responseID   string
-	sentControl  []byte
-	submitted    bool
-	upstreamDone bool
-	create       responsesWSCreateRequest
-	channelMeta  relaycommon.ChannelMeta
+	responseID    string
+	sentControl   []byte
+	cancelPending bool
+	submitted     bool
+	upstreamDone  bool
+	// Late interrupt replies follow settlement and the terminal, before done.
+	interruptReplies []responsesWSMessage
+	create           responsesWSCreateRequest
+	channelMeta      relaycommon.ChannelMeta
 	// Automatic continuations prepare a separate request before the steer is
 	// sent, but own no generation until their response.created arrives.
 	automatic           bool
@@ -167,8 +174,13 @@ type responsesWSSession struct {
 	lang               string
 	steerCount         int
 	steerBytes         int64
-	completedResponses map[string]bool
+	completedResponses map[string]string
 	completedOrder     []string
+	interrupts         map[string]*responsesWSInterrupt
+	interruptBytes     int64
+	// Deferred replies across all lanes, including in-flight writes, use stateMu.
+	interruptReplyCount int
+	interruptReplyBytes int64
 
 	// clientWriteBudget is guarded by clientWriteMu.
 	clientWriteBudget helper.StreamWriteBudget
@@ -217,10 +229,17 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 			if errors.Is(err, errResponsesWSInvalidStreamID) {
 				apiErr = types.WithOpenAIError(types.OpenAIError{Type: "invalid_request_error", Code: "invalid_stream_id", Param: "stream_id", Message: i18n.Translate(s.lang, i18n.MsgResponsesWSInvalidStreamID)}, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 			}
-			s.sendError(envelope.EventID, streamID, apiErr)
+			s.sendControlError(envelope.EventID, streamID, envelope.ResponseID, apiErr)
 			continue
 		}
 		if eventType != responsesWSEventTypeResponseCreate {
+			if eventType == "response.interrupt" {
+				lane, apiErr := s.submitInterrupt(message, envelope, streamID)
+				if apiErr != nil {
+					s.sendControlError(envelope.EventID, lane, envelope.ResponseID, apiErr)
+				}
+				continue
+			}
 			if eventType == "response.steer" {
 				if apiErr := s.submitSteer(message); apiErr != nil {
 					s.sendSteerError(message, apiErr)
@@ -234,14 +253,28 @@ func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner Res
 				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(fmt.Errorf("unsupported websocket event %q", eventType)))
 				continue
 			}
+			s.stateMu.Lock()
+			pending := state.cancelPending || s.interrupts[state.responseID] != nil
+			if !pending {
+				state.cancelPending = true
+			}
+			s.stateMu.Unlock()
+			if pending {
+				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSControlPending))))
+				continue
+			}
 			select {
 			case state.controls <- responsesWSControl{body: message, eventID: envelope.EventID, streamID: state.streamID}:
+				continue
 			case <-state.done:
 			case <-s.ctx.Done():
 				return nil
 			default:
-				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(errors.New("a response control event is already pending")))
+				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSControlPending))))
 			}
+			s.stateMu.Lock()
+			state.cancelPending = false
+			s.stateMu.Unlock()
 			continue
 		}
 		s.resumeSteeringCreate(streamID, message)
@@ -265,14 +298,32 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 			state.closeCode = websocket.CloseInternalServerErr
 		}
 		// Finish settlement and middleware before publishing the terminal. Keep
-		// this lane occupied until the write finishes, without holding stateMu
-		// across network I/O or blocking admission on other lanes.
+		// this lane occupied until terminal and control writes finish, without
+		// holding stateMu across network I/O or blocking admission on other lanes.
 		if state.automatic && !state.preparationReported {
 			state.ready <- apiErr
 		}
 		outgoing := state.terminal
 		if apiErr != nil && (!state.automatic || state.started) {
 			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, apiErr, upstreamURLs...); err == nil {
+				// Restore only retry metadata after the normal error sanitization.
+				if len(state.rejectionHeaders) > 0 || len(state.rejectionErrorHeaders) > 0 {
+					var payload struct {
+						responsesWSErrorEvent
+						Headers common.RawMessage `json:"headers,omitempty"`
+						Error   struct {
+							types.OpenAIError
+							Headers common.RawMessage `json:"headers,omitempty"`
+						} `json:"error"`
+					}
+					if common.Unmarshal(body, &payload) == nil {
+						payload.Headers = state.rejectionHeaders
+						payload.Error.Headers = state.rejectionErrorHeaders
+						if encoded, err := common.Marshal(payload); err == nil {
+							body = encoded
+						}
+					}
+				}
 				outgoing = &responsesWSMessage{kind: websocket.TextMessage, body: body}
 			}
 		}
@@ -285,14 +336,31 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 			s.shutdown(state.closeCode, state.closeReason)
 		}
 		s.stateMu.Lock()
+		for len(state.interruptReplies) > 0 {
+			reply := state.interruptReplies[0]
+			state.interruptReplies[0] = responsesWSMessage{}
+			state.interruptReplies = state.interruptReplies[1:]
+			if s.ctx.Err() == nil {
+				s.stateMu.Unlock()
+				if err := s.writeClient(reply.kind, reply.body); err != nil {
+					s.shutdown(websocket.CloseInternalServerErr, "")
+				}
+				s.stateMu.Lock()
+			}
+			// Keep the in-flight reply in the budget until its write finishes.
+			s.interruptReplyCount--
+			s.interruptReplyBytes -= int64(len(reply.body))
+		}
+		state.interruptReplies = nil
+		// Queue draining and lane release are atomic to the upstream reader.
 		stream := s.streams[state.streamID]
 		if state.responseID != "" && state.started {
 			stream.lastResponseID = state.responseID
 			if s.completedResponses == nil {
-				s.completedResponses = make(map[string]bool)
+				s.completedResponses = make(map[string]string)
 			}
-			if !s.completedResponses[state.responseID] {
-				s.completedResponses[state.responseID] = true
+			if _, completed := s.completedResponses[state.responseID]; !completed {
+				s.completedResponses[state.responseID] = state.streamID
 				s.completedOrder = append(s.completedOrder, state.responseID)
 				if len(s.completedOrder) > responsesWSMaxQueued {
 					delete(s.completedResponses, s.completedOrder[0])
@@ -573,7 +641,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			continue
 		case control := <-state.controls:
 			if pendingControl != nil || sentControl != nil {
-				s.sendError(control.eventID, control.streamID, newResponsesWSInvalidRequestError(errors.New("a response control event is already pending")))
+				s.sendError(control.eventID, control.streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSControlPending))))
 				continue
 			}
 			if !accepted {
@@ -624,6 +692,12 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			ConsumeResponsesQuota(c, info, accumulator.Finish())
 			return nil
 		}
+		if incoming.control {
+			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+				s.shutdown(websocket.CloseInternalServerErr, "")
+			}
+			continue
+		}
 		info.SetFirstResponseTime()
 		var event struct {
 			dto.ResponsesStreamResponse
@@ -646,20 +720,32 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			if event.Type == "error" {
 				var rejection responsesWSErrorEvent
 				_ = common.Unmarshal(incoming.body, &rejection)
+				var metadata struct {
+					StatusCode int               `json:"status_code"`
+					Headers    common.RawMessage `json:"headers"`
+					Error      struct {
+						Headers common.RawMessage `json:"headers"`
+					} `json:"error"`
+				}
+				_ = common.Unmarshal(incoming.body, &metadata)
+				if rejection.Status == 0 {
+					rejection.Status = metadata.StatusCode
+				}
 				if rejection.ResponseID != "" && rejection.ResponseID == state.previousResponseID {
 					continue
 				}
 				terminal, ambiguous, controlError := responsesWSErrorEndsRequest(rejection, create.StreamID, responseID, sentControl)
 				if !terminal {
-					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
-						s.shutdown(websocket.CloseInternalServerErr, "")
-					}
 					// Only a control error in this stream resolves its pending control.
 					if controlError {
 						sentControl = nil
 						s.stateMu.Lock()
 						state.sentControl = nil
+						state.cancelPending = false
 						s.stateMu.Unlock()
+					}
+					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+						s.shutdown(websocket.CloseInternalServerErr, "")
 					}
 					continue
 				}
@@ -690,6 +776,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					rejected.StatusCode = http.StatusBadRequest
 				}
 				state.upstreamRejected = true
+				state.rejectionHeaders = metadata.Headers
+				state.rejectionErrorHeaders = metadata.Error.Headers
 				return rejected
 			}
 			if strings.HasPrefix(event.Type, "response.") {
@@ -966,7 +1054,7 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 	}
 	var sole *responsesWSCallState
 	active := 0
-	completed := responseID != "" && s.completedResponses[responseID]
+	_, completed := s.completedResponses[responseID]
 	for _, stream := range s.streams {
 		if responseID != "" && responseID == stream.lastResponseID {
 			completed = true
@@ -1039,6 +1127,9 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 		owner.responseID = responseID
 	}
 	owner.upstreamDone = terminal
+	if terminal {
+		owner.cancelPending = false
+	}
 	return owner, false, false
 }
 
@@ -1094,7 +1185,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 				s.shutdown(code, "upstream connection closed")
 				return
 			}
-			if s.handleSteeringEvent(incoming) {
+			if s.handleInterruptEvent(incoming) || s.handleSteeringEvent(incoming) {
 				continue
 			}
 			if !s.admitAutomaticResponse(body) {
@@ -1190,6 +1281,17 @@ func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.N
 	}
 }
 
+func (s *responsesWSSession) sendControlError(eventID, streamID, responseID string, apiErr *types.NewAPIError) {
+	openaiErr := apiErr.ToOpenAIError()
+	payload, err := common.Marshal(responsesWSErrorEvent{
+		Type: "error", Status: apiErr.StatusCode, EventID: eventID,
+		StreamID: streamID, ResponseID: responseID, Error: &openaiErr,
+	})
+	if err == nil {
+		_ = s.writeClient(websocket.TextMessage, payload)
+	}
+}
+
 // shutdown ends the connection once. Each peer gets a close frame that says
 // why, bounded to one second, and both sockets close even if a write failed.
 // Close frames are control writes, which gorilla allows alongside a blocked
@@ -1201,8 +1303,16 @@ func (s *responsesWSSession) shutdown(code int, reason string) {
 		s.closing = true
 		for _, stream := range s.streams {
 			stream.queue = nil
+			if state := stream.current; state != nil {
+				for _, reply := range state.interruptReplies {
+					s.interruptReplyCount--
+					s.interruptReplyBytes -= int64(len(reply.body))
+				}
+				state.interruptReplies = nil
+			}
 		}
 		s.queued, s.queuedBytes = 0, 0
+		s.interrupts, s.interruptBytes = nil, 0
 		if s.changed != nil {
 			close(s.changed)
 			s.changed = nil

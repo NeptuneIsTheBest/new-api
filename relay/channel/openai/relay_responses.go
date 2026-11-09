@@ -72,8 +72,8 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			info.CountBillableToolCall(dto.BuildInCallWebSearchCall, "")
 		case dto.BuildInCallFileSearchCall:
 			info.CountBillableToolCall(dto.BuildInCallFileSearchCall, "")
-		case dto.BuildInCallFunctionCall:
-			info.CountBillableToolCall(dto.BuildInCallFunctionCall, output.Name)
+		case dto.BuildInCallFunctionCall, dto.BuildInCallCustomToolCall:
+			info.CountBillableToolCall(output.Type, output.Name)
 		}
 	}
 	info.ApplyVendorToolUsage(responseBody)

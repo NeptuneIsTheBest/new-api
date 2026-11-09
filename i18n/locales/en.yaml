@@ -97,4 +97,8 @@ responses_ws.stream_limit_reached: "This WebSocket connection has reached its ma
 responses_ws.invalid_steer: "response.steer accepts only type, previous_response_id, and input containing user messages with text, images, or files."
 responses_ws.steer_unavailable: "The target response is not accepting steering on this WebSocket connection."
 responses_ws.steer_limit_reached: "Too much steering input is pending on this WebSocket connection."
+responses_ws.invalid_interrupt: "response.interrupt requires a non-empty response_id string."
+responses_ws.response_not_found: "The target response is not available on this WebSocket connection and stream."
+responses_ws.control_pending: "A response control event is already pending."
+responses_ws.interrupt_limit_reached: "Too many interruption acknowledgements are pending on this WebSocket connection."
 responses_ws.steer_continuation_required: "Continue the pending response with its previous_response_id before starting another response on this stream."

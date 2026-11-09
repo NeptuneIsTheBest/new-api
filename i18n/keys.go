@@ -124,4 +124,8 @@ const (
 	MsgResponsesWSSteerContinuationRequired = "responses_ws.steer_continuation_required"
 	MsgResponsesWSSteerUnavailable          = "responses_ws.steer_unavailable"
 	MsgResponsesWSSteerLimit                = "responses_ws.steer_limit_reached"
+	MsgResponsesWSInvalidInterrupt          = "responses_ws.invalid_interrupt"
+	MsgResponsesWSResponseNotFound          = "responses_ws.response_not_found"
+	MsgResponsesWSControlPending            = "responses_ws.control_pending"
+	MsgResponsesWSInterruptLimit            = "responses_ws.interrupt_limit_reached"
 )

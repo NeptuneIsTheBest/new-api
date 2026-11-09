@@ -596,6 +596,7 @@ const (
 	BuildInCallWebSearchCall  = "web_search_call"
 	BuildInCallFileSearchCall = "file_search_call"
 	BuildInCallFunctionCall   = "function_call"
+	BuildInCallCustomToolCall = "custom_tool_call"
 	BuildInCallToolUse        = "tool_use"
 )
 

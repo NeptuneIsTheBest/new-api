@@ -66,7 +66,8 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 		a.imageCounter.Commit(a.info)
 		a.imageCommitted = true
 	case "response.output_text.delta", "response.function_call_arguments.delta",
-		"response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta":
+		"response.custom_tool_call_input.delta", "response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta", "response.refusal.delta":
 		// Every delta kind here is generated output that upstream bills as
 		// output tokens, so all of them feed the missing-usage estimate.
 		a.outputText.WriteString(event.Delta)
@@ -75,7 +76,7 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 			return
 		}
 		switch event.Item.Type {
-		case dto.BuildInCallWebSearchCall, dto.BuildInCallFileSearchCall, dto.BuildInCallFunctionCall:
+		case dto.BuildInCallWebSearchCall, dto.BuildInCallFileSearchCall, dto.BuildInCallFunctionCall, dto.BuildInCallCustomToolCall:
 			a.info.CountBillableToolCall(event.Item.Type, event.Item.Name)
 		case dto.ResponsesOutputTypeImageGenerationCall:
 			if !a.imageCommitted {

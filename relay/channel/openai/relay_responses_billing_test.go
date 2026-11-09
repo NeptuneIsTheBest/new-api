@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -275,6 +276,176 @@ func TestOaiResponsesHandlerCountsOutputCallsNotDeclarations(t *testing.T) {
 	require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, "priced_fn")
 	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools["priced_fn"].CallCount)
 	assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "unpriced_fn")
+}
+
+func TestOaiResponsesStreamHandlerCustomToolInputUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	operation_setting.SetToolPriceForTest("responses_usage_custom", 5)
+	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("responses_usage_custom") })
+	const item = `{"type":"custom_tool_call","id":"ctc_usage","call_id":"call_usage","name":"responses_usage_custom","namespace":"functions","input":"echo hello"}`
+	deltas := []string{
+		`{"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ctc_usage","name":"responses_usage_custom","input":""}}`,
+		`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_usage","delta":"echo "}`,
+		`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_usage","delta":"hello"}`,
+	}
+	finished := append(slices.Clone(deltas),
+		`{"type":"response.custom_tool_call_input.done","item_id":"ctc_usage","input":"echo hello"}`,
+		`{"type":"response.output_item.done","item":`+item+`}`,
+	)
+	for _, tc := range []struct {
+		name           string
+		events         []string
+		wantPrompt     int
+		wantCompletion int
+		wantCalls      int
+	}{
+		{
+			name:   "disconnect before call completion",
+			events: deltas, wantPrompt: 9, wantCompletion: tokenkit.Count("gpt-4o", "echo hello"),
+		},
+		{
+			name:       "completed without usage does not double count snapshots",
+			events:     append(slices.Clone(finished), `{"type":"response.completed","response":{"status":"completed","output":[`+item+`]}}`),
+			wantPrompt: 9, wantCompletion: tokenkit.Count("gpt-4o", "echo hello"), wantCalls: 1,
+		},
+		{
+			name: "mixed output and reasoning before disconnect",
+			events: append([]string{
+				`{"type":"response.output_text.delta","delta":"Running the command."}`,
+				`{"type":"response.reasoning_text.delta","delta":"Check the output first."}`,
+			}, deltas...),
+			wantPrompt: 9, wantCompletion: tokenkit.Count("gpt-4o", "Running the command.Check the output first.echo hello"),
+		},
+		{
+			name:       "upstream usage takes precedence",
+			events:     append(slices.Clone(finished), `{"type":"response.completed","response":{"usage":{"input_tokens":20,"output_tokens":77,"total_tokens":97}}}`),
+			wantPrompt: 20, wantCompletion: 77, wantCalls: 1,
+		},
+		{
+			name:       "missing upstream output usage keeps reported input usage",
+			events:     append(slices.Clone(finished), `{"type":"response.incomplete","response":{"usage":{"input_tokens":20}}}`),
+			wantPrompt: 20, wantCompletion: tokenkit.Count("gpt-4o", "echo hello"), wantCalls: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wantWire strings.Builder
+			for _, raw := range tc.events {
+				var event dto.ResponsesStreamResponse
+				require.NoError(t, common.UnmarshalJsonStr(raw, &event))
+				wantWire.WriteString("event: " + event.Type + "\ndata: " + raw + "\n\n")
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{
+				OriginModelName: "gpt-4o", DisablePing: true,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"},
+			}
+			info.SetEstimatePromptTokens(9)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: " + strings.Join(tc.events, "\n\ndata: ") + "\n\n")),
+			}
+			usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, wantWire.String(), w.Body.String())
+			assert.Equal(t, tc.wantPrompt, usage.PromptTokens)
+			assert.Equal(t, tc.wantCompletion, usage.CompletionTokens)
+			assert.Equal(t, tc.wantPrompt+tc.wantCompletion, usage.TotalTokens)
+			if tc.wantCalls == 0 {
+				assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "responses_usage_custom")
+			} else {
+				require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, "responses_usage_custom")
+				assert.Equal(t, tc.wantCalls, info.ResponsesUsageInfo.BuiltInTools["responses_usage_custom"].CallCount)
+			}
+		})
+	}
+}
+
+func TestOaiResponsesHandlersCustomToolBilling(t *testing.T) {
+	for name, price := range map[string]float64{
+		"responses_priced_custom":             5,
+		"responses_model_custom:gpt-4o*":      7,
+		"responses_zero_custom":               0,
+		"responses_model_zero_custom":         5,
+		"responses_model_zero_custom:gpt-4o*": 0,
+		"web_fetch":                           7,
+	} {
+		operation_setting.SetToolPriceForTest(name, price)
+		t.Cleanup(func() { operation_setting.DeleteToolPriceForTest(name) })
+	}
+	for _, tc := range []struct {
+		name  string
+		names []string
+		want  map[string]int
+	}{
+		{
+			name: "actual calls respect tool pricing and reserved names",
+			names: []string{
+				"responses_priced_custom", "responses_priced_custom", "responses_model_custom",
+				"responses_unpriced_custom", "responses_zero_custom", "responses_model_zero_custom",
+				"web_search", "web_fetch", "",
+			},
+			want: map[string]int{"responses_priced_custom": 2, "responses_model_custom": 1},
+		},
+		{name: "declarations without calls", want: map[string]int{}},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
+				items := make([]map[string]any, 0, len(tc.names))
+				var events []string
+				var wantWire strings.Builder
+				for i, name := range tc.names {
+					item := map[string]any{
+						"type": "custom_tool_call", "id": fmt.Sprintf("ctc_%d", i), "call_id": fmt.Sprintf("call_%d", i),
+						"name": name, "status": "completed", "namespace": "functions", "input": "echo hello",
+						"vendor_data": map[string]any{"preserve": true},
+					}
+					items = append(items, item)
+					if stream {
+						event, err := common.Marshal(map[string]any{"type": "response.output_item.done", "item": item, "output_index": i})
+						require.NoError(t, err)
+						events = append(events, string(event))
+						wantWire.WriteString("event: response.output_item.done\ndata: " + string(event) + "\n\n")
+					}
+				}
+				body, err := common.Marshal(map[string]any{
+					"status": "completed", "model": "gpt-4o", "output": items,
+					"tools": []map[string]any{{"type": "custom", "name": "responses_priced_custom", "format": map[string]any{"type": "text"}}},
+					"usage": map[string]any{"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+				})
+				require.NoError(t, err)
+				payload := string(body)
+				if stream {
+					terminal := `{"type":"response.completed","response":` + payload + `}`
+					events = append(events, terminal)
+					wantWire.WriteString("event: response.completed\ndata: " + terminal + "\n\n")
+					payload = strings.Join(events, "\n\ndata: ")
+				} else {
+					wantWire.Write(body)
+				}
+				w, info, usage, apiErr := runResponsesRelay(t, stream, payload)
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, wantWire.String(), w.Body.String())
+				assert.Equal(t, 20, usage.PromptTokens)
+				assert.Equal(t, 5, usage.CompletionTokens)
+				assert.Equal(t, 25, usage.TotalTokens)
+				billed := map[string]int{}
+				for name, tool := range info.ResponsesUsageInfo.BuiltInTools {
+					if tool.CallCount > 0 {
+						billed[name] = tool.CallCount
+					}
+				}
+				assert.Equal(t, tc.want, billed)
+			})
+		}
+	}
 }
 
 func TestOaiResponsesHandlerDeclaredToolsWithoutOutputCountZero(t *testing.T) {

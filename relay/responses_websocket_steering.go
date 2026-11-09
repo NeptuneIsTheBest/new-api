@@ -483,7 +483,7 @@ func (s *responsesWSSession) admitAutomaticResponse(body []byte) bool {
 		return false
 	}
 	s.stateMu.Lock()
-	if s.completedResponses[responseID] {
+	if _, completed := s.completedResponses[responseID]; completed {
 		s.stateMu.Unlock()
 		return true
 	}

@@ -20,7 +20,7 @@ const GoogleSearchGroundedPromptTool = "google_search_grounded_prompt"
 // (Anthropic server tools reported in usage.server_tool_use). They and every
 // tool name the built-in price seed prices
 // (operation_setting.IsBuiltInToolPriceKey) bill hosted tools; a client
-// function or tool_use with the same name is never counted under them.
+// function, custom tool or tool_use with the same name is never counted under them.
 var reservedBillableToolNames = map[string]struct{}{
 	"web_fetch":      {},
 	"code_execution": {},
@@ -33,7 +33,7 @@ var reservedBillableToolNames = map[string]struct{}{
 const MaxBillableToolCallCount = 10_000
 
 // CountBillableToolCall is the single entry point for per-call tool billing counts.
-// Built-in call types always count; custom function/tool_use names only count when priced.
+// Built-in call types always count; client tools only count when priced.
 func (info *RelayInfo) CountBillableToolCall(itemType string, functionName string) {
 	if info == nil {
 		return
@@ -45,7 +45,7 @@ func (info *RelayInfo) CountBillableToolCall(itemType string, functionName strin
 		info.incrementBillableToolCall(cmp.Or(info.WebSearchBillingKey, resolveWebSearchToolName(info.ResponsesUsageInfo.BuiltInTools)))
 	case dto.BuildInCallFileSearchCall:
 		info.incrementBillableToolCall(dto.BuildInToolFileSearch)
-	case dto.BuildInCallFunctionCall, dto.BuildInCallToolUse:
+	case dto.BuildInCallFunctionCall, dto.BuildInCallCustomToolCall, dto.BuildInCallToolUse:
 		if functionName == "" {
 			return
 		}

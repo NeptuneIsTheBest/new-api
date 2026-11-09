@@ -60,7 +60,7 @@ func ClassifyRelayOutcome(ctx context.Context, info *relaycommon.RelayInfo, apiE
 		switch stream.IncompleteReason {
 		case "max_output_tokens", "max_tokens":
 			return OutcomeSuccess
-		case "content_filter", "safety", "content_policy_violation", "steered":
+		case "content_filter", "safety", "content_policy_violation", "steered", "interrupted":
 			return OutcomeIgnored
 		default:
 			return OutcomeFailure
