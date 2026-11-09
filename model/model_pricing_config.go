@@ -228,6 +228,7 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	builtins := billing_setting.GetBuiltinBillingExprCopy()
 	if len(names) == 0 {
 		nameSet := make(map[string]bool)
 		for key, entries := range values {
@@ -239,6 +240,13 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 					}
 					name = model
 				}
+				nameSet[name] = true
+			}
+		}
+		// Served built-in models stay visible even without a saved price, but
+		// listing them must not restore a price an administrator deleted.
+		for _, name := range GetEnabledModels() {
+			if _, builtin := builtins[name]; builtin {
 				nameSet[name] = true
 			}
 		}
@@ -254,7 +262,7 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 			defaultNames[name] = true
 		}
 	}
-	for name := range billing_setting.GetBuiltinBillingExprCopy() {
+	for name := range builtins {
 		defaultNames[name] = true
 	}
 	result.DefaultModelNames = make([]string, 0, len(defaultNames))
@@ -343,19 +351,32 @@ type ModelPricingIssue struct {
 }
 
 // GetModelPricingIssues reads the provider variants of the pricing snapshot for
-// every model a live plugin declares or a saved provider price names. A
-// provider with neither an expression nor a per-call price is unconfigured, one
-// whose expression reads usage its schema lacks is incompatible, and a saved
+// every model a live plugin declares and an enabled channel serves, and every
+// model a saved provider price names. A channel serves a declared model under
+// its own spelling, a case variant or a channel alias. A provider of a served
+// model with neither an expression nor a per-call price is unconfigured, and
+// one whose expression reads usage its schema lacks is incompatible. A saved
 // provider price whose plugin is not installed or whose installed version no
-// longer declares the model is stale. A plugin switched off keeps its prices
-// for when it is switched back on. An empty pluginKey covers every plugin.
+// longer declares the model is stale, whether or not a channel serves it. A
+// plugin switched off keeps its prices for when it is switched back on. An
+// empty pluginKey covers every plugin.
 func GetModelPricingIssues(pluginKey string) ([]ModelPricingIssue, error) {
 	generation := jsplugin.DefaultRegistry.Generation()
+	served := make(map[string]bool)
+	for _, name := range GetEnabledModels() {
+		if declared, ok := generation.CanonicalModel(name); ok {
+			served[declared] = true
+		} else if target, ok := ResolveTaskModelAlias(generation, name); ok && target.Declared != "" {
+			served[target.Declared] = true
+		}
+	}
 	names := make(map[string]bool)
 	for _, plugin := range generation.Plugins() {
 		if pluginKey == "" || plugin.Meta.Key == pluginKey {
 			for _, name := range plugin.Meta.Models {
-				names[name] = true
+				if served[name] {
+					names[name] = true
+				}
 			}
 		}
 	}
@@ -402,7 +423,7 @@ func GetModelPricingIssues(pluginKey string) ([]ModelPricingIssue, error) {
 				continue
 			case variant.Stale:
 				reason = ModelPricingIssueStale
-			case variant.Compatible:
+			case !served[entry.ModelName], variant.Compatible:
 				continue
 			// fixed() marks ordinary channel pricing: the provider has no task price.
 			case variant.Effective != "" && !billingexpr.UsesFixedPricing(variant.Effective):
