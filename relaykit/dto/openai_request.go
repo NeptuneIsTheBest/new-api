@@ -459,6 +459,8 @@ type StreamOptions struct {
 	// IncludeObfuscation is only for /v1/responses stream payload.
 	// This field is filtered by default and can be enabled via channel setting allow_include_obfuscation.
 	IncludeObfuscation bool `json:"include_obfuscation,omitempty"`
+	// ReasoningSummaryDelivery controls reasoning summary delivery for Responses requests.
+	ReasoningSummaryDelivery *string `json:"reasoning_summary_delivery,omitempty"`
 	// ContinuousUsageStats is a vLLM stream_options extension that emits
 	// usage on intermediate chunks. Optional so an explicit false is kept.
 	// ContinuousUsageStats *bool `json:"continuous_usage_stats,omitempty"`

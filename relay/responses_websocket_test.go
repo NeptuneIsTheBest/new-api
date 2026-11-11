@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -431,9 +433,8 @@ func TestNormalizeResponsesWSCreateEventWrapper(t *testing.T) {
 	if req.Stream != nil {
 		t.Fatalf("stream = %v, want nil", req.Stream)
 	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
-	}
+	require.NotNil(t, req.StreamOptions)
+	assert.True(t, req.StreamOptions.IncludeUsage)
 	if strings.TrimSpace(string(req.Store)) != "false" {
 		t.Fatalf("store = %s, want false", req.Store)
 	}
@@ -468,8 +469,117 @@ func TestNormalizeResponsesWSCreateEventFlat(t *testing.T) {
 	if req.Stream != nil {
 		t.Fatalf("stream = %v, want nil", req.Stream)
 	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
+	require.NotNil(t, req.StreamOptions)
+	assert.True(t, req.StreamOptions.IncludeUsage)
+}
+
+func TestResponsesReasoningSummaryDelivery(t *testing.T) {
+	settings := model_setting.GetGlobalSettings()
+	previousPassthrough := settings.PassThroughRequestEnabled
+	t.Cleanup(func() { settings.PassThroughRequestEnabled = previousPassthrough })
+
+	const delivery = `{"reasoning_summary_delivery":"sequential_cutoff"}`
+	const mixedOptions = `{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true,"include_obfuscation":true,"vendor":{"z":1.2300e+4,"a":9007199254740993,"enabled":false}}`
+	for _, tc := range []struct {
+		name, options, wantOptions, passthrough, override string
+		allowObfuscation                                  bool
+	}{
+		{name: "container omitted"},
+		{name: "delivery omitted", options: `{"include_usage":true}`, wantOptions: `{"include_usage":true}`},
+		{name: "sequential cutoff", options: delivery, wantOptions: delivery},
+		{name: "empty delivery", options: `{"reasoning_summary_delivery":""}`, wantOptions: `{"reasoning_summary_delivery":""}`},
+		{name: "future delivery", options: `{"reasoning_summary_delivery":"future_mode"}`, wantOptions: `{"reasoning_summary_delivery":"future_mode"}`},
+		{
+			name: "default filtering", options: mixedOptions,
+			wantOptions: `{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true}`,
+		},
+		{
+			name: "obfuscation allowed", options: mixedOptions, allowObfuscation: true,
+			wantOptions: `{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true,"include_obfuscation":true}`,
+		},
+		{name: "channel passthrough", options: mixedOptions, wantOptions: mixedOptions, passthrough: "channel", override: "override_value"},
+		{name: "global passthrough", options: mixedOptions, wantOptions: mixedOptions, passthrough: "global", override: "override_value"},
+		{
+			name: "channel override", options: delivery, override: "override_value",
+			wantOptions: `{"reasoning_summary_delivery":"override_value"}`,
+		},
+	} {
+		for _, transport := range []string{"http", "ws-flat", "ws-wrapped"} {
+			t.Run(tc.name+"/"+transport, func(t *testing.T) {
+				settings.PassThroughRequestEnabled = tc.passthrough == "global"
+				fields := `"model":"gpt-4.1","input":"hello","stream":true`
+				if tc.options != "" {
+					fields += `,"stream_options":` + tc.options
+				}
+				body := []byte("{" + fields + "}")
+				var request dto.OpenAIResponsesRequest
+				if transport == "http" {
+					require.NoError(t, common.Unmarshal(body, &request))
+				} else {
+					message := `{"type":"response.create",` + fields + `}`
+					if transport == "ws-wrapped" {
+						message = `{"type":"response.create","response":{` + fields + `}}`
+					}
+					raw := []byte(message)
+					create, _, err := normalizeResponsesWSTestMessage(raw)
+					require.NoError(t, err)
+					assert.Equal(t, message, string(raw), "normalization must not mutate the client event")
+					request, body = create.Request, create.Body
+				}
+				originalBody := bytes.Clone(body)
+				originalRequest, err := common.Marshal(request)
+				require.NoError(t, err)
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				t.Cleanup(func() { common.CleanupBodyStorage(c) })
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, request.Model)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: tc.passthrough == "channel"})
+				common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{AllowIncludeObfuscation: tc.allowObfuscation})
+				if tc.override != "" {
+					common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{
+						"stream_options": map[string]any{"reasoning_summary_delivery": tc.override},
+					})
+				}
+				info := relaycommon.GenRelayInfoResponses(c, &request)
+				storage, err := common.GetBodyStorage(c)
+				require.NoError(t, err)
+				var wire []byte
+				if transport == "http" {
+					_, upstreamBody, closer, apiErr := PrepareResponsesRequest(c, info, &request)
+					require.Nil(t, apiErr)
+					t.Cleanup(func() { require.NoError(t, closer.Close()) })
+					wire, err = io.ReadAll(upstreamBody)
+					require.NoError(t, err)
+				} else {
+					var apiErr *types.NewAPIError
+					wire, apiErr = buildResponsesWSCreatePayload(c, info, request, nil, "")
+					require.Nil(t, apiErr)
+				}
+				var forwarded map[string]common.RawMessage
+				require.NoError(t, common.Unmarshal(wire, &forwarded))
+				if tc.wantOptions == "" {
+					assert.NotContains(t, forwarded, "stream_options")
+				} else {
+					require.Contains(t, forwarded, "stream_options")
+					assert.JSONEq(t, tc.wantOptions, string(forwarded["stream_options"]))
+					if tc.passthrough != "" {
+						assert.Equal(t, tc.options, string(forwarded["stream_options"]), "passthrough must preserve raw option bytes")
+					}
+				}
+				if transport != "http" {
+					assert.Equal(t, `"response.create"`, string(forwarded["type"]))
+					assert.NotContains(t, forwarded, "stream")
+				}
+				stored, err := storage.Bytes()
+				require.NoError(t, err)
+				assert.Equal(t, originalBody, stored)
+				unchangedRequest, err := common.Marshal(request)
+				require.NoError(t, err)
+				assert.Equal(t, originalRequest, unchangedRequest)
+			})
+		}
 	}
 }
 
@@ -497,12 +607,12 @@ func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
 		{
 			name: "flat event", generate: "false",
 			body: `{"model":"gpt-5.3-codex-spark","input":"hi","store":false,"event_id":"evt_upstream","stream":true,"background":true,"stream_options":{"include_usage":true}}`,
-			want: `{"type":"response.create","generate":false,"model":"gpt-5.3-codex-spark","input":"hi","store":false}`,
+			want: `{"type":"response.create","generate":false,"model":"gpt-5.3-codex-spark","input":"hi","store":false,"stream_options":{"include_usage":true}}`,
 		},
 		{
 			name: "envelope wins", generate: "false", streamID: "planner.A-1",
 			body: `{"type":"wrong","type":"wrong-again","stream_id":"override","generate":true,"event_id":"event","background":true,"stream":false,"stream_options":{},"input":[]}`,
-			want: `{"type":"response.create","stream_id":"planner.A-1","generate":false,"input":[]}`,
+			want: `{"type":"response.create","stream_id":"planner.A-1","generate":false,"stream_options":{},"input":[]}`,
 		},
 		{
 			name: "absent envelope generate keeps override",
@@ -581,7 +691,7 @@ func TestResponsesWSCreatePayloadStorageAndOverrides(t *testing.T) {
 				if passthrough {
 					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"hello","service_tier":"priority","vendor":9007199254740993}`, string(payload))
 				} else {
-					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"updated","service_tier":"auto"}`, string(payload))
+					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"updated","service_tier":"auto","stream_options":{"include_usage":true}}`, string(payload))
 				}
 				stored, err := storage.Bytes()
 				require.NoError(t, err)

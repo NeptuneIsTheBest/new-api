@@ -81,24 +81,6 @@ func (s *sseLineSplitter) split(data []byte, atEOF bool) (advance int, token []b
 	return advance, nil, nil
 }
 
-func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
-	if c == nil || c.Writer == nil || resp == nil {
-		return
-	}
-	// codex
-	for _, name := range []string{"X-Reasoning-Included", "X-Codex-Turn-State"} {
-		values := resp.Header.Values(name)
-		if !service.ShouldCopyUpstreamHeader(c, name, values) {
-			continue
-		}
-		for _, value := range values {
-			if value != "" {
-				c.Writer.Header().Add(name, value)
-			}
-		}
-	}
-}
-
 // StreamWriteBudget gives the writes of one stream a deadline of
 // streamWriteTimeout past the time a client reading at streamMinClientRate
 // needs for everything written so far. A fixed deadline per write cut slow
@@ -217,7 +199,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	var lineSplitter sseLineSplitter
 	scanner.Split(lineSplitter.split)
-	copyCodexSSEHeaders(c, resp)
+	for name, values := range service.CodexResponseHeaders(c, resp.Header) {
+		c.Writer.Header()[name] = values
+	}
 	SetEventStreamHeaders(c)
 
 	ctx = context.WithValue(ctx, "stop_chan", stopChan)

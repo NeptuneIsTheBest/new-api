@@ -464,7 +464,8 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, err
 	}
-	return DialWssRequest(c, info, requestURL, headers)
+	conn, _, err := DialWssRequest(c, info, requestURL, headers)
+	return conn, err
 }
 
 // PrepareWssRequest resolves the application-controlled handshake URL and
@@ -502,7 +503,9 @@ func PrepareWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo) (strin
 
 // DialWssRequest sends exactly the prepared application headers, allowing the
 // caller to retain the handshake settings for subsequent connection reuse.
-func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL string, targetHeader http.Header) (*websocket.Conn, error) {
+// Response headers are cloned on both successful and rejected handshakes;
+// callers must filter them before exposing them to a downstream client.
+func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL string, targetHeader http.Header) (*websocket.Conn, http.Header, error) {
 	fullRequestURL = toWebSocketURL(fullRequestURL)
 	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
 		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
@@ -512,7 +515,7 @@ func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL strin
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {
-			return nil, proxyErr
+			return nil, nil, proxyErr
 		}
 		dialer.Proxy = http.ProxyURL(proxyURL)
 	}
@@ -520,6 +523,10 @@ func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL strin
 		dialer.TLSClientConfig = common2.InsecureTLSConfig
 	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
+	var responseHeaders http.Header
+	if resp != nil {
+		responseHeaders = resp.Header.Clone()
+	}
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		if resp != nil {
@@ -528,9 +535,9 @@ func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL strin
 				_ = resp.Body.Close()
 			}
 		}
-		return nil, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)
+		return nil, responseHeaders, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)
 	}
-	return targetConn, nil
+	return targetConn, responseHeaders, nil
 }
 
 // toWebSocketURL maps an http(s) endpoint to ws(s). Realtime adaptors already

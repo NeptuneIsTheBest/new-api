@@ -41,6 +41,56 @@ func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
 	return true
 }
 
+// CodexResponseHeaders selects response metadata understood by Codex, preserving
+// header presence and all values. It returns an independent, canonicalized map
+// for both SSE headers and Responses WebSocket metadata events.
+func CodexResponseHeaders(c *gin.Context, headers http.Header) http.Header {
+	hopByHop := make(map[string]bool)
+	for name, values := range headers {
+		if strings.EqualFold(name, "Connection") {
+			for _, value := range values {
+				for token := range strings.SplitSeq(value, ",") {
+					hopByHop[strings.ToLower(strings.TrimSpace(token))] = true
+				}
+			}
+		}
+	}
+	selected := make(http.Header)
+	for name, values := range headers {
+		if !ShouldCopyUpstreamHeader(c, name, values) || len(values) == 0 {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if hopByHop[lower] {
+			continue
+		}
+		allowed := false
+		switch lower {
+		case "openai-model", "x-models-etag", "x-reasoning-included", "x-codex-turn-state", "x-request-id", "retry-after",
+			"x-codex-safety-buffering-enabled", "x-codex-safety-buffering-faster-model",
+			"x-codex-credits-has-credits", "x-codex-credits-unlimited", "x-codex-credits-balance":
+			allowed = true
+		default:
+			if limit, ok := strings.CutPrefix(lower, "x-"); ok {
+				for _, suffix := range []string{
+					"-primary-used-percent", "-primary-window-minutes", "-primary-reset-at",
+					"-secondary-used-percent", "-secondary-window-minutes", "-secondary-reset-at", "-limit-name",
+				} {
+					if id, ok := strings.CutSuffix(limit, suffix); ok && id != "" {
+						allowed = true
+						break
+					}
+				}
+			}
+		}
+		if allowed {
+			name = http.CanonicalHeaderKey(name)
+			selected[name] = append(selected[name], values...)
+		}
+	}
+	return selected
+}
+
 func IOCopyBytesGracefully(c *gin.Context, src *http.Response, data []byte) {
 	if c.Writer == nil {
 		return

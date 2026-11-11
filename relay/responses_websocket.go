@@ -185,6 +185,8 @@ type responsesWSSession struct {
 	// Deferred replies across all lanes, including in-flight writes, use stateMu.
 	controlReplyCount int
 	controlReplyBytes int64
+	// The handshake turn state is consumed once, under stateMu, on acceptance.
+	pendingTurnState *string
 
 	// clientWriteBudget is guarded by clientWriteMu.
 	clientWriteBudget helper.StreamWriteBudget
@@ -311,7 +313,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		outgoing := state.terminal
 		if apiErr != nil && (!state.automatic || state.started) {
 			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, apiErr, upstreamURLs...); err == nil {
-				// Restore only retry metadata after the normal error sanitization.
+				// Restored metadata must pass both header selection and value masking.
 				if len(state.rejectionHeaders) > 0 || len(state.rejectionErrorHeaders) > 0 {
 					var payload struct {
 						responsesWSErrorEvent
@@ -322,8 +324,8 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 						} `json:"error"`
 					}
 					if common.Unmarshal(body, &payload) == nil {
-						payload.Headers = state.rejectionHeaders
-						payload.Error.Headers = state.rejectionErrorHeaders
+						payload.Headers = sanitizeResponsesWSErrorHeaders(state.rejectionHeaders, upstreamURLs...)
+						payload.Error.Headers = sanitizeResponsesWSErrorHeaders(state.rejectionErrorHeaders, upstreamURLs...)
 						if encoded, err := common.Marshal(payload); err == nil {
 							body = encoded
 						}
@@ -591,8 +593,14 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			adaptor.Init(info)
 			requestURL, requestHeaders, dialErr := relaychannel.PrepareWssRequest(adaptor, c, info)
 			var target *websocket.Conn
+			var responseHeaders http.Header
 			if dialErr == nil {
-				target, dialErr = relaychannel.DialWssRequest(c, info, requestURL, requestHeaders)
+				target, responseHeaders, dialErr = relaychannel.DialWssRequest(c, info, requestURL, requestHeaders)
+			}
+			metadata := make(map[string]string)
+			for name, values := range service.CodexResponseHeaders(c, responseHeaders) {
+				// Codex's event header parser accepts scalar values, not arrays.
+				metadata[strings.ToLower(name)] = values[0]
 			}
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
@@ -604,10 +612,20 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				if decision.Action == "retry" {
 					continue
 				}
+				if len(metadata) > 0 {
+					state.rejectionHeaders, _ = common.Marshal(metadata)
+				}
 				return apiErr
 			}
 			if !s.setTarget(target) {
 				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+			}
+			// The downstream upgrade preceded channel selection. Publish the
+			// handshake metadata before starting the upstream reader, without
+			// treating these synthetic events as accepted or billable responses.
+			if err := s.sendHandshakeMetadata(metadata); err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+				return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
 			s.rememberResponsesRequest(state, create, info)
 			if err := s.writeCreate(state, payload); err != nil {
@@ -835,18 +853,21 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				state.rejectionErrorHeaders = metadata.Error.Headers
 				return rejected
 			}
+			accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
 			if strings.HasPrefix(event.Type, "response.") {
 				state.started = true
 				if !accepted {
 					// Like HTTP, bind the session only once upstream accepted the request.
 					service.RecordChannelAffinity(c, s.lockedChannelID)
+					if err := s.sendPendingTurnState(create.StreamID); err != nil {
+						s.shutdown(websocket.CloseInternalServerErr, "")
+					}
 				}
 				accepted = true
 				if event.Response != nil && event.Response.ID != "" {
 					responseID = event.Response.ID
 				}
 			}
-			accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
 		}
 		switch event.Type {
 		case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
@@ -1100,6 +1121,12 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 	}
 	if common.Unmarshal(body, &event) != nil {
 		return nil, false, true
+	}
+	switch event.Type {
+	case "response.metadata", "codex.response.metadata", "codex.rate_limits":
+		// Connection metadata passes through without assigning a response ID,
+		// accepting a request, or reaching its usage accumulator.
+		return nil, false, false
 	}
 	responseID := event.ResponseID
 	if event.Response != nil && event.Response.ID != "" {
@@ -1371,6 +1398,7 @@ func (s *responsesWSSession) shutdown(code int, reason string) {
 		}
 		s.queued, s.queuedBytes = 0, 0
 		s.responseControls, s.responseControlBytes = nil, 0
+		s.pendingTurnState = nil
 		if s.changed != nil {
 			close(s.changed)
 			s.changed = nil
@@ -1468,7 +1496,7 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 			create.Generate = common.RawMessage(generate.Raw)
 		}
 	} else {
-		for _, key := range []string{"type", "event_id", "background", "stream", "stream_options"} {
+		for _, key := range []string{"type", "event_id", "background", "stream"} {
 			if err := relaycommon.DeleteJSONMember(doc, key); err != nil {
 				return create, err
 			}
@@ -1487,7 +1515,6 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 		return create, errors.New("max_output_tokens is invalid")
 	}
 	create.Request.Stream = nil
-	create.Request.StreamOptions = nil
 	create.Body = payload
 	return create, nil
 }
@@ -1518,7 +1545,7 @@ func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, st
 	positions := make(map[string]int)
 	data.ForEach(func(key, value gjson.Result) bool {
 		switch key.Str {
-		case "type", "stream_id", "event_id", "background", "stream", "stream_options":
+		case "type", "stream_id", "event_id", "background", "stream":
 			// Channel overrides must not shadow the WebSocket envelope.
 			return true
 		case "generate":
@@ -1548,6 +1575,81 @@ func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, st
 		event = append(event, ',')
 	}
 	return append(event, envelope[1:]...), nil
+}
+
+// sanitizeResponsesWSErrorHeaders retains only supported response metadata,
+// preserving its JSON scalar types while masking strings as error text.
+func sanitizeResponsesWSErrorHeaders(raw common.RawMessage, upstreamURLs ...string) common.RawMessage {
+	var fields map[string]common.RawMessage
+	if common.Unmarshal(raw, &fields) != nil || len(fields) == 0 {
+		return nil
+	}
+	headers := make(http.Header, len(fields))
+	sanitized := make(map[string]common.RawMessage, len(fields))
+	for name, value := range fields {
+		values := []common.RawMessage{value}
+		isArray := common.GetJsonType(value) == "array"
+		if isArray && common.Unmarshal(value, &values) != nil {
+			continue
+		}
+		if len(values) == 0 {
+			continue
+		}
+		headerValues := make([]string, len(values))
+		valid := true
+		for i, item := range values {
+			switch common.GetJsonType(item) {
+			case "string":
+				var text string
+				if common.Unmarshal(item, &text) != nil {
+					valid = false
+					break
+				}
+				// Select against the original values so Connection still names
+				// every hop-by-hop header, even if masking changes its text.
+				headerValues[i] = text
+				masked, err := common.Marshal(common.MaskSensitiveInfo(text, upstreamURLs...))
+				if err != nil {
+					return nil
+				}
+				values[i] = masked
+			case "number", "boolean":
+				headerValues[i] = string(item)
+			default:
+				valid = false
+			}
+			if !valid {
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		encoded := values[0]
+		if isArray {
+			var err error
+			encoded, err = common.Marshal(values)
+			if err != nil {
+				return nil
+			}
+		}
+		headers[name] = headerValues
+		sanitized[name] = encoded
+	}
+	selected := service.CodexResponseHeaders(nil, headers)
+	for name := range sanitized {
+		if _, allowed := selected[http.CanonicalHeaderKey(name)]; !allowed {
+			delete(sanitized, name)
+		}
+	}
+	if len(sanitized) == 0 {
+		return nil
+	}
+	encoded, err := common.Marshal(sanitized)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 func buildResponsesWSErrorPayload(eventID, streamID string, apiErr *types.NewAPIError, upstreamURLs ...string) ([]byte, error) {

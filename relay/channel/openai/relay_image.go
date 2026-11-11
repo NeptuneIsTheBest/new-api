@@ -143,6 +143,14 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	var completedImages int64
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if strings.TrimSpace(data) == "" {
+			// Preserve empty SSE events without replacing the last usage-bearing data.
+			if err := helper.StringData(c, data); err != nil {
+				sr.Stop(err)
+			}
+			return
+		}
+
 		raw := common.StringToByteSlice(data)
 		lastStreamData = raw
 		if isOpenAIImageStreamErrorEvent(raw) {

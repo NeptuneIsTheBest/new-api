@@ -44,9 +44,24 @@ func (s *responsesWSSession) hasPendingInterruptLocked(responseID string) bool {
 func (s *responsesWSSession) submitResponseControl(body []byte, event responsesWSCreateEvent, streamID string) (string, *types.NewAPIError) {
 	invalidMessage, limitMessage := i18n.MsgResponsesWSInvalidInterrupt, i18n.MsgResponsesWSInterruptLimit
 	valid := strings.TrimSpace(event.ResponseID) != ""
+	var injectInput common.RawMessage
 	if event.Type == "response.inject" {
 		invalidMessage, limitMessage = i18n.MsgResponsesWSInvalidInject, i18n.MsgResponsesWSInjectLimit
-		valid = valid && gjson.GetBytes(body, "input").IsArray()
+		var input gjson.Result
+		inputCount := 0
+		// The original frame is forwarded, so input must be unambiguous even
+		// when equivalent member names use different JSON escapes.
+		gjson.ParseBytes(body).ForEach(func(key, value gjson.Result) bool {
+			if key.Str == "input" {
+				inputCount++
+				input = value
+			}
+			return inputCount < 2
+		})
+		valid = valid && inputCount == 1 && input.IsArray()
+		if valid {
+			injectInput = common.RawMessage(input.Raw)
+		}
 	}
 	if !valid {
 		return streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, invalidMessage)))
@@ -90,7 +105,7 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 	s.stateMu.Unlock()
 	// Sensitive checks also apply when counting is disabled or the response has finished.
 	if event.Type == "response.inject" && setting.ShouldCheckPromptSensitive() {
-		request := dto.OpenAIResponsesRequest{Input: common.RawMessage(gjson.GetBytes(body, "input").Raw)}
+		request := dto.OpenAIResponsesRequest{Input: injectInput}
 		if sensitive, _ := service.CheckSensitiveText(request.GetTokenCountMeta().CombineText); sensitive {
 			return lane, types.NewError(errors.New("user sensitive words detected"), types.ErrorCodeSensitiveWordsDetected, types.ErrOptionWithSkipRetry())
 		}
@@ -100,7 +115,7 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 		// Reserve on the request worker before forwarding. Only an upstream
 		// acknowledgement can commit the input to its estimated usage.
 		reply := make(chan responsesWSInputReservation, 1)
-		control := responsesWSControl{injectInput: common.RawMessage(gjson.GetBytes(body, "input").Raw), reserveReply: reply}
+		control := responsesWSControl{injectInput: injectInput, reserveReply: reply}
 		select {
 		case owner.controls <- control:
 			select {

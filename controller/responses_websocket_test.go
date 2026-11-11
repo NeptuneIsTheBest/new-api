@@ -332,10 +332,10 @@ func waitPerfCounters(t *testing.T, wantRequests int64) (requests, successes int
 
 func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*websocket.Conn, *http.Request), httpEvents ...string) *responsesWSBillingTest {
 	t.Helper()
-	return newResponsesWSBillingTestWithHeaders(t, expression, handle, nil, httpEvents...)
+	return newResponsesWSBillingTestWithHeaders(t, expression, handle, nil, nil, httpEvents...)
 }
 
-func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handle func(*websocket.Conn, *http.Request), clientHeaders http.Header, httpEvents ...string) *responsesWSBillingTest {
+func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handle func(*websocket.Conn, *http.Request), clientHeaders http.Header, upstreamHeaders func(http.ResponseWriter, *http.Request) (http.Header, bool), httpEvents ...string) *responsesWSBillingTest {
 	t.Helper()
 	user, token := setupResponsesWSRequestTest(t)
 	previousTimeout := constant.StreamingTimeout
@@ -375,10 +375,21 @@ func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handl
 	t.Cleanup(func() { require.NoError(t, redisClient.Close()) })
 	var upstreamClosed sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var responseHeaders http.Header
+		if upstreamHeaders != nil {
+			var proceed bool
+			responseHeaders, proceed = upstreamHeaders(w, r)
+			if !proceed {
+				return
+			}
+		}
 		if !websocket.IsWebSocketUpgrade(r) {
 			if fixture.httpUpstream != nil {
 				fixture.httpUpstream(w, r)
 				return
+			}
+			for name, values := range responseHeaders {
+				w.Header()[name] = values
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			for _, event := range httpEvents {
@@ -387,7 +398,7 @@ func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handl
 			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			return
 		}
-		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, responseHeaders)
 		if !assert.NoError(t, err) {
 			return
 		}
@@ -420,6 +431,7 @@ func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handl
 	engine.POST("/v1/responses", middleware.TokenAuth(), middleware.ModelRequestRateLimit(), middleware.Distribute(), func(c *gin.Context) {
 		defer func() { fixture.httpDone <- struct{}{} }()
 		c.Set(common.RequestIdKey, "responses-http-billing")
+		c.Header(common.RequestIdKey, "responses-http-billing")
 		Relay(c, types.RelayFormatOpenAIResponses)
 	})
 	gateway := httptest.NewServer(engine)
@@ -435,6 +447,410 @@ func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handl
 	fixture.client = client
 	t.Cleanup(func() { fixture.closeAndWait(t) })
 	return fixture
+}
+
+func codexMetadataTestHeaders() (upstream, expected http.Header) {
+	expected = http.Header{
+		"Openai-Model":                           {"actual-model", "second-model"},
+		"X-Models-Etag":                          {"models-v1", "models-v2"},
+		"X-Reasoning-Included":                   {""},
+		"X-Codex-Turn-State":                     {"turn-state"},
+		"X-Request-Id":                           {"upstream-request"},
+		"X-Codex-Safety-Buffering-Enabled":       {"false"},
+		"X-Codex-Safety-Buffering-Faster-Model":  {"faster-model"},
+		"X-Codex-Credits-Has-Credits":            {"0"},
+		"X-Codex-Credits-Unlimited":              {"FALSE"},
+		"X-Codex-Credits-Balance":                {"0"},
+		"X-Codex-Primary-Used-Percent":           {"0"},
+		"X-Codex-Primary-Window-Minutes":         {"60"},
+		"X-Codex-Primary-Reset-At":               {"0"},
+		"X-Codex-Secondary-Used-Percent":         {"50.5"},
+		"X-Codex-Secondary-Window-Minutes":       {"10080"},
+		"X-Codex-Secondary-Reset-At":             {"1700000000"},
+		"X-Other-Model-Primary-Used-Percent":     {"12.5"},
+		"X-Other-Model-Primary-Window-Minutes":   {"invalid"},
+		"X-Other-Model-Secondary-Used-Percent":   {"0"},
+		"X-Other-Model-Secondary-Window-Minutes": {"0"},
+		"X-Other-Model-Secondary-Reset-At":       {"0"},
+		"X-Other-Model-Limit-Name":               {"Other model"},
+	}
+	upstream = expected.Clone()
+	upstream["oPeNaI-mOdEl"] = upstream["Openai-Model"]
+	delete(upstream, "Openai-Model")
+	upstream.Set("Authorization", "Bearer upstream-secret")
+	upstream.Set("Set-Cookie", "upstream-session=secret")
+	upstream.Set(common.RequestIdKey, "upstream-instance")
+	upstream.Set("X-Codex-Secret", "secret")
+	upstream.Set("Sec-WebSocket-Version", "13")
+	upstream.Set("Connection", "Upgrade, X-Hop-Primary-Used-Percent")
+	upstream.Set("X-Hop-Primary-Used-Percent", "90")
+	return upstream, expected
+}
+
+func TestResponsesCodexMetadataSSE(t *testing.T) {
+	settings := operation_setting.GetGeneralSetting()
+	previousEnabled, previousInterval, previousRetries := settings.PingIntervalEnabled, settings.PingIntervalSeconds, common.RetryTimes
+	settings.PingIntervalEnabled, settings.PingIntervalSeconds, common.RetryTimes = true, 1, 1
+	t.Cleanup(func() {
+		settings.PingIntervalEnabled, settings.PingIntervalSeconds, common.RetryTimes = previousEnabled, previousInterval, previousRetries
+	})
+	for _, test := range []struct {
+		name         string
+		delayHeaders bool
+	}{
+		{name: "headers before keepalive"},
+		{name: "keepalive before headers", delayHeaders: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream, expected := codexMetadataTestHeaders()
+			var attempts atomic.Int32
+			releaseUpstream := make(chan struct{})
+			var releaseOnce sync.Once
+			defer releaseOnce.Do(func() { close(releaseUpstream) })
+			terminal := `{"type":"response.completed","response":{"id":"sse-metadata","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+			fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, nil, nil, func(w http.ResponseWriter, r *http.Request) (http.Header, bool) {
+				if attempts.Add(1) == 1 {
+					w.Header().Set("X-Stale-Primary-Used-Percent", "90")
+					w.Header().Set("Retry-After", "99")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return nil, false
+				}
+				if test.delayHeaders {
+					// The client must receive a keepalive before upstream headers arrive.
+					select {
+					case <-releaseUpstream:
+					case <-r.Context().Done():
+						return nil, false
+					}
+				}
+				for name, values := range upstream {
+					w.Header()[name] = values
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.(http.Flusher).Flush()
+				select {
+				case <-releaseUpstream:
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", terminal)
+				case <-r.Context().Done():
+				}
+				return nil, false
+			})
+			request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":"hello","stream":true}`))
+			require.NoError(t, err)
+			request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := (&http.Client{Timeout: 6 * time.Second}).Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			require.Equal(t, http.StatusOK, response.StatusCode)
+			assert.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
+			for name, values := range expected {
+				if test.delayHeaders {
+					assert.NotContains(t, response.Header, name, "keepalive already committed the response headers")
+				} else {
+					assert.Equal(t, values, response.Header.Values(name), name)
+				}
+			}
+			assert.Equal(t, "responses-http-billing", response.Header.Get(common.RequestIdKey))
+			for _, name := range []string{"Authorization", "Set-Cookie", "X-Codex-Secret", "Sec-WebSocket-Version", "X-Hop-Primary-Used-Percent", "X-Stale-Primary-Used-Percent", "Retry-After"} {
+				assert.NotContains(t, response.Header, name)
+			}
+			reader := bufio.NewReader(response.Body)
+			line, err := reader.ReadString('\n')
+			require.NoError(t, err)
+			require.Equal(t, ": PING\n", line)
+			line, err = reader.ReadString('\n')
+			require.NoError(t, err)
+			require.Equal(t, "\n", line)
+			releaseOnce.Do(func() { close(releaseUpstream) })
+			body, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			assert.Contains(t, string(body), terminal)
+			select {
+			case <-fixture.httpDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("SSE request did not finish")
+			}
+			assert.Equal(t, int32(2), attempts.Load())
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{1000})
+		})
+	}
+}
+
+func TestResponsesCodexMetadataWebSocket(t *testing.T) {
+	upstream, expected := codexMetadataTestHeaders()
+	nativeMetadata := map[string]any{"type": "codex.response.metadata", "headers": map[string]any{"x-models-etag": "native-update"}}
+	nativeLimits := map[string]any{"type": "codex.rate_limits", "metered_limit_name": "codex", "rate_limits": map[string]any{"primary": map[string]any{"used_percent": float64(25)}}}
+	fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+		for _, lane := range []string{"a", "b"} {
+			if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+				return
+			}
+			sendResponsesWSTestEvent(t, ws, nativeMetadata)
+			sendResponsesWSTestEvent(t, ws, nativeLimits)
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "stream_id": lane, "response": map[string]any{"id": lane, "status": "completed", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
+		}
+		_, _, _ = ws.ReadMessage()
+	}, nil, func(http.ResponseWriter, *http.Request) (http.Header, bool) { return upstream, true })
+	for index, lane := range []string{"a", "b"} {
+		sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "hello", "stream_id": lane})
+		if index == 0 {
+			metadata := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "codex.response.metadata", metadata["type"])
+			want := make(map[string]any)
+			for name, values := range expected {
+				want[strings.ToLower(name)] = values[0]
+			}
+			assert.Equal(t, want, metadata["headers"], "only scalar, allowed metadata reaches the client")
+			for _, wantJSON := range []string{
+				`{"type":"codex.rate_limits","metered_limit_name":"codex","rate_limits":{"primary":{"used_percent":0,"window_minutes":60,"reset_at":0},"secondary":{"used_percent":50.5,"window_minutes":10080,"reset_at":1700000000}},"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}`,
+				`{"type":"codex.rate_limits","metered_limit_name":"other_model","rate_limits":{"primary":{"used_percent":12.5},"secondary":{"used_percent":0,"window_minutes":0,"reset_at":0}},"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}`,
+			} {
+				var wantEvent map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(wantJSON, &wantEvent))
+				assert.Equal(t, wantEvent, readResponsesWSTestEvent(t, fixture.client))
+			}
+		}
+		assert.Equal(t, nativeMetadata, readResponsesWSTestEvent(t, fixture.client))
+		assert.Equal(t, nativeLimits, readResponsesWSTestEvent(t, fixture.client))
+		if index == 0 {
+			assert.Equal(t, map[string]any{"type": "response.metadata", "stream_id": lane, "headers": map[string]any{"x-codex-turn-state": "turn-state"}}, readResponsesWSTestEvent(t, fixture.client))
+		}
+		terminal := readResponsesWSTestEvent(t, fixture.client)
+		assert.Equal(t, "response.completed", terminal["type"])
+		assert.Equal(t, lane, terminal["stream_id"])
+	}
+	fixture.closeAndWait(t)
+	assert.Equal(t, int32(1), fixture.connections.Load())
+	assertResponsesWSAccounting(t, fixture, []int{1000, 1000})
+}
+
+func TestResponsesCodexMetadataHandshakeRetry(t *testing.T) {
+	for _, finalFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("final failure %t", finalFailure), func(t *testing.T) {
+			previousRetries := common.RetryTimes
+			common.RetryTimes = 1
+			t.Cleanup(func() { common.RetryTimes = previousRetries })
+			var attempts atomic.Int32
+			fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "response": map[string]any{"id": "retry", "status": "completed"}})
+				_, _, _ = ws.ReadMessage()
+			}, nil, func(w http.ResponseWriter, _ *http.Request) (http.Header, bool) {
+				if attempts.Add(1) == 1 {
+					w.Header().Set("X-Stale-Primary-Used-Percent", "90")
+					w.Header().Set("Retry-After", "99")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return nil, false
+				}
+				if finalFailure {
+					w.Header().Set("X-Models-Etag", "final")
+					w.Header().Set("X-Request-Id", "https://reader:password@auth.example.org/token?key=handshake-secret")
+					w.Header().Add("Retry-After", "2")
+					w.Header().Add("Retry-After", "3")
+					w.Header().Set("Authorization", "Bearer channel-secret")
+					w.Header().Set("Set-Cookie", "secret")
+					w.WriteHeader(http.StatusTooManyRequests)
+					return nil, false
+				}
+				return http.Header{"X-Models-Etag": {"final"}}, true
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "hello"})
+			event := readResponsesWSTestEvent(t, fixture.client)
+			if finalFailure {
+				assert.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(http.StatusTooManyRequests), event["status"])
+				assert.Equal(t, map[string]any{
+					"x-models-etag": "final", "retry-after": "2",
+					"x-request-id": "https://***@auth.example.org/token?key=***",
+				}, event["headers"])
+			} else {
+				assert.Equal(t, map[string]any{"type": "codex.response.metadata", "headers": map[string]any{"x-models-etag": "final"}}, event)
+				assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(2), attempts.Load())
+			if finalFailure {
+				assertResponsesWSAccounting(t, fixture, nil)
+			} else {
+				assertResponsesWSAccounting(t, fixture, []int{1000})
+			}
+		})
+	}
+}
+
+func TestResponsesCodexMetadataDoesNotAcceptRejectedRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		headers    http.Header
+		rate       string
+		noMetadata bool
+	}{
+		{name: "no allowed metadata", headers: http.Header{"X-Codex-Secret": {"secret"}}, noMetadata: true},
+		{name: "turn state before rejection", headers: http.Header{"X-Codex-Turn-State": {"turn-state"}}},
+		{name: "empty turn state before rejection", headers: http.Header{"X-Codex-Turn-State": {""}}},
+		{name: "empty and invalid windows", headers: http.Header{
+			"X-Codex-Primary-Used-Percent":   {"0"},
+			"X-Codex-Primary-Window-Minutes": {"0"},
+			"X-Codex-Secondary-Used-Percent": {"NaN"},
+			"X-Other-Primary-Used-Percent":   {"Inf"},
+			"X-Hex-Primary-Used-Percent":     {"0x1p2"},
+			"X-Codex-Credits-Has-Credits":    {"T"},
+			"X-Codex-Credits-Unlimited":      {"true"},
+			"X-Codex-Credits-Balance":        {"5"},
+		}},
+		{name: "valid secondary without valid primary", headers: http.Header{
+			"X-Other-Model-Primary-Used-Percent":     {"invalid"},
+			"X-Other-Model-Secondary-Used-Percent":   {"20"},
+			"X-Other-Model-Secondary-Window-Minutes": {"9223372036854775808"},
+			"X-Other-Model-Secondary-Reset-At":       {"0"},
+		}, rate: `{"type":"codex.rate_limits","metered_limit_name":"other_model","rate_limits":{"secondary":{"used_percent":20,"reset_at":0}}}`},
+		{name: "credits without windows", headers: http.Header{
+			"X-Codex-Credits-Has-Credits": {"TRUE"},
+			"X-Codex-Credits-Unlimited":   {"1"},
+		}, rate: `{"type":"codex.rate_limits","metered_limit_name":"codex","credits":{"has_credits":true,"unlimited":true}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "error", "status": 400, "error": map[string]any{"type": "invalid_request_error", "message": "Rejected before generation"}})
+				_, _, _ = ws.ReadMessage()
+			}, nil, func(http.ResponseWriter, *http.Request) (http.Header, bool) { return tc.headers, true })
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "hello"})
+			if !tc.noMetadata {
+				metadata := readResponsesWSTestEvent(t, fixture.client)
+				assert.Equal(t, "codex.response.metadata", metadata["type"])
+				want := make(map[string]any)
+				for name, values := range tc.headers {
+					want[strings.ToLower(name)] = values[0]
+				}
+				assert.Equal(t, want, metadata["headers"], "raw header metadata survives invalid numeric fields")
+			}
+			if tc.rate != "" {
+				var want map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(tc.rate, &want))
+				assert.Equal(t, want, readResponsesWSTestEvent(t, fixture.client))
+			}
+			rejection := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "error", rejection["type"], "no synthetic response.* event may precede rejection")
+			assert.Equal(t, float64(http.StatusBadRequest), rejection["status"])
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, nil)
+		})
+	}
+}
+
+func TestResponsesCodexMetadataUpstreamAcceptance(t *testing.T) {
+	metadata := []string{
+		`{"type":"response.metadata", "stream_id":"planner", "response_id":"metadata-only", "headers":{"x-codex-turn-state":"upstream-state"}}`,
+		`{"type":"codex.response.metadata", "headers":{"x-models-etag":"native-update"}, "vendor":"preserved"}`,
+		`{"type":"codex.rate_limits", "metered_limit_name":"codex", "rate_limits":{"primary":{"used_percent":25}}}`,
+	}
+	for _, tc := range []struct {
+		name, terminal string
+		created        bool
+	}{
+		{name: "rejected", terminal: `{"type":"error","stream_id":"planner","status":400,"error":{"type":"invalid_request_error","message":"Rejected before generation"}}`},
+		{name: "completed", created: true, terminal: `{"type":"response.completed","stream_id":"planner","response":{"id":"generated","status":"completed"}}`},
+		{name: "failed after acceptance", created: true, terminal: `{"type":"error","stream_id":"planner","response_id":"generated","status":400,"error":{"type":"invalid_request_error","message":"Failed after generation started"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				for _, event := range metadata {
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event))) {
+						return
+					}
+				}
+				if tc.created {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "generated", "status": "in_progress"}})
+				}
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(tc.terminal))) {
+					return
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello"})
+			for _, expected := range metadata {
+				require.NoError(t, fixture.client.SetReadDeadline(time.Now().Add(3*time.Second)))
+				kind, actual, err := fixture.client.ReadMessage()
+				require.NoError(t, err)
+				assert.Equal(t, websocket.TextMessage, kind)
+				assert.Equal(t, expected, string(actual), "upstream metadata must pass through byte-for-byte")
+			}
+			if tc.created {
+				assert.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			var terminal map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(tc.terminal, &terminal))
+			actual := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, terminal["type"], actual["type"])
+			assert.Equal(t, terminal["status"], actual["status"])
+			fixture.closeAndWait(t)
+			if tc.created {
+				assertResponsesWSAccounting(t, fixture, []int{1000})
+			} else {
+				assertResponsesWSAccounting(t, fixture, nil)
+			}
+		})
+	}
+}
+
+func TestResponsesCodexMetadataTurnStateAfterRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name, streamID, turnState string
+	}{
+		{name: "default stream with empty turn state"},
+		{name: "named stream", streamID: "planner", turnState: "turn-state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "error", "stream_id": tc.streamID, "status": 400, "error": map[string]any{"type": "invalid_request_error", "message": "Rejected before generation"}})
+				for index := range 2 {
+					if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+						return
+					}
+					completeResponsesWSTestRequest(t, ws, tc.streamID, fmt.Sprintf("generated-%d", index), 1)
+				}
+				_, _, _ = ws.ReadMessage()
+			}, nil, func(http.ResponseWriter, *http.Request) (http.Header, bool) {
+				return http.Header{"X-Codex-Turn-State": {tc.turnState}}, true
+			})
+			create := map[string]any{"type": "response.create", "model": "ws-billing", "input": "rejected"}
+			if tc.streamID != "" {
+				create["stream_id"] = tc.streamID
+			}
+			sendResponsesWSTestEvent(t, fixture.client, create)
+			assert.Equal(t, "codex.response.metadata", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, "error", readResponsesWSTestEvent(t, fixture.client)["type"])
+			assertResponsesWSAccounting(t, fixture, nil)
+			create["input"] = "generated"
+			for index := range 2 {
+				sendResponsesWSTestEvent(t, fixture.client, create)
+				if index == 0 {
+					want := map[string]any{"type": "response.metadata", "headers": map[string]any{"x-codex-turn-state": tc.turnState}}
+					if tc.streamID != "" {
+						want["stream_id"] = tc.streamID
+					}
+					assert.Equal(t, want, readResponsesWSTestEvent(t, fixture.client))
+				}
+				assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"], "turn state must be sent only once per connection")
+			}
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assertResponsesWSAccounting(t, fixture, []int{1000, 1000})
+		})
+	}
 }
 
 func TestResponsesInterruptedStreamHealth(t *testing.T) {
@@ -1161,25 +1577,61 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {
 	for _, tc := range []struct {
 		name, upstream, wantType, wantMessage string
+		wantHeaders, wantErrorHeaders         string
 		status                                int
 	}{
 		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid input"},
 		// A frame without an error object is still reported as a request error.
-		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected","headers":{"retry-after":"4"}}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantMessage: "upstream rejected"},
-		{name: "alias rate limit", upstream: `{"type":"error","status_code":429,"headers":{"retry-after":"3","x-count":2},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 429, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "alias server error", upstream: `{"type":"error","status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 500, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "nested headers", upstream: `{"type":"error","status":429,"headers":{"retry-after":"9"},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 429, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "status precedence", upstream: `{"type":"error","status":503,"status_code":429,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 503, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "zero status alias", upstream: `{"type":"error","status":0,"status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 500, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "missing status", upstream: `{"type":"error","extra":true,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "invalid status", upstream: `{"type":"error","status":200,"status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected"},
-		{name: "invalid alias", upstream: `{"type":"error","status_code":600,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected"},
+		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected","headers":{"retry-after":"4"}}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantMessage: "upstream rejected", wantHeaders: `{"retry-after":"4"}`},
+		{name: "alias rate limit", upstream: `{"type":"error","status_code":429,"headers":{"retry-after":"3","x-count":2},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 429, wantType: "invalid_request_error", wantMessage: "Rejected", wantHeaders: `{"retry-after":"3"}`, wantErrorHeaders: `{"retry-after":2}`},
+		{name: "alias server error", upstream: `{"type":"error","status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 500, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{name: "nested headers", upstream: `{"type":"error","status":429,"headers":{"retry-after":"9"},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 429, wantType: "invalid_request_error", wantMessage: "Rejected", wantHeaders: `{"retry-after":"9"}`, wantErrorHeaders: `{"retry-after":2}`},
+		{name: "status precedence", upstream: `{"type":"error","status":503,"status_code":429,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 503, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{name: "zero status alias", upstream: `{"type":"error","status":0,"status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 500, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{name: "missing status", upstream: `{"type":"error","extra":true,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{name: "invalid status", upstream: `{"type":"error","status":200,"status_code":500,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{name: "invalid alias", upstream: `{"type":"error","status_code":600,"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":2,"x-values":["a","b"]}},"unknown":"drop"}`, status: 400, wantType: "invalid_request_error", wantMessage: "Rejected", wantErrorHeaders: `{"retry-after":2}`},
+		{
+			name:     "sensitive headers and scalar metadata",
+			upstream: `{"type":"error","status":429,"headers":{"AuThOrIzAtIoN":"Bearer channel-secret","Proxy-Authorization":"Basic proxy-secret","api-key":"channel-secret","X-API-Key":"channel-secret","Cookie":"session=secret","Set-Cookie":"session=secret","Location":"https://reader:password@auth.example.org/token?key=secret","X-Secret":"secret","ReTrY-AfTeR":"3","X-Codex-Primary-Used-Percent":0,"X-Reasoning-Included":false,"x-models-etag":""},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"authorization":"Bearer channel-secret","proxy-authorization":"Basic proxy-secret","API-KEY":"channel-secret","x-api-key":"channel-secret","COOKIE":"session=secret","set-cookie":"session=secret","location":"https://reader:password@auth.example.org/token?key=secret","x-secret":"secret","Retry-After":2,"X-Request-Id":["req-1",7,true]}}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+			wantHeaders:      `{"ReTrY-AfTeR":"3","X-Codex-Primary-Used-Percent":0,"X-Reasoning-Included":false,"x-models-etag":""}`,
+			wantErrorHeaders: `{"Retry-After":2,"X-Request-Id":["req-1",7,true]}`,
+		},
+		{
+			name:     "credentials in allowed values",
+			upstream: `{"type":"error","status":429,"headers":{"x-request-id":"https://reader:password@auth.example.org/token?key=secret","x-models-etag":["$UPSTREAM/private/route?key=secret",false,0]},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"x-request-id":["api_key:channel-secret","https://auth.example.org/token?client_secret=secret"],"x-models-etag":"$UPSTREAM/private/route?key=secret"}}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+			wantHeaders:      `{"x-request-id":"https://***@auth.example.org/token?key=***","x-models-etag":["$UPSTREAM/***/***?key=***",false,0]}`,
+			wantErrorHeaders: `{"x-request-id":["api_key:***","https://auth.example.org/token?client_secret=***"],"x-models-etag":"$UPSTREAM/***/***?key=***"}`,
+		},
+		{
+			name:     "hop by hop metadata",
+			upstream: `{"type":"error","status":429,"headers":{"cOnNeCtIoN":"X-Models-Etag, X-Codex-Primary-Used-Percent","x-models-etag":"secret","x-codex-primary-used-percent":"secret","retry-after":"3"},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"Connection":["X-Request-Id","Retry-After"],"x-request-id":"secret","retry-after":2,"X-Models-Etag":"safe"}}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+			wantHeaders: `{"retry-after":"3"}`, wantErrorHeaders: `{"X-Models-Etag":"safe"}`,
+		},
+		{
+			name:     "complex header values",
+			upstream: `{"type":"error","status":429,"headers":{"retry-after":{"Authorization":"secret"},"x-models-etag":["safe",{"Authorization":"secret"}],"x-request-id":[["secret"]],"x-codex-turn-state":null,"x-codex-primary-used-percent":[],"x-reasoning-included":[true,null]},"error":{"type":"invalid_request_error","message":"Rejected","headers":{"retry-after":[[2]],"x-request-id":{"Authorization":"secret"}}}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+		},
+		{
+			name:     "non object header containers",
+			upstream: `{"type":"error","status":429,"headers":[{"Authorization":"secret"}],"error":{"type":"invalid_request_error","message":"Rejected","headers":"https://reader:password@auth.example.org/token?key=secret"}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+		},
+		{
+			name:     "empty header containers",
+			upstream: `{"type":"error","status":429,"headers":{},"error":{"type":"invalid_request_error","message":"Rejected","headers":null}}`,
+			status:   429, wantType: "invalid_request_error", wantMessage: "Rejected",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			preConsumed := make(chan int, 1)
 			tokenID := make(chan int, 1)
 			// Pre-consume no longer estimates completion tokens, so an output-priced expression reserves nothing to refund.
-			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, request *http.Request) {
 				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
 					return
 				}
@@ -1188,7 +1640,8 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 					return
 				}
 				preConsumed <- token.RemainQuota
-				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(tc.upstream))) {
+				upstream := strings.ReplaceAll(tc.upstream, "$UPSTREAM", "http://"+request.Host)
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(upstream))) {
 					return
 				}
 				_, _, _ = ws.ReadMessage()
@@ -1205,18 +1658,30 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 					}
 				}
 			}))
-			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hi","max_output_tokens":10}`)))
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","event_id":"create-rejected","stream_id":"planner","model":"ws-billing","input":"hi","max_output_tokens":10}`)))
 			rejection := readResponsesWSTestEvent(t, fixture.client)
 			assert.Equal(t, "error", rejection["type"])
 			assert.Equal(t, float64(tc.status), rejection["status"])
-			rejectionError, _ := rejection["error"].(map[string]any)
+			assert.Equal(t, "create-rejected", rejection["event_id"])
+			assert.Equal(t, "planner", rejection["stream_id"])
+			rejectionError, ok := rejection["error"].(map[string]any)
+			require.True(t, ok)
 			assert.Equal(t, tc.wantType, rejectionError["type"])
 			assert.Equal(t, tc.wantMessage, rejectionError["message"])
-			var upstream map[string]any
-			require.NoError(t, common.Unmarshal([]byte(tc.upstream), &upstream))
-			assert.Equal(t, upstream["headers"], rejection["headers"])
-			if upstreamError, ok := upstream["error"].(map[string]any); ok {
-				assert.Equal(t, upstreamError["headers"], rejectionError["headers"])
+			for _, expected := range []struct {
+				object  map[string]any
+				headers string
+			}{{rejection, tc.wantHeaders}, {rejectionError, tc.wantErrorHeaders}} {
+				if expected.headers == "" {
+					assert.NotContains(t, expected.object, "headers")
+					continue
+				}
+				actual, err := common.Marshal(expected.object["headers"])
+				require.NoError(t, err)
+				// The httptest upstream uses loopback; its path must also be
+				// masked using the channel address, not just the IP pattern.
+				maskedUpstream := strings.ReplaceAll(*fixture.channel.BaseURL, "127.0.0.1", "***.***.***.***")
+				assert.JSONEq(t, strings.ReplaceAll(expected.headers, "$UPSTREAM", maskedUpstream), string(actual))
 			}
 			assert.NotContains(t, rejection, "unknown")
 			assert.Equal(t, 2000, <-preConsumed, "the rejected request reserved quota before contacting upstream")
@@ -2511,7 +2976,7 @@ func TestResponsesWebSocketBoundsQueuedRequests(t *testing.T) {
 }
 
 func TestResponsesWebSocketIsolatesLaneFailures(t *testing.T) {
-	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+	fixture := newResponsesWSBillingTestWithHeaders(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
 		for range 2 {
 			readResponsesWSTestEvent(t, ws)
 		}
@@ -2527,6 +2992,8 @@ func TestResponsesWebSocketIsolatesLaneFailures(t *testing.T) {
 		completeResponsesWSTestRequest(t, ws, "a", "next-a", 100)
 		completeResponsesWSTestRequest(t, ws, "b", "response-b", 200)
 		_, _, _ = ws.ReadMessage()
+	}, nil, func(http.ResponseWriter, *http.Request) (http.Header, bool) {
+		return http.Header{"X-Codex-Turn-State": {"turn-state"}}, true
 	})
 	updates := make(chan struct{}, 16)
 	require.NoError(t, model.DB.Callback().Update().After("gorm:commit_or_rollback_transaction").Register("responses-ws-multiplex-refund", func(tx *gorm.DB) {
@@ -2540,6 +3007,8 @@ func TestResponsesWebSocketIsolatesLaneFailures(t *testing.T) {
 	for _, stream := range []string{"a", "b"} {
 		sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "stream_id": stream, "input": "first", "event_id": "create-" + stream})
 	}
+	assert.Equal(t, "codex.response.metadata", readResponsesWSTestEvent(t, fixture.client)["type"])
+	assert.Equal(t, map[string]any{"type": "response.metadata", "stream_id": "b", "headers": map[string]any{"x-codex-turn-state": "turn-state"}}, readResponsesWSTestEvent(t, fixture.client), "older gateways must attribute turn state to the accepted lane")
 	assert.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
 	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "stream_id": "a", "input": "next"})
 	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.cancel", "stream_id": "b", "response_id": "missing", "event_id": "cancel-b"})
@@ -3496,7 +3965,7 @@ func TestResponsesMultiAgentForwarding(t *testing.T) {
 					require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(strings.ReplaceAll(terminal, `"first"`, `"`+id+`"`))))
 				}
 				_, _, _ = ws.ReadMessage()
-			}, headers)
+			}, headers, nil)
 			if tc.override {
 				require.NoError(t, model.DB.Model(fixture.channel).Update("header_override", `{"OpenAI-Beta":"channel=v1"}`).Error)
 			}
@@ -4059,6 +4528,123 @@ func TestResponsesWebSocketInjectSensitiveCheck(t *testing.T) {
 			}
 			fixture.closeAndWait(t)
 			assertResponsesWSAccounting(t, fixture, []int{settled})
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectInputUniqueness(t *testing.T) {
+	const input = `[{"type":"function_call_output","call_id":"call_1","output":" hey"}]`
+	const sensitiveInput = `[{"type":"function_call_output","call_id":"call_1","output":"forbidden"}]`
+	const valid = `{"type":"response.inject","response_id":"first","stream_id":"planner","event_id":"valid","input":` + input + `}`
+	for _, tc := range []struct {
+		name, members                                            string
+		reject, disableCount, completed, sensitive, limitedQuota bool
+		inputTokens                                              int
+	}{
+		{name: "empty then input", members: `"input":[],"input":` + input, reject: true},
+		{name: "input then empty", members: `"input":` + input + `,"input":[]`, reject: true},
+		{name: "identical inputs", members: `"input":` + input + `,"input":` + input, reject: true},
+		{name: "identical empty arrays", members: `"input":[],"input":[]`, reject: true},
+		{name: "escaped duplicate", members: `"input":[],"\u0069nput":` + input, reject: true},
+		{name: "escaped first input", members: `"in\u0070ut":[],"input":` + input, reject: true},
+		{name: "insufficient quota", members: `"input":[],"input":[{"role":"user","content":" hey hey hey hey hey hey hey hey hey hey"}]`, reject: true, limitedQuota: true},
+		{name: "sensitive input", members: `"input":[],"input":` + sensitiveInput, reject: true, sensitive: true},
+		{name: "sensitive input without counting", members: `"input":[],"input":` + sensitiveInput, reject: true, sensitive: true, disableCount: true},
+		{name: "checks disabled", members: `"input":[],"input":` + sensitiveInput, reject: true, disableCount: true},
+		{name: "completed response", members: `"input":[],"input":` + input, reject: true, completed: true},
+		{name: "single empty array", members: `"input":[]`},
+		{name: "single escaped input", members: `"\u0069nput":` + input, inputTokens: 2},
+		{name: "single input with nested field", members: `"input": ` + input + `, "vendor":{"input":[],"number":9007199254740993}`, inputTokens: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousSensitive, previousPrompt, previousWords := setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords
+			previousQuota := *operation_setting.GetQuotaSetting()
+			t.Cleanup(func() {
+				setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords = previousSensitive, previousPrompt, previousWords
+				*operation_setting.GetQuotaSetting() = previousQuota
+			})
+			setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled = tc.sensitive, tc.sensitive
+			setting.SensitiveWords = []string{"forbidden"}
+			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
+			candidate := `{"type":"response.inject", "response_id":"first","stream_id":"planner","event_id":"candidate",` + tc.members + `}`
+			ack := map[string]any{"type": "response.inject.created", "response_id": "first"}
+			if tc.completed {
+				ack["type"] = "response.inject.failed"
+				ack["error"] = map[string]any{"code": "response_already_completed", "message": "Already completed"}
+			}
+			terminal := map[string]any{"type": "response.completed", "response": map[string]any{"id": "first", "status": "completed"}}
+			fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				if tc.completed {
+					sendResponsesWSTestEvent(t, ws, terminal)
+				}
+				if !tc.reject {
+					_, body, err := ws.ReadMessage()
+					require.NoError(t, err)
+					assert.Equal(t, candidate, string(body), "valid input must retain its original bytes")
+					sendResponsesWSTestEvent(t, ws, ack)
+				}
+				_, body, err := ws.ReadMessage()
+				require.NoError(t, err)
+				assert.Equal(t, valid, string(body), "duplicate input must never reach upstream")
+				sendResponsesWSTestEvent(t, ws, ack)
+				if !tc.completed {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "delta": "still generating"})
+					sendResponsesWSTestEvent(t, ws, terminal)
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = !tc.disableCount
+			tokenQuota := 3000
+			if tc.limitedQuota {
+				tokenQuota = 6
+				fixture.token.RemainQuota = tokenQuota
+				require.NoError(t, fixture.token.Update())
+			}
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello", "instructions": "world"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.completed {
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			reserved := 3
+			if tc.disableCount {
+				reserved = 0
+			}
+			assertResponsesWSReservedQuota(t, fixture, nil, 100000, tokenQuota, reserved)
+			// Send raw JSON so duplicate and escaped member names survive the test client.
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(candidate)))
+			reply := readResponsesWSTestEvent(t, fixture.client)
+			if tc.reject {
+				require.Equal(t, "error", reply["type"])
+				assert.Equal(t, float64(http.StatusBadRequest), reply["status"])
+				assert.Equal(t, "candidate", reply["event_id"])
+				assert.Equal(t, "first", reply["response_id"])
+				assert.Equal(t, "planner", reply["stream_id"])
+				require.IsType(t, map[string]any{}, reply["error"])
+				assert.Equal(t, string(types.ErrorCodeInvalidRequest), reply["error"].(map[string]any)["code"])
+			} else {
+				require.Equal(t, ack["type"], reply["type"])
+				reserved += tc.inputTokens
+			}
+			assertResponsesWSReservedQuota(t, fixture, nil, 100000, tokenQuota, reserved)
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(valid)))
+			require.Equal(t, ack["type"], readResponsesWSTestEvent(t, fixture.client)["type"])
+			if !tc.completed {
+				require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+				if !tc.disableCount {
+					reserved += 2
+				}
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSReservedQuota(t, fixture, nil, 100000, tokenQuota, reserved)
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, reserved, logs[0].Quota)
+			assert.Equal(t, reserved, logs[0].PromptTokens, "missing upstream usage must include only accepted input")
 		})
 	}
 }
