@@ -268,6 +268,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			stopStream(sr, streamErr)
 			return
 		}
+		if strings.TrimSpace(data) == "" {
+			return
+		}
 
 		var streamResp dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {

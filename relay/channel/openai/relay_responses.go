@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -98,6 +99,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	accumulator := service.NewResponsesUsageAccumulator(info)
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if strings.TrimSpace(data) == "" {
+			return
+		}
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var event responsesRelayStreamEvent
