@@ -124,23 +124,23 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var streamFunctionCallNames []string
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if strings.TrimSpace(data) == "" {
+			return
+		}
+
 		if lastStreamData != "" {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
 				sr.Error(err)
 			}
+			secondLastStreamData = lastStreamData
 		}
-		if len(data) > 0 {
-			if lastStreamData != "" {
-				secondLastStreamData = lastStreamData
-			}
 
-			lastStreamData = data
-			observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
-			if err := processTokenData(info, data, &responseTextBuilder, &toolCount); err != nil {
-				logger.LogError(c, common.LogText("error processing stream token data: %s", err.Error()))
-				sr.Error(err)
-			}
+		lastStreamData = data
+		observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
+		if err := processTokenData(info, data, &responseTextBuilder, &toolCount); err != nil {
+			logger.LogError(c, common.LogText("error processing stream token data: %s", err.Error()))
+			sr.Error(err)
 		}
 	})
 

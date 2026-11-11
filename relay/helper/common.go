@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -215,7 +216,7 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 	}
 
 	c.Render(-1, common.CustomEvent{Data: "event: " + resp.Type + "\n"})
-	c.Render(-1, common.CustomEvent{Data: "data: " + data + "\n"})
+	c.Render(-1, common.CustomEvent{Data: "data: " + strings.ReplaceAll(data, "\n", "\ndata: ") + "\n"})
 	_ = FlushWriter(c)
 }
 
@@ -228,7 +229,7 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 	if err := event.Render(c.Writer); err != nil {
 		return err
 	}
-	event.Data = "data: " + data
+	event.Data = "data: " + strings.ReplaceAll(data, "\n", "\ndata: ")
 	if err := event.Render(c.Writer); err != nil {
 		return err
 	}
@@ -244,7 +245,7 @@ func StringData(c *gin.Context, str string) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	c.Render(-1, common.CustomEvent{Data: "data: " + str})
+	c.Render(-1, common.CustomEvent{Data: "data: " + strings.ReplaceAll(str, "\n", "\ndata: ")})
 	return FlushWriter(c)
 }
 

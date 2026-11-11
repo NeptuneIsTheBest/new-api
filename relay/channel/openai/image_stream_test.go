@@ -197,6 +197,7 @@ func TestOpenaiImageStreamHandlerForwardsSSEAndUsage(t *testing.T) {
 		``,
 		`data: [DONE]`,
 		``,
+		``,
 	}, "\n")
 
 	c, recorder, resp, info := newImageTestContext(t, body, "text/event-stream", true)
@@ -235,6 +236,7 @@ func TestOpenaiImageStreamHandlerUsesCompletedEventCount(t *testing.T) {
 		`data: {"type":"image_edit.completed","b64_json":"second","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
 		``,
 		`data: [DONE]`,
+		``,
 		``,
 	}, "\n")
 
@@ -612,6 +614,7 @@ func TestOpenaiImageStreamHandlerRecordsUpstreamErrorEvent(t *testing.T) {
 		``,
 		`event: error`,
 		`data: {"type":"upstream_error","error":{"message":"stream error: stream ID 77; INTERNAL_ERROR; received from peer"}}`,
+		``,
 		``,
 	}, "\n")
 

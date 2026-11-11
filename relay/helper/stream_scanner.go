@@ -2,6 +2,7 @@ package helper
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -53,6 +54,31 @@ func NewStreamScanner(reader io.Reader, maxBytes ...int) *bufio.Scanner {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, min(InitialScannerBufferSize, limit)), limit)
 	return scanner
+}
+
+// sseLineSplitter accepts LF, CRLF and CR without waiting for another byte
+// after CR. A following LF belongs to that same line ending, even when it
+// arrives in a later read.
+type sseLineSplitter struct {
+	skipLF bool
+}
+
+func (s *sseLineSplitter) split(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if s.skipLF && len(data) > 0 {
+		s.skipLF = false
+		if data[0] == '\n' {
+			data = data[1:]
+			advance = 1
+		}
+	}
+	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+		s.skipLF = data[i] == '\r'
+		return advance + i + 1, data[:i], nil
+	}
+	if atEOF && len(data) > 0 {
+		return advance + len(data), data, nil
+	}
+	return advance, nil, nil
 }
 
 func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
@@ -189,7 +215,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	// Ensure gin.Context is not returned to Gin's pool while any stream goroutine can still use it.
 	defer cleanup()
 
-	scanner.Split(bufio.ScanLines)
+	var lineSplitter sseLineSplitter
+	scanner.Split(lineSplitter.split)
 	copyCodexSSEHeaders(c, resp)
 	SetEventStreamHeaders(c)
 
@@ -284,6 +311,10 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			wg.Done()
 		}()
 
+		var eventData strings.Builder
+		hasData := false
+		firstLine := true
+		eventLimit := getScannerBufferSize()
 		for scanner.Scan() {
 			// 检查是否需要停止
 			select {
@@ -295,35 +326,67 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 
 			ticker.Reset(streamingTimeout)
-			data := scanner.Text()
-			logger.LogDebug(c, "stream scanner data: %s", data)
-
-			data, hasDataPrefix := strings.CutPrefix(data, "data:")
-			data = strings.TrimSpace(data)
-			if !hasDataPrefix && data != "[DONE]" {
-				continue
+			line := scanner.Text()
+			if firstLine {
+				line = strings.TrimPrefix(line, "\uFEFF")
+				firstLine = false
 			}
-			if data == "" {
-				continue
-			}
-			if data != "[DONE]" {
-				info.SetFirstResponseTime()
-				info.ReceivedResponseCount++
+			logger.LogDebug(c, "stream scanner data: %s", line)
 
-				select {
-				case dataChan <- data:
-				case <-ctx.Done():
-					return
-				case <-stopChan:
+			var data string
+			if line == "" {
+				if !hasData {
+					continue
+				}
+				data = eventData.String()
+				eventData.Reset()
+				hasData = false
+			} else if strings.TrimSpace(line) == "[DONE]" {
+				// Preserve the legacy bare terminator without flushing a partial event.
+				data = "[DONE]"
+			} else {
+				field, value, _ := strings.Cut(line, ":")
+				if field != "data" {
+					continue
+				}
+				value, _ = strings.CutPrefix(value, " ")
+				separatorBytes := 0
+				if hasData {
+					separatorBytes = 1
+				}
+				if len(value) > eventLimit-eventData.Len()-separatorBytes {
+					err := fmt.Errorf("SSE event exceeds %d byte buffer limit", eventLimit)
+					logger.LogError(c, common.LogText("scanner error: %s", err.Error()))
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
 					return
 				}
-			} else {
+				if hasData {
+					eventData.WriteByte('\n')
+				}
+				eventData.WriteString(value)
+				hasData = true
+				continue
+			}
+
+			if strings.TrimSpace(data) == "[DONE]" {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				logger.LogDebug(c, "received [DONE], stopping scanner")
 				return
 			}
+			info.SetFirstResponseTime()
+			info.ReceivedResponseCount++
+
+			select {
+			case dataChan <- data:
+			case <-ctx.Done():
+				return
+			case <-stopChan:
+				return
+			}
 		}
 
+		// Only a blank line dispatches an SSE event; EOF or a read error drops
+		// any remaining data, even if it would be valid JSON on its own.
 		// Closing the upstream body is part of stopping the scanner. Its EOF or
 		// read error must not replace the actual stop reason or add a false error.
 		if ctx.Err() != nil {
