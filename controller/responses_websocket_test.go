@@ -27,6 +27,8 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -330,6 +332,11 @@ func waitPerfCounters(t *testing.T, wantRequests int64) (requests, successes int
 
 func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*websocket.Conn, *http.Request), httpEvents ...string) *responsesWSBillingTest {
 	t.Helper()
+	return newResponsesWSBillingTestWithHeaders(t, expression, handle, nil, httpEvents...)
+}
+
+func newResponsesWSBillingTestWithHeaders(t *testing.T, expression string, handle func(*websocket.Conn, *http.Request), clientHeaders http.Header, httpEvents ...string) *responsesWSBillingTest {
+	t.Helper()
 	user, token := setupResponsesWSRequestTest(t)
 	previousTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 30
@@ -418,7 +425,12 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 	gateway := httptest.NewServer(engine)
 	fixture.gatewayURL = gateway.URL
 	t.Cleanup(gateway.Close)
-	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", http.Header{"Authorization": []string{"Bearer sk-" + token.Key}})
+	headers := make(http.Header)
+	if clientHeaders != nil {
+		headers = clientHeaders.Clone()
+	}
+	headers.Set("Authorization", "Bearer sk-"+token.Key)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", headers)
 	require.NoError(t, err)
 	fixture.client = client
 	t.Cleanup(func() { fixture.closeAndWait(t) })
@@ -1794,6 +1806,16 @@ func sendResponsesWSTestEvent(t *testing.T, ws *websocket.Conn, event map[string
 	require.NoError(t, ws.WriteMessage(websocket.TextMessage, body))
 }
 
+func responsesWSTestControl(eventType, responseID string) map[string]any {
+	event := map[string]any{"type": eventType, "response_id": responseID}
+	if eventType == "response.inject" {
+		event["input"] = []any{map[string]any{"type": "function_call_output", "call_id": "c1", "output": "done"}}
+	} else if eventType == "response.interrupt" {
+		event["mode"] = "discard_partial_items"
+	}
+	return event
+}
+
 func TestResponsesWebSocketSteeringSettlesEachResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name, expression, terminal, stream string
@@ -2785,11 +2807,14 @@ func TestResponsesWebSocketInterruptLifecycle(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
+func TestResponsesWebSocketControlDuringSettlement(t *testing.T) {
 	for _, tc := range []struct {
-		name, replyType string
-		cancelFirst     bool
+		name, replyType     string
+		cancelFirst, inject bool
 	}{
+		{name: "injected", inject: true, replyType: "response.inject.created"},
+		{name: "injection failed", inject: true, replyType: "response.inject.failed"},
+		{name: "injection after cancel", inject: true, cancelFirst: true, replyType: "response.inject.created"},
 		{name: "accepted", replyType: "response.interrupt.accepted"},
 		{name: "accepted after cancel", replyType: "response.interrupt.accepted", cancelFirst: true},
 		{name: "failed", replyType: "response.interrupt.failed"},
@@ -2798,6 +2823,10 @@ func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
 		{name: "generic rejection after cancel", replyType: "error", cancelFirst: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			controlType := "response.interrupt"
+			if tc.inject {
+				controlType = "response.inject"
+			}
 			finish := make(chan struct{})
 			releaseFinish := sync.OnceFunc(func() { close(finish) })
 			defer releaseFinish()
@@ -2806,7 +2835,9 @@ func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			defer unblock()
 			reply := `{"type":"` + tc.replyType + `","response_id":"first","vendor":{"integer":9007199254740993,"zero":0.0,"enabled":false}}`
-			if tc.replyType != "response.interrupt.accepted" {
+			if tc.replyType == "response.inject.failed" {
+				reply = strings.TrimSuffix(reply, "}") + `,"input":[{"type":"function_call_output","call_id":"c1","output":"done"}],"error":{"code":"response_already_completed","message":"Already completed"}}`
+			} else if tc.replyType != "response.interrupt.accepted" && tc.replyType != "response.inject.created" {
 				reply = strings.TrimSuffix(reply, "}") + `,"status":400,"error":{"type":"invalid_request_error","code":"invalid_mode","message":"Unsupported interruption mode"}}`
 			}
 			delta := map[string]any{"type": "response.output_text.delta", "stream_id": "other", "response_id": "second", "delta": "other stream continues"}
@@ -2821,7 +2852,7 @@ func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
 				<-finish
 				completeResponsesWSTestRequest(t, ws, "", "first", 100)
 				control := readResponsesWSTestEvent(t, ws)
-				assert.Equal(t, "response.interrupt", control["type"])
+				assert.Equal(t, controlType, control["type"])
 				assert.Equal(t, "first", control["response_id"])
 				require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(reply)))
 				sendResponsesWSTestEvent(t, ws, delta)
@@ -2850,7 +2881,7 @@ func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("response did not enter settlement")
 			}
-			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.interrupt", "response_id": "first", "mode": "discard_partial_items"})
+			sendResponsesWSTestEvent(t, fixture.client, responsesWSTestControl(controlType, "first"))
 			assert.Equal(t, delta, readResponsesWSTestEvent(t, fixture.client), "another stream must advance before settlement is released")
 			unblock()
 			completed := make(map[string]bool)
@@ -2878,13 +2909,19 @@ func TestResponsesWebSocketInterruptDuringSettlement(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketInterruptBufferedReplies(t *testing.T) {
+func TestResponsesWebSocketControlBufferedReplies(t *testing.T) {
 	for _, tc := range []struct {
 		name                       string
 		replyCount, replyBytes     int
 		overflow                   bool
 		clientClose, upstreamClose bool
+		inject                     bool
 	}{
+		{name: "mixed replies", replyCount: 4, inject: true},
+		{name: "mixed count overflow", replyCount: 128, overflow: true, inject: true},
+		{name: "mixed byte overflow", replyCount: 2, replyBytes: 1 << 19, overflow: true, inject: true},
+		{name: "injection client disconnect", replyCount: 4, clientClose: true, inject: true},
+		{name: "injection upstream close", replyCount: 4, upstreamClose: true, inject: true},
 		{name: "count limit across lanes", replyCount: 128},
 		{name: "count overflow across lanes", replyCount: 128, overflow: true},
 		{name: "byte limit across lanes", replyCount: 2, replyBytes: 1 << 19},
@@ -2911,7 +2948,11 @@ func TestResponsesWebSocketInterruptBufferedReplies(t *testing.T) {
 				if i%2 != 0 {
 					id = "second"
 				}
-				reply := fmt.Sprintf(`{"type":"response.interrupt.accepted","response_id":%q,"sequence":%d,"padding":""}`, id, i)
+				replyType := "response.interrupt.accepted"
+				if tc.inject && id == "first" {
+					replyType = "response.inject.created"
+				}
+				reply := fmt.Sprintf(`{"type":%q,"response_id":%q,"sequence":%d,"padding":""}`, replyType, id, i)
 				if tc.replyBytes > 0 {
 					reply = strings.TrimSuffix(reply, `"}`) + strings.Repeat("x", tc.replyBytes-len(reply)) + `"}`
 				}
@@ -2938,7 +2979,11 @@ func TestResponsesWebSocketInterruptBufferedReplies(t *testing.T) {
 				completeResponsesWSTestRequest(t, ws, "second", "second", 100)
 				for _, id := range []string{"first", "second", "probe"} {
 					control := readResponsesWSTestEvent(t, ws)
-					assert.Equal(t, "response.interrupt", control["type"])
+					controlType := "response.interrupt"
+					if tc.inject && id == "first" {
+						controlType = "response.inject"
+					}
+					assert.Equal(t, controlType, control["type"])
 					assert.Equal(t, id, control["response_id"])
 				}
 				for _, reply := range replies {
@@ -2977,7 +3022,11 @@ func TestResponsesWebSocketInterruptBufferedReplies(t *testing.T) {
 				t.Fatal("response did not enter settlement")
 			}
 			for _, id := range []string{"first", "second", "probe"} {
-				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.interrupt", "response_id": id})
+				controlType := "response.interrupt"
+				if tc.inject && id == "first" {
+					controlType = "response.inject"
+				}
+				sendResponsesWSTestEvent(t, fixture.client, responsesWSTestControl(controlType, id))
 			}
 			require.Equal(t, probeReply, readResponsesWSTestEvent(t, fixture.client))
 			advance()
@@ -3197,34 +3246,42 @@ func TestResponsesWebSocketInterruptPendingLimit(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketInterruptDoesNotConsumeGenerationError(t *testing.T) {
-	const failure = `{"type":"error","response_id":"first","status":500,"error":{"type":"server_error","code":"server_error","message":"Generation failed"}}`
-	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.0002))`, func(ws *websocket.Conn, _ *http.Request) {
-		readResponsesWSTestEvent(t, ws)
-		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "response": map[string]any{"id": "first", "status": "in_progress"}})
-		control := readResponsesWSTestEvent(t, ws)
-		assert.Equal(t, "response.interrupt", control["type"])
-		assert.Equal(t, "first", control["response_id"])
-		require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(failure)))
-		// A generation failure must finish the worker so the queued request runs.
-		next := readResponsesWSTestEvent(t, ws)
-		assert.Equal(t, "response.create", next["type"])
-		assert.Equal(t, "next", next["input"])
-		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.interrupt.accepted", "response_id": "first"})
-		completeResponsesWSTestRequest(t, ws, "", "second", 100)
-		_, _, _ = ws.ReadMessage()
-	})
-	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "first"})
-	assert.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
-	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.interrupt", "response_id": "first"})
-	_, body, err := fixture.client.ReadMessage()
-	require.NoError(t, err)
-	assert.Equal(t, failure, string(body))
-	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "next"})
-	assert.Equal(t, "response.interrupt.accepted", readResponsesWSTestEvent(t, fixture.client)["type"])
-	assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
-	fixture.closeAndWait(t)
-	assertResponsesWSAccounting(t, fixture, []int{100, 100})
+func TestResponsesWebSocketControlDoesNotConsumeGenerationError(t *testing.T) {
+	for _, controlType := range []string{"response.interrupt", "response.inject"} {
+		t.Run(controlType, func(t *testing.T) {
+			replyType := "response.interrupt.accepted"
+			if controlType == "response.inject" {
+				replyType = "response.inject.created"
+			}
+			const failure = `{"type":"error","response_id":"first","status":500,"error":{"type":"server_error","code":"server_error","message":"Generation failed"}}`
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.0002))`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				control := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, controlType, control["type"])
+				assert.Equal(t, "first", control["response_id"])
+				require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(failure)))
+				// A generation failure must finish the worker so the queued request runs.
+				next := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, "response.create", next["type"])
+				assert.Equal(t, "next", next["input"])
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": replyType, "response_id": "first"})
+				completeResponsesWSTestRequest(t, ws, "", "second", 100)
+				_, _, _ = ws.ReadMessage()
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "first"})
+			assert.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			sendResponsesWSTestEvent(t, fixture.client, responsesWSTestControl(controlType, "first"))
+			_, body, err := fixture.client.ReadMessage()
+			require.NoError(t, err)
+			assert.Equal(t, failure, string(body))
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "next"})
+			assert.Equal(t, replyType, readResponsesWSTestEvent(t, fixture.client)["type"])
+			assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{100, 100})
+		})
+	}
 }
 
 func TestResponsesWebSocketInterruptLateErrorAttribution(t *testing.T) {
@@ -3342,16 +3399,22 @@ func TestResponsesWebSocketInterruptLateErrorAttribution(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketInterruptAmbiguousControlError(t *testing.T) {
+func TestResponsesWebSocketAmbiguousResponseControlError(t *testing.T) {
 	for _, tc := range []struct {
 		name, secondControl, errorCode string
-		late                           bool
+		late, inject                   bool
 	}{
+		{name: "inject and interrupt", inject: true, secondControl: "response.interrupt", errorCode: "response_not_active"},
+		{name: "inject and cancel", inject: true, secondControl: "response.cancel", errorCode: "response_not_active"},
 		{name: "two interrupts", secondControl: "response.interrupt", errorCode: "response_not_active"},
 		{name: "interrupt and cancel", secondControl: "response.cancel", errorCode: "response_not_active"},
 		{name: "unscoped rejection after completion", late: true, errorCode: "unsupported_event"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			controlType := "response.interrupt"
+			if tc.inject {
+				controlType = "response.inject"
+			}
 			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.0002))`, func(ws *websocket.Conn, _ *http.Request) {
 				for range 2 {
 					create := readResponsesWSTestEvent(t, ws)
@@ -3361,7 +3424,7 @@ func TestResponsesWebSocketInterruptAmbiguousControlError(t *testing.T) {
 						completeResponsesWSTestRequest(t, ws, "a", "a", 100)
 					}
 				}
-				assert.Equal(t, "response.interrupt", readResponsesWSTestEvent(t, ws)["type"])
+				assert.Equal(t, controlType, readResponsesWSTestEvent(t, ws)["type"])
 				if tc.secondControl != "" {
 					assert.Equal(t, tc.secondControl, readResponsesWSTestEvent(t, ws)["type"])
 				}
@@ -3375,7 +3438,7 @@ func TestResponsesWebSocketInterruptAmbiguousControlError(t *testing.T) {
 					assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
 				}
 			}
-			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.interrupt", "response_id": "a"})
+			sendResponsesWSTestEvent(t, fixture.client, responsesWSTestControl(controlType, "a"))
 			if tc.secondControl != "" {
 				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": tc.secondControl, "response_id": "b"})
 			}
@@ -3386,6 +3449,876 @@ func TestResponsesWebSocketInterruptAmbiguousControlError(t *testing.T) {
 			assert.Equal(t, websocket.CloseInternalServerErr, closeErr.Code)
 			fixture.closeAndWait(t)
 			assertResponsesWSAccounting(t, fixture, []int{100, 100})
+		})
+	}
+}
+
+func TestResponsesMultiAgentForwarding(t *testing.T) {
+	const enabled = `{"enabled":true,"max_concurrent_subagents":3,"future":{"integer":9007199254740993}}`
+	const disabled = `{"enabled":false,"max_concurrent_subagents":0,"future":{"zero":0.0}}`
+	const output = `[{"type":"multi_agent_call","id":"mac_1","call_id":"spawn_1","action":"spawn_agent","arguments":"{}","agent":{"agent_name":"/root"}},{"type":"multi_agent_call_output","call_id":"spawn_1","output":[],"agent":{"agent_name":"/root"}},{"type":"agent_message","author":"/root/research","recipient":"/root","agent":{"agent_name":"/root"},"content":[{"type":"encrypted_content","encrypted_content":"enc_test"}]},{"type":"message","role":"assistant","agent":{"agent_name":"/root"},"content":[{"type":"output_text","text":"done"}]}]`
+	const response = `{"id":"first","object":"response","status":"completed","output":` + output + `,"usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}`
+	const itemEvent = `{"type":"response.output_item.done","response_id":"first","agent":{"agent_name":"/root/research"},"output_index":2,"item":{"type":"agent_message","author":"/root/research","recipient":"/root","agent":{"agent_name":"/root"},"content":[{"type":"encrypted_content","encrypted_content":"enc_test"}]}}`
+	const terminal = `{"type":"response.completed","response":` + response + `}`
+	for _, tc := range []struct {
+		name, transport, multiAgent string
+		override, omitBeta          bool
+	}{
+		{name: "HTTP JSON", transport: "json", multiAgent: enabled},
+		{name: "HTTP SSE explicit zero", transport: "sse", multiAgent: disabled},
+		{name: "WS flat", transport: "flat", multiAgent: enabled},
+		{name: "WS wrapped explicit zero", transport: "wrapped", multiAgent: disabled},
+		{name: "HTTP header override", transport: "json", multiAgent: enabled, override: true},
+		{name: "WS header override", transport: "flat", multiAgent: enabled, override: true},
+		{name: "HTTP omitted configuration", transport: "json", omitBeta: true},
+		{name: "WS does not synthesize beta", transport: "flat", multiAgent: enabled, omitBeta: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := make(http.Header)
+			if !tc.omitBeta {
+				headers["Openai-Beta"] = []string{"responses_multi_agent=v1", "future=v1, another=v2"}
+			}
+			wantBeta := headers.Values("OpenAI-Beta")
+			if tc.override {
+				wantBeta = []string{"channel=v1"}
+			}
+			type observedRequest struct {
+				body    []byte
+				headers http.Header
+			}
+			received := make(chan observedRequest, 2)
+			fixture := newResponsesWSBillingTestWithHeaders(t, `tier("input", p * 2)`, func(ws *websocket.Conn, r *http.Request) {
+				for _, id := range []string{"first", "second"} {
+					_, body, err := ws.ReadMessage()
+					require.NoError(t, err)
+					received <- observedRequest{body: body, headers: r.Header.Clone()}
+					require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(strings.ReplaceAll(itemEvent, `"first"`, `"`+id+`"`))))
+					require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(strings.ReplaceAll(terminal, `"first"`, `"`+id+`"`))))
+				}
+				_, _, _ = ws.ReadMessage()
+			}, headers)
+			if tc.override {
+				require.NoError(t, model.DB.Model(fixture.channel).Update("header_override", `{"OpenAI-Beta":"channel=v1"}`).Error)
+			}
+			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				received <- observedRequest{body: body, headers: r.Header.Clone()}
+				if tc.transport == "json" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, response)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: [DONE]\n\n", itemEvent, terminal)
+			}
+			body := `{"model":"ws-billing","input":` + output
+			if tc.multiAgent != "" {
+				body += `,"multi_agent":` + tc.multiAgent
+			}
+			body += `}`
+			quotas := []int{100}
+			if tc.transport == "json" || tc.transport == "sse" {
+				if tc.transport == "sse" {
+					body = strings.TrimSuffix(body, "}") + `,"stream":true}`
+				}
+				request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(body))
+				require.NoError(t, err)
+				request.Header = headers.Clone()
+				request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+				request.Header.Set("Content-Type", "application/json")
+				resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+				require.NoError(t, err)
+				wire, err := io.ReadAll(resp.Body)
+				require.NoError(t, err)
+				require.NoError(t, resp.Body.Close())
+				require.Equal(t, http.StatusOK, resp.StatusCode, "%s", wire)
+				if tc.transport == "json" {
+					assert.Equal(t, response, string(wire))
+				} else {
+					assert.Contains(t, string(wire), "event: response.output_item.done\ndata: "+itemEvent+"\n\n")
+					assert.Contains(t, string(wire), "event: response.completed\ndata: "+terminal+"\n\n")
+				}
+				select {
+				case <-fixture.httpDone:
+				case <-time.After(3 * time.Second):
+					t.Fatal("HTTP response did not finish settlement")
+				}
+			} else {
+				quotas = append(quotas, 100)
+				for _, id := range []string{"first", "second"} {
+					request := body
+					if id == "second" {
+						request = strings.TrimSuffix(request, "}") + `,"previous_response_id":"first"}`
+					}
+					if tc.transport == "wrapped" {
+						request = `{"type":"response.create","response":` + request + `}`
+					} else {
+						request = `{"type":"response.create",` + strings.TrimPrefix(request, "{")
+					}
+					require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(request)))
+					for _, event := range []string{itemEvent, terminal} {
+						require.NoError(t, fixture.client.SetReadDeadline(time.Now().Add(3*time.Second)))
+						_, wire, err := fixture.client.ReadMessage()
+						require.NoError(t, err)
+						assert.Equal(t, strings.ReplaceAll(event, `"first"`, `"`+id+`"`), string(wire))
+					}
+				}
+				assert.Equal(t, int32(1), fixture.connections.Load())
+			}
+			for i := range len(quotas) {
+				observed := <-received
+				assert.Equal(t, wantBeta, observed.headers.Values("OpenAI-Beta"))
+				var request map[string]common.RawMessage
+				require.NoError(t, common.Unmarshal(observed.body, &request))
+				assert.Equal(t, tc.multiAgent, string(request["multi_agent"]))
+				assert.JSONEq(t, output, string(request["input"]))
+				assert.Equal(t, `"gpt-4o"`, string(request["model"]))
+				if i == 1 {
+					assert.Equal(t, `"first"`, string(request["previous_response_id"]))
+				}
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, quotas)
+		})
+	}
+}
+
+func setupResponsesWSSubscriptionTest(t *testing.T, fixture *responsesWSBillingTest, quota int) *model.UserSubscription {
+	t.Helper()
+	require.NoError(t, model.DB.AutoMigrate(&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{}))
+	plan := &model.SubscriptionPlan{Title: "WebSocket injection", TotalAmount: int64(quota), QuotaResetPeriod: model.SubscriptionResetNever}
+	require.NoError(t, model.DB.Create(plan).Error)
+	model.InvalidateSubscriptionPlanCache(plan.Id)
+	subscription := &model.UserSubscription{
+		UserId: fixture.user.Id, PlanId: plan.Id, AmountTotal: int64(quota), Status: "active",
+		StartTime: time.Now().Unix(), EndTime: time.Now().Add(time.Hour).Unix(),
+	}
+	require.NoError(t, model.DB.Create(subscription).Error)
+	userSetting := fixture.user.GetSetting()
+	userSetting.BillingPreference = "subscription_only"
+	require.NoError(t, model.UpdateUserSetting(fixture.user.Id, userSetting))
+	t.Cleanup(func() {
+		fixture.closeAndWait(t)
+		require.NoError(t, model.DB.Where("user_id = ?", fixture.user.Id).Delete(&model.SubscriptionPreConsumeRecord{}).Error)
+		require.NoError(t, model.DB.Delete(subscription).Error)
+		require.NoError(t, model.DB.Delete(plan).Error)
+		model.InvalidateSubscriptionPlanCache(plan.Id)
+	})
+	return subscription
+}
+
+func assertResponsesWSReservedQuota(t *testing.T, fixture *responsesWSBillingTest, subscription *model.UserSubscription, userQuota, tokenQuota, reserved int) {
+	t.Helper()
+	var user model.User
+	var token model.Token
+	require.NoError(t, model.DB.First(&user, fixture.user.Id).Error)
+	require.NoError(t, model.DB.First(&token, fixture.token.Id).Error)
+	assert.Equal(t, tokenQuota-reserved, token.RemainQuota)
+	assert.Equal(t, reserved, token.UsedQuota)
+	if subscription == nil {
+		assert.Equal(t, userQuota-reserved, user.Quota)
+		return
+	}
+	var sub model.UserSubscription
+	require.NoError(t, model.DB.First(&sub, subscription.Id).Error)
+	assert.Equal(t, int64(reserved), sub.AmountUsed)
+	assert.Equal(t, userQuota, user.Quota, "an injection must retain its subscription funding source")
+}
+
+func TestResponsesWebSocketInjectReservesBeforeForwarding(t *testing.T) {
+	const tiered = `param("service_tier") == "priority" ? (len <= 5 ? tier("short", p * 2) : tier("long", p * 4)) : tier("wrong", p * 100)`
+	for _, tc := range []struct {
+		name, expression, legacy string
+		subscription, trusted    bool
+		freeGroup                bool
+		initial, first, total    int
+		settled                  int
+	}{
+		{name: "wallet tier crossing", expression: tiered, initial: 6, first: 10, total: 28, settled: 14},
+		{name: "subscription tier crossing", expression: tiered, subscription: true, initial: 6, first: 10, total: 28, settled: 14},
+		{name: "trusted wallet requires full reservation", expression: tiered, trusted: true, first: 10, total: 28, settled: 14},
+		{name: "legacy token ratio", expression: tiered, legacy: "ratio", initial: 18, first: 30, total: 42, settled: 21},
+		{name: "fixed expression charged once", expression: `tier("request", fixed(0.002))`, initial: 1000, first: 1000, total: 1000, settled: 1000},
+		{name: "legacy request price charged once", expression: tiered, legacy: "price", initial: 1000, first: 1000, total: 1000, settled: 1000},
+		{name: "free group", expression: tiered, freeGroup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousQuota := *operation_setting.GetQuotaSetting()
+			t.Cleanup(func() { *operation_setting.GetQuotaSetting() = previousQuota })
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 2
+			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
+			operation_setting.GetQuotaSetting().EnableFreeModelPreConsume = !tc.freeGroup
+			if tc.trusted {
+				operation_setting.GetQuotaSetting().TrustQuotaUSD = 0.000001
+			}
+			if tc.legacy != "" {
+				ratios, err := common.Marshal(ratio_setting.GetModelRatioCopy())
+				require.NoError(t, err)
+				prices, err := common.Marshal(ratio_setting.GetModelPriceCopy())
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratios)))
+					require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices)))
+				})
+				require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"ws-billing":3}`))
+				if tc.legacy == "price" {
+					require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"ws-billing":0.002}`))
+				}
+			}
+			ready := make(chan struct{})
+			var fixture *responsesWSBillingTest
+			var subscription *model.UserSubscription
+			fixture = newResponsesWSBillingTest(t, tc.expression, func(ws *websocket.Conn, _ *http.Request) {
+				<-ready
+				readResponsesWSTestEvent(t, ws)
+				assertResponsesWSReservedQuota(t, fixture, subscription, 100000, 3000, tc.initial)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				for i, reserved := range []int{tc.first, tc.total} {
+					injection := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, fmt.Sprintf("inject-%d", i), injection["event_id"])
+					assertResponsesWSReservedQuota(t, fixture, subscription, 100000, 3000, reserved)
+					// A barrier without an acknowledgement keeps both inputs pending.
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "delta": ""})
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.failed", "response_id": "first", "error": map[string]any{"code": "invalid_input", "message": "Rejected"}})
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				injection := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, "inject-2", injection["event_id"])
+				assertResponsesWSReservedQuota(t, fixture, subscription, 100000, 3000, tc.total)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "response": map[string]any{"id": "first", "status": "completed"}})
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			if tc.legacy != "" {
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"billing_setting.billing_mode": `{}`}))
+			}
+			if tc.freeGroup {
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"group_ratio_setting.group_ratio": `{"default":0}`}))
+			}
+			if tc.subscription {
+				subscription = setupResponsesWSSubscriptionTest(t, fixture, 100000)
+			}
+			close(ready)
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello", "instructions": "world", "service_tier": "priority"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			for i := range 3 {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+					"type": "response.inject", "response_id": "first", "event_id": fmt.Sprintf("inject-%d", i),
+					"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": " hey"}},
+				})
+				if i == 0 {
+					require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+					require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+						"billing_setting.billing_expr":         `{"ws-billing":"tier(\"changed\", p * 1000)"}`,
+						"group_ratio_setting.group_ratio":      `{"default":3}`,
+						"quota_setting.pre_consume_multiplier": "9",
+					}))
+				} else if i == 1 {
+					for _, event := range []string{"response.output_text.delta", "response.inject.failed", "response.inject.created"} {
+						require.Equal(t, event, readResponsesWSTestEvent(t, fixture.client)["type"])
+					}
+					assertResponsesWSReservedQuota(t, fixture, subscription, 100000, 3000, tc.total)
+				}
+			}
+			require.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			assertResponsesWSReservedQuota(t, fixture, subscription, 100000, 3000, tc.settled)
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, tc.settled, logs[0].Quota)
+			assert.Equal(t, 7, logs[0].PromptTokens)
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectReservationFailureKeepsGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name, expression      string
+		userQuota, tokenQuota int
+		subscriptionQuota     int
+		code                  types.ErrorCode
+	}{
+		{name: "wallet exhausted", userQuota: 6, tokenQuota: 3000, code: types.ErrorCodeInsufficientUserQuota},
+		{name: "token failure rolls back wallet", userQuota: 100000, tokenQuota: 6, code: types.ErrorCodePreConsumeTokenQuotaFailed},
+		{name: "subscription exhausted", userQuota: 100000, tokenQuota: 3000, subscriptionQuota: 6, code: types.ErrorCodeInsufficientUserQuota},
+		{name: "token failure rolls back subscription", userQuota: 100000, tokenQuota: 6, subscriptionQuota: 100000, code: types.ErrorCodePreConsumeTokenQuotaFailed},
+		{name: "quota overflow", expression: `len > 5 ? tier("overflow", p * 1e100) : tier("input", p * 2)`, userQuota: 100000, tokenQuota: 3000, code: types.ErrorCodeModelPriceError},
+		{name: "negative quota", expression: `len > 5 ? tier("negative", -2) : tier("input", p * 2)`, userQuota: 100000, tokenQuota: 3000, code: types.ErrorCodeModelPriceError},
+		{name: "expression evaluation fails", expression: `len > 5 ? tier("invalid", float(param("missing"))) : tier("input", p * 2)`, userQuota: 100000, tokenQuota: 3000, code: types.ErrorCodeModelPriceError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousQuota := *operation_setting.GetQuotaSetting()
+			t.Cleanup(func() { *operation_setting.GetQuotaSetting() = previousQuota })
+			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
+			expression := tc.expression
+			if expression == "" {
+				expression = `tier("input", p * 2)`
+			}
+			ready := make(chan struct{})
+			var fixture *responsesWSBillingTest
+			var subscription *model.UserSubscription
+			fixture = newResponsesWSBillingTest(t, expression, func(ws *websocket.Conn, _ *http.Request) {
+				<-ready
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				injection := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, "valid", injection["event_id"], "failed reservations must never reach upstream")
+				assertResponsesWSReservedQuota(t, fixture, subscription, tc.userQuota, tc.tokenQuota, 5)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				completeResponsesWSTestRequest(t, ws, "planner", "first", 5)
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			require.NoError(t, model.DecreaseUserQuota(fixture.user.Id, 100000-tc.userQuota, false))
+			fixture.token.RemainQuota = tc.tokenQuota
+			require.NoError(t, fixture.token.Update())
+			if tc.subscriptionQuota > 0 {
+				subscription = setupResponsesWSSubscriptionTest(t, fixture, tc.subscriptionQuota)
+			}
+			close(ready)
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello", "instructions": "world"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+				"type": "response.inject", "response_id": "first", "event_id": "invalid",
+				"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": strings.Repeat(" hey", 10)}},
+			})
+			rejected := readResponsesWSTestEvent(t, fixture.client)
+			require.Equal(t, "error", rejected["type"])
+			assert.Equal(t, "invalid", rejected["event_id"])
+			assert.Equal(t, "first", rejected["response_id"])
+			assert.Equal(t, "planner", rejected["stream_id"])
+			status := http.StatusForbidden
+			if tc.code == types.ErrorCodeModelPriceError {
+				status = http.StatusBadRequest
+			}
+			assert.Equal(t, float64(status), rejected["status"])
+			require.IsType(t, map[string]any{}, rejected["error"])
+			assert.Equal(t, string(tc.code), rejected["error"].(map[string]any)["code"])
+			assertResponsesWSReservedQuota(t, fixture, subscription, tc.userQuota, tc.tokenQuota, 3)
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+				"type": "response.inject", "response_id": "first", "event_id": "valid",
+				"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": " hey"}},
+			})
+			require.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			assertResponsesWSReservedQuota(t, fixture, subscription, tc.userQuota, tc.tokenQuota, 5)
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, 5, logs[0].Quota)
+			assert.Equal(t, 5, logs[0].PromptTokens)
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectEstimatedUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		replies       []string
+		disableCount  bool
+		upstreamClose bool
+		terminalUsage int
+		extraAck      bool
+		wantPrompt    int
+	}{
+		{name: "accepted before client disconnect", replies: []string{"response.inject.created"}, wantPrompt: 5},
+		{name: "accepted before upstream EOF", replies: []string{"response.inject.created"}, upstreamClose: true, wantPrompt: 5},
+		{name: "mixed accepted rejected and pending", replies: []string{"response.inject.created", "response.inject.failed", "error", "response.inject.created", ""}, wantPrompt: 11},
+		{name: "pending is not accepted", replies: []string{""}, wantPrompt: 3},
+		{name: "wrong lane is not accepted", replies: []string{"other-lane"}, wantPrompt: 3},
+		{name: "unmatched acceptance", extraAck: true, wantPrompt: 3},
+		{name: "duplicate acceptance without pending input", replies: []string{"response.inject.created"}, extraAck: true, wantPrompt: 5},
+		{name: "terminal usage replaces estimate", replies: []string{"response.inject.created"}, terminalUsage: 29, wantPrompt: 29},
+		{name: "token estimation disabled", replies: []string{"response.inject.created"}, disableCount: true, wantPrompt: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				for i, replyType := range tc.replies {
+					injection := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "response.inject", injection["type"])
+					assert.Equal(t, fmt.Sprintf("inject-%d", i), injection["event_id"])
+					if replyType == "" {
+						continue
+					}
+					reply := map[string]any{"type": replyType, "response_id": "first"}
+					if replyType == "other-lane" {
+						reply["type"], reply["stream_id"] = "response.inject.created", "other"
+					}
+					if replyType == "response.inject.failed" || replyType == "error" {
+						reply["event_id"] = injection["event_id"]
+						reply["error"] = map[string]any{"type": "invalid_request_error", "code": "invalid_tool_output", "message": "Invalid tool output"}
+					}
+					sendResponsesWSTestEvent(t, ws, reply)
+				}
+				if tc.extraAck {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "delta": "generated"})
+				if tc.terminalUsage > 0 {
+					completeResponsesWSTestRequest(t, ws, "planner", "first", tc.terminalUsage)
+				}
+				if !tc.upstreamClose {
+					_, _, _ = ws.ReadMessage()
+				}
+			})
+			constant.CountToken = !tc.disableCount
+			// These two words and their separator estimate to three tokens. Each
+			// injection contributes only its output, without repeating instructions.
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello", "instructions": "world"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			for i, replyType := range tc.replies {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+					"type": "response.inject", "response_id": "first", "event_id": fmt.Sprintf("inject-%d", i),
+					"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": strings.Repeat(" hey", i+1)}},
+				})
+				if replyType != "" {
+					reply := readResponsesWSTestEvent(t, fixture.client)
+					if replyType == "other-lane" {
+						assert.Equal(t, "other", reply["stream_id"])
+						replyType = "response.inject.created"
+					}
+					assert.Equal(t, replyType, reply["type"])
+				}
+			}
+			if tc.extraAck {
+				assert.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.terminalUsage > 0 {
+				assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			if tc.upstreamClose {
+				_, _, err := fixture.client.ReadMessage()
+				require.Error(t, err)
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{tc.wantPrompt})
+			var log model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).First(&log).Error)
+			assert.Equal(t, tc.wantPrompt, log.PromptTokens)
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectEstimatesStayWithGeneration(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+		for _, id := range []string{"first", "other"} {
+			readResponsesWSTestEvent(t, ws)
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": id, "response": map[string]any{"id": id, "status": "in_progress"}})
+		}
+		for _, id := range []string{"first", "other"} {
+			injection := readResponsesWSTestEvent(t, ws)
+			assert.Equal(t, id, injection["response_id"])
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": id})
+		}
+		assert.Equal(t, "first", readResponsesWSTestEvent(t, ws)["response_id"])
+		// Completion without usage settles the first generation's accepted input.
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "response": map[string]any{"id": "first", "status": "completed"}})
+		assert.Equal(t, "first", readResponsesWSTestEvent(t, ws)["stream_id"])
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "first", "response": map[string]any{"id": "next", "status": "in_progress"}})
+		// The old pending injection must not increase the newer generation.
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "response": map[string]any{"id": "other", "status": "completed"}})
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "next", "delta": "generated"})
+		_, _, _ = ws.ReadMessage()
+	})
+	constant.CountToken = true
+	for _, id := range []string{"first", "other"} {
+		sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": id, "model": "ws-billing", "input": "hey"})
+		require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	}
+	for i, id := range []string{"first", "other", "first"} {
+		sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+			"type": "response.inject", "response_id": id,
+			"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": strings.Repeat(" hey", i+1)}},
+		})
+		if i < 2 {
+			ack := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "response.inject.created", ack["type"])
+			assert.Equal(t, id, ack["response_id"])
+		}
+	}
+	assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "first", "model": "ws-billing", "input": " hey hey hey hey", "previous_response_id": "first"})
+	// Late replies bypass the new worker; independent lanes can publish in
+	// either order too. Wait for every event before interrupting the new request.
+	var events []any
+	for range 4 {
+		events = append(events, readResponsesWSTestEvent(t, fixture.client)["type"])
+	}
+	assert.ElementsMatch(t, []any{"response.created", "response.inject.created", "response.completed", "response.output_text.delta"}, events)
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{4, 5, 6})
+	var logs []model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").Find(&logs).Error)
+	require.Len(t, logs, 3)
+	assert.Equal(t, []int{4, 5, 6}, []int{logs[0].PromptTokens, logs[1].PromptTokens, logs[2].PromptTokens})
+}
+
+func TestResponsesWebSocketInjectSensitiveCheck(t *testing.T) {
+	const toolInput = `[{"type":"function_call_output","call_id":"call_1","output":"forbidden"}]`
+	for _, tc := range []struct {
+		name, input                                                     string
+		disableCount, completed, disableSensitive, disablePrompt, allow bool
+	}{
+		{name: "message text", input: `[{"role":"user","content":"forbidden"}]`},
+		{name: "message parts without counting", input: `[{"role":"user","content":[{"type":"input_text","text":"FORBIDDEN"}]}]`, disableCount: true},
+		{name: "tool output", input: toolInput},
+		{name: "tool parts without counting", input: `[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"forbidden"}]}]`, disableCount: true},
+		{name: "completed response", input: toolInput, completed: true},
+		{name: "completed response without counting", input: toolInput, completed: true, disableCount: true},
+		{name: "global check disabled", input: toolInput, disableSensitive: true, allow: true},
+		{name: "prompt check disabled", input: toolInput, disablePrompt: true, disableCount: true, allow: true},
+		{name: "unmatched input", input: `[{"role":"user","content":"allowed"}]`, allow: true},
+		{name: "empty input", input: `[]`, allow: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousSensitive, previousPrompt, previousWords := setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords
+			previousQuota := *operation_setting.GetQuotaSetting()
+			t.Cleanup(func() {
+				setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords = previousSensitive, previousPrompt, previousWords
+				*operation_setting.GetQuotaSetting() = previousQuota
+			})
+			setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled = !tc.disableSensitive, !tc.disablePrompt
+			setting.SensitiveWords = []string{"forbidden"}
+			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
+
+			ack := map[string]any{"type": "response.inject.created", "response_id": "first"}
+			if tc.completed {
+				ack["type"] = "response.inject.failed"
+				ack["error"] = map[string]any{"code": "response_already_completed", "message": "Already completed"}
+			}
+			fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				if tc.completed {
+					completeResponsesWSTestRequest(t, ws, "planner", "first", 3)
+				}
+				if tc.allow {
+					injection := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "candidate", injection["event_id"])
+					sendResponsesWSTestEvent(t, ws, ack)
+				}
+				injection := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, "valid", injection["event_id"], "rejected sensitive input must never reach upstream")
+				sendResponsesWSTestEvent(t, ws, ack)
+				if !tc.completed {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "delta": "still generating"})
+					completeResponsesWSTestRequest(t, ws, "planner", "first", 5)
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = !tc.disableCount
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "hello", "instructions": "world"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			reserved := 3
+			if tc.disableCount {
+				reserved = 0
+			}
+			if tc.completed {
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+				reserved = 3
+			}
+			assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, reserved)
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+				"type": "response.inject", "response_id": "first", "event_id": "candidate", "input": common.RawMessage(tc.input),
+			})
+			reply := readResponsesWSTestEvent(t, fixture.client)
+			if tc.allow {
+				require.Equal(t, ack["type"], reply["type"])
+			} else {
+				require.Equal(t, "error", reply["type"])
+				assert.Equal(t, "candidate", reply["event_id"])
+				assert.Equal(t, "first", reply["response_id"])
+				assert.Equal(t, "planner", reply["stream_id"])
+				require.IsType(t, map[string]any{}, reply["error"])
+				apiErr := reply["error"].(map[string]any)
+				assert.Equal(t, string(types.ErrorCodeSensitiveWordsDetected), apiErr["code"])
+				assert.Equal(t, "user sensitive words detected", apiErr["message"])
+				assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, reserved)
+			}
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+				"type": "response.inject", "response_id": "first", "event_id": "valid",
+				"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": " hey"}},
+			})
+			require.Equal(t, ack["type"], readResponsesWSTestEvent(t, fixture.client)["type"])
+			settled := 3
+			if !tc.completed {
+				require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+				settled = 5
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{settled})
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectEstimationFailureKeepsGeneration(t *testing.T) {
+	previousMedia := constant.GetMediaToken
+	constant.GetMediaToken = true
+	t.Cleanup(func() { constant.GetMediaToken = previousMedia })
+	fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+		readResponsesWSTestEvent(t, ws)
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "response": map[string]any{"id": "first", "status": "in_progress"}})
+		injection := readResponsesWSTestEvent(t, ws)
+		assert.Equal(t, "valid", injection["event_id"], "the input that failed estimation must never reach upstream")
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "delta": "generated"})
+		_, _, _ = ws.ReadMessage()
+	})
+	constant.CountToken = true
+	sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "hey"})
+	require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+		"type": "response.inject", "response_id": "first", "event_id": "invalid",
+		"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": []any{map[string]any{"type": "input_file", "file_url": "https://[invalid"}}}},
+	})
+	rejected := readResponsesWSTestEvent(t, fixture.client)
+	assert.Equal(t, "error", rejected["type"])
+	assert.Equal(t, "invalid", rejected["event_id"])
+	assert.Equal(t, "first", rejected["response_id"])
+	require.IsType(t, map[string]any{}, rejected["error"])
+	assert.Equal(t, string(types.ErrorCodeCountTokenFailed), rejected["error"].(map[string]any)["code"])
+	sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+		"type": "response.inject", "response_id": "first", "event_id": "valid",
+		"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "yes"}},
+	})
+	assert.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	assert.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{4})
+}
+
+func TestResponsesWebSocketInjectLifecycle(t *testing.T) {
+	const input = `[{"type":"function_call_output","call_id":"call_1","output":"result","agent":{"agent_name":"/root/research"},"extension":{"integer":9007199254740993,"zero":0.0,"enabled":false}}]`
+	const inject = `{"type":"response.inject","response_id":"first","input":` + input + `}`
+	const accepted = `{"type":"response.inject.created","sequence_number":42,"response_id":"first"}`
+	const rejected = `{"type":"response.inject.failed","sequence_number":43,"response_id":"first","input":` + input + `,"error":{"code":"response_already_completed","message":"Already completed"}}`
+	for _, tc := range []struct {
+		name                               string
+		terminalFirst, late, nextBeforeAck bool
+		interruptBeforeAck                 bool
+	}{
+		{name: "multiple injections while active"},
+		{name: "acknowledgements after terminal", terminalFirst: true},
+		{name: "injection after completion", late: true},
+		{name: "exact interrupt error outranks unnamed late injections", terminalFirst: true, interruptBeforeAck: true},
+		{name: "next generation before acknowledgements", terminalFirst: true, nextBeforeAck: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nextSeen := make(chan struct{})
+			releaseNext := sync.OnceFunc(func() { close(nextSeen) })
+			defer releaseNext()
+			firstReply := accepted
+			if tc.late {
+				firstReply = strings.Replace(rejected, `"sequence_number":43`, `"sequence_number":42`, 1)
+			}
+			secondReply := rejected
+			if !tc.terminalFirst && !tc.late {
+				secondReply = strings.ReplaceAll(secondReply, "response_already_completed", "invalid_tool_output")
+				secondReply = strings.ReplaceAll(secondReply, "Already completed", "Invalid tool output")
+			}
+			fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				if tc.late {
+					completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				}
+				for range 2 {
+					_, body, err := ws.ReadMessage()
+					require.NoError(t, err)
+					assert.Equal(t, inject, string(body), "inject must preserve raw tool outputs")
+				}
+				if tc.terminalFirst {
+					completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				}
+				if tc.nextBeforeAck {
+					next := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "first", next["previous_response_id"])
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "second", "status": "in_progress"}})
+					<-nextSeen
+				}
+				if tc.interruptBeforeAck {
+					assert.Equal(t, "response.interrupt", readResponsesWSTestEvent(t, ws)["type"])
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "error", "response_id": "first", "event_id": "interrupt-first", "status": 400, "error": map[string]any{"type": "invalid_request_error", "code": "invalid_mode", "message": "Unsupported interruption mode"}})
+				}
+				require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(firstReply)))
+				require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(secondReply)))
+				if !tc.terminalFirst && !tc.late {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "response_id": "first", "stream_id": "planner", "delta": "still generating"})
+					completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				}
+				if tc.nextBeforeAck {
+					completeResponsesWSTestRequest(t, ws, "planner", "second", 200)
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "first", "multi_agent": map[string]any{"enabled": true}})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.late {
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			for range 2 {
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(inject)))
+			}
+			if tc.terminalFirst {
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			quotas := []int{100}
+			if tc.nextBeforeAck {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": input, "previous_response_id": "first"})
+				require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+				releaseNext()
+				quotas = append(quotas, 200)
+			}
+			if tc.interruptBeforeAck {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.interrupt", "response_id": "first", "event_id": "interrupt-first"})
+				assert.Equal(t, "interrupt-first", readResponsesWSTestEvent(t, fixture.client)["event_id"])
+			}
+			for _, reply := range []string{firstReply, secondReply} {
+				_, body, err := fixture.client.ReadMessage()
+				require.NoError(t, err)
+				assert.Equal(t, reply, string(body), "even late acknowledgements retain raw input and sequence numbers")
+			}
+			if !tc.terminalFirst && !tc.late {
+				assert.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+				assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			if tc.nextBeforeAck {
+				assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, quotas)
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectAdmissionAndControlIsolation(t *testing.T) {
+	const inject = `{"type":"response.inject","response_id":"a","event_id":"inject-a","input":[{"type":"function_call_output","call_id":"c1","output":"done"}]}`
+	fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+		for _, id := range []string{"a", "b"} {
+			create := readResponsesWSTestEvent(t, ws)
+			assert.Equal(t, id, create["stream_id"])
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": id, "response": map[string]any{"id": id, "status": "in_progress"}})
+		}
+		_, body, err := ws.ReadMessage()
+		require.NoError(t, err)
+		assert.Equal(t, inject, string(body))
+		for _, control := range []string{"cancel", "interrupt"} {
+			event := readResponsesWSTestEvent(t, ws)
+			assert.Equal(t, "response."+control, event["type"])
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "error", "event_id": control + "-a", "response_id": "a", "status": 400, "error": map[string]any{"type": "invalid_request_error", "code": "response_not_active", "message": "Control rejected"}})
+		}
+		// The injection still owns its own generic error after both controls.
+		sendResponsesWSTestEvent(t, ws, map[string]any{"type": "error", "event_id": "inject-a", "response_id": "a", "status": 400, "error": map[string]any{"type": "invalid_request_error", "code": "invalid_tool_output", "message": "Invalid tool output"}})
+		for _, id := range []string{"b", "a"} {
+			event := readResponsesWSTestEvent(t, ws)
+			assert.Equal(t, "response.inject", event["type"])
+			assert.Equal(t, id, event["response_id"])
+			sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": id})
+		}
+		completeResponsesWSTestRequest(t, ws, "a", "a", 100)
+		completeResponsesWSTestRequest(t, ws, "b", "b", 100)
+		_, _, _ = ws.ReadMessage()
+	})
+	for _, id := range []string{"a", "b"} {
+		sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": id, "model": "ws-billing", "input": id})
+		require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	}
+	for _, invalid := range []string{
+		`{"type":"response.inject","input":[]}`,
+		`{"type":"response.inject","response_id":null,"input":[]}`,
+		`{"type":"response.inject","response_id":123,"input":[]}`,
+		`{"type":"response.inject","response_id":"  ","input":[]}`,
+		`{"type":"response.inject","response_id":"a"}`,
+		`{"type":"response.inject","response_id":"a","input":null}`,
+		`{"type":"response.inject","response_id":"a","input":{}}`,
+		`{"type":"response.inject","response_id":"a","input":"text"}`,
+		`{"type":"response.inject","response_id":"missing","input":[],"stream_id":"a"}`,
+		`{"type":"response.inject","response_id":"a","input":[],"stream_id":"b"}`,
+		`{"type":"response.inject","response_id":"a","input":[],"stream_id":false}`,
+	} {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(invalid)))
+		errorEvent := readResponsesWSTestEvent(t, fixture.client)
+		assert.Equal(t, "error", errorEvent["type"])
+		assert.Equal(t, float64(400), errorEvent["status"])
+	}
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(inject)))
+	for _, control := range []string{"cancel", "interrupt"} {
+		sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response." + control, "response_id": "a", "event_id": control + "-a"})
+		assert.Equal(t, control+"-a", readResponsesWSTestEvent(t, fixture.client)["event_id"])
+	}
+	assert.Equal(t, "inject-a", readResponsesWSTestEvent(t, fixture.client)["event_id"])
+	for _, id := range []string{"b", "a"} {
+		retry := strings.ReplaceAll(inject, `"response_id":"a"`, `"response_id":"`+id+`"`)
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(retry)))
+		ack := readResponsesWSTestEvent(t, fixture.client)
+		assert.Equal(t, "response.inject.created", ack["type"])
+		assert.Equal(t, id, ack["response_id"])
+	}
+	for range 2 {
+		assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	}
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{100, 100})
+}
+
+func TestResponsesWebSocketInjectPendingLimits(t *testing.T) {
+	for _, bytesLimit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bytes=%t", bytesLimit), func(t *testing.T) {
+			previousLimit := constant.MaxRequestBodyMB
+			constant.MaxRequestBodyMB = 1
+			t.Cleanup(func() { constant.MaxRequestBodyMB = previousLimit })
+			count, eventID := 128, "inject"
+			if bytesLimit {
+				count, eventID = 1, strings.Repeat("x", 1<<19)
+			}
+			advance := make(chan struct{})
+			release := sync.OnceFunc(func() { close(advance) })
+			defer release()
+			fixture := newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "planner", "response": map[string]any{"id": "first", "status": "in_progress"}})
+				for range count {
+					assert.Equal(t, "response.inject", readResponsesWSTestEvent(t, ws)["type"])
+				}
+				// A mismatched lane cannot release a pending injection's capacity.
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first", "stream_id": "other"})
+				<-advance
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				assert.Equal(t, "response.inject", readResponsesWSTestEvent(t, ws)["type"])
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "first"})
+				completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				_, _, _ = ws.ReadMessage()
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "first"})
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			inject := map[string]any{"type": "response.inject", "response_id": "first", "event_id": eventID, "input": []any{map[string]any{"type": "function_call_output", "call_id": "c1", "output": "done"}}}
+			for range count {
+				sendResponsesWSTestEvent(t, fixture.client, inject)
+			}
+			assert.Equal(t, "other", readResponsesWSTestEvent(t, fixture.client)["stream_id"])
+			sendResponsesWSTestEvent(t, fixture.client, inject)
+			limited := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, float64(429), limited["status"])
+			assert.Equal(t, "first", limited["response_id"])
+			release()
+			assert.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			sendResponsesWSTestEvent(t, fixture.client, inject)
+			assert.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{100})
 		})
 	}
 }

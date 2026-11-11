@@ -128,4 +128,6 @@ const (
 	MsgResponsesWSResponseNotFound          = "responses_ws.response_not_found"
 	MsgResponsesWSControlPending            = "responses_ws.control_pending"
 	MsgResponsesWSInterruptLimit            = "responses_ws.interrupt_limit_reached"
+	MsgResponsesWSInvalidInject             = "responses_ws.invalid_inject"
+	MsgResponsesWSInjectLimit               = "responses_ws.inject_limit_reached"
 )

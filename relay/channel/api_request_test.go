@@ -10,11 +10,31 @@ import (
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResponsesBetaHeaderUsesFinalProtocol(t *testing.T) {
+	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAIResponses} {
+		t.Run(string(format), func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request.Header.Add("OpenAI-Beta", "responses_multi_agent=v1")
+			c.Request.Header.Add("OpenAI-Beta", "future=v1")
+			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIResponses, FinalRequestRelayFormat: format}
+			headers := make(http.Header)
+			SetupApiRequestHeader(info, c, &headers)
+			if format == types.RelayFormatOpenAIResponses {
+				assert.Equal(t, c.Request.Header.Values("OpenAI-Beta"), headers.Values("OpenAI-Beta"))
+			} else {
+				assert.Empty(t, headers.Values("OpenAI-Beta"), "the client's Responses beta must not opt a converted protocol in")
+			}
+		})
+	}
+}
 
 func TestNewTaskAPIRequestInheritsClientCancellation(t *testing.T) {
 	recorder := httptest.NewRecorder()

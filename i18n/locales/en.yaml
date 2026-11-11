@@ -101,4 +101,6 @@ responses_ws.invalid_interrupt: "response.interrupt requires a non-empty respons
 responses_ws.response_not_found: "The target response is not available on this WebSocket connection and stream."
 responses_ws.control_pending: "A response control event is already pending."
 responses_ws.interrupt_limit_reached: "Too many interruption acknowledgements are pending on this WebSocket connection."
+responses_ws.invalid_inject: "response.inject requires a non-empty response_id string and an input array."
+responses_ws.inject_limit_reached: "Too many response control acknowledgements are pending on this WebSocket connection."
 responses_ws.steer_continuation_required: "Continue the pending response with its previous_response_id before starting another response on this stream."

@@ -10,13 +10,118 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func TestResponsesRequestPreservesImageOptions(t *testing.T) {
+	settings := model_setting.GetGlobalSettings()
+	previous := settings.PassThroughRequestEnabled
+	t.Cleanup(func() { settings.PassThroughRequestEnabled = previous })
+	settings.PassThroughRequestEnabled = false
+	service.InitHttpClient()
+
+	type upstreamRequest struct {
+		body []byte
+		path string
+		err  error
+	}
+	received := make(chan upstreamRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		received <- upstreamRequest{body: body, path: r.URL.Path, err: err}
+		// Stop after request forwarding so this fixture needs no quota or database state.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"fixture upstream rejection","type":"invalid_request_error"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	for _, tc := range []struct {
+		name, image string
+	}{
+		{name: "omitted"},
+		{name: "auto", image: `{"context_compression":"auto"}`},
+		{name: "enabled", image: `{"context_compression":"enabled"}`},
+		{name: "disabled", image: `{"context_compression":"disabled"}`},
+		{name: "empty object", image: `{}`},
+		{name: "null", image: `null`},
+		{name: "extension", image: `{"context_compression":"enabled","vendor_option":{"enabled":false}}`},
+	} {
+		fields := `"model":"gpt-4.1","input":"hi"`
+		if tc.image != "" {
+			fields += `,"image":` + tc.image
+		}
+		for _, transport := range []string{"http", "ws-flat", "ws-wrapped", "compact"} {
+			t.Run(tc.name+"/"+transport, func(t *testing.T) {
+				path := "/v1/responses"
+				if transport == "compact" {
+					path += "/compact"
+				}
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader("{"+fields+"}"))
+				c.Request.Header.Set("Content-Type", "application/json")
+				t.Cleanup(func() { common.CleanupBodyStorage(c) })
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, "gpt-4.1")
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, upstream.URL)
+
+				var wire []byte
+				switch transport {
+				case "ws-flat", "ws-wrapped":
+					message := `{"type":"response.create",` + fields + `}`
+					if transport == "ws-wrapped" {
+						message = `{"type":"response.create","response":{` + fields + `}}`
+					}
+					create, _, err := normalizeResponsesWSTestMessage([]byte(message))
+					require.NoError(t, err)
+					info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+					payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+					require.Nil(t, apiErr)
+					assert.Equal(t, "response.create", gjson.GetBytes(payload, "type").String())
+					wire = payload
+				default:
+					var info *relaycommon.RelayInfo
+					if transport == "compact" {
+						request, err := helper.GetAndValidateResponsesCompactionRequest(c)
+						require.NoError(t, err)
+						info = relaycommon.GenRelayInfoResponsesCompaction(c, request)
+					} else {
+						request, err := helper.GetAndValidateResponsesRequest(c)
+						require.NoError(t, err)
+						info = relaycommon.GenRelayInfoResponses(c, request)
+					}
+					apiErr := ResponsesHelper(c, info)
+					select {
+					case request := <-received:
+						require.NoError(t, request.err)
+						assert.Equal(t, path, request.path)
+						wire = request.body
+					default:
+						t.Fatal("request did not reach the upstream")
+					}
+					require.NotNil(t, apiErr)
+					require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+					require.Contains(t, apiErr.Error(), "fixture upstream rejection")
+				}
+
+				image := gjson.GetBytes(wire, "image")
+				if tc.image == "" {
+					assert.False(t, image.Exists(), "omitted image options must not acquire a default")
+					return
+				}
+				require.True(t, image.Exists(), "image options must reach the upstream")
+				assert.JSONEq(t, tc.image, image.Raw)
+			})
+		}
+	}
+}
 
 func TestPrepareResponsesRequestDeepSeekEffectiveReasoning(t *testing.T) {
 	settings := model_setting.GetGlobalSettings()

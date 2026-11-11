@@ -51,6 +51,11 @@ func ApplyUpstreamBodyMetadata(req *http.Request, body io.Reader) {
 }
 
 func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Header) {
+	if info.GetFinalRequestRelayFormat() == types.RelayFormatOpenAIResponses {
+		for _, value := range c.Request.Header.Values("OpenAI-Beta") {
+			req.Add("OpenAI-Beta", value)
+		}
+	}
 	if info.RelayMode == constant.RelayModeAudioTranscription || info.RelayMode == constant.RelayModeAudioTranslation {
 		// multipart/form-data
 	} else if info.RelayMode == constant.RelayModeRealtime {

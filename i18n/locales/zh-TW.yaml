@@ -102,4 +102,6 @@ responses_ws.invalid_interrupt: "response.interrupt 必須提供非空字串 res
 responses_ws.response_not_found: "此 WebSocket 連線和串流上不存在目標回應。"
 responses_ws.control_pending: "已有一個回應控制事件正在等待處理。"
 responses_ws.interrupt_limit_reached: "此 WebSocket 連線上等待確認的中斷請求過多。"
+responses_ws.invalid_inject: "response.inject 必須提供非空字串 response_id 和陣列 input。"
+responses_ws.inject_limit_reached: "此 WebSocket 連線上等待確認的回應控制請求過多。"
 responses_ws.steer_continuation_required: "請先使用待續接回應的 previous_response_id 繼續該回應，再在此串流上發起其他回應。"

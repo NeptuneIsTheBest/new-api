@@ -11,6 +11,7 @@ import (
 type OpenAIResponsesCompactionRequest struct {
 	Model              string          `json:"model"`
 	Input              json.RawMessage `json:"input,omitempty"`
+	Image              json.RawMessage `json:"image,omitempty"`
 	Instructions       json.RawMessage `json:"instructions,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 	// Codex compact request parity:

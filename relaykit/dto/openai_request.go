@@ -1065,11 +1065,13 @@ type OpenAIResponsesRequest struct {
 	// Background         json.RawMessage `json:"background,omitempty"`
 	Conversation      json.RawMessage `json:"conversation,omitempty"`
 	ContextManagement json.RawMessage `json:"context_management,omitempty"`
+	Image             json.RawMessage `json:"image,omitempty"`
 	Instructions      json.RawMessage `json:"instructions,omitempty"`
 	MaxOutputTokens   *uint           `json:"max_output_tokens,omitempty"`
 	TopLogProbs       *int            `json:"top_logprobs,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
 	Moderation        json.RawMessage `json:"moderation,omitempty"`
+	MultiAgent        json.RawMessage `json:"multi_agent,omitempty"`
 	ParallelToolCalls json.RawMessage `json:"parallel_tool_calls,omitempty"`
 	// FrequencyPenalty/PresencePenalty are not part of the official OpenAI
 	// Responses API; they are forwarded verbatim for OpenAI-compatible upstreams
