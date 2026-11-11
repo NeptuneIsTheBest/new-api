@@ -645,6 +645,352 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	assert.Equal(t, 3000, user.UsedQuota)
 }
 
+func newResponsesWSModelSwitchTest(t *testing.T, mappedModel string, handle func(*websocket.Conn, *http.Request)) *responsesWSBillingTest {
+	t.Helper()
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.0002))`, handle)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"ws-billing":"tiered_expr","ws-switch":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"ws-billing":"tier(\"request\", fixed(0.0002))","ws-switch":"tier(\"request\", fixed(0.0004))"}`,
+	}))
+	mapping, err := common.Marshal(map[string]string{"ws-billing": "gpt-4o", "ws-switch": mappedModel})
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{
+		"models": "ws-billing,ws-switch", "model_mapping": string(mapping),
+	}).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: fixture.channel.Id, Model: "ws-switch", Group: "default", Enabled: true}).Error)
+	return fixture
+}
+
+func TestResponsesWebSocketSwitchesModels(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		streams      [3]string
+		concurrent   bool
+		continuation bool
+	}{
+		{name: "default stream"},
+		{name: "same named stream", streams: [3]string{"planner", "planner", "planner"}},
+		{name: "different streams", streams: [3]string{"planner", "critic", "planner"}},
+		{name: "concurrent models", streams: [3]string{"planner", "critic", "planner"}, concurrent: true},
+		{name: "previous response forwarded", continuation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []any{
+				map[string]any{"role": "user", "content": "First question"},
+				map[string]any{"role": "assistant", "content": "Previous answer"},
+				map[string]any{"role": "user", "content": "Continue with the selected model"},
+			}
+			reserved := make(chan int, 3)
+			tokenID := make(chan int, 1)
+			fixture := newResponsesWSModelSwitchTest(t, "gpt-4.1", func(ws *websocket.Conn, r *http.Request) {
+				assert.Equal(t, "Bearer upstream-first", r.Header.Get("Authorization"))
+				id := <-tokenID
+				for index, expectedModel := range []string{"gpt-4o", "gpt-4.1", "gpt-4o"} {
+					create := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, expectedModel, create["model"])
+					assert.Equal(t, input, create["input"])
+					if tc.continuation && index > 0 {
+						assert.Equal(t, fmt.Sprintf("switch-%d", index-1), create["previous_response_id"])
+					} else {
+						assert.NotContains(t, create, "previous_response_id")
+					}
+					var token model.Token
+					require.NoError(t, model.DB.First(&token, id).Error)
+					reserved <- token.RemainQuota
+					if tc.concurrent && index == 0 {
+						sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": tc.streams[0], "response": map[string]any{"id": "switch-0", "status": "in_progress"}})
+						continue
+					}
+					completeResponsesWSTestRequest(t, ws, tc.streams[index], fmt.Sprintf("switch-%d", index), 100)
+					if tc.concurrent && index == 1 {
+						completeResponsesWSTestRequest(t, ws, tc.streams[0], "switch-0", 100)
+					}
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			tokenID <- fixture.token.Id
+			completed := make(map[string]string)
+			for index, modelName := range []string{"ws-billing", "ws-switch", "ws-billing"} {
+				create := map[string]any{"type": "response.create", "model": modelName, "input": input}
+				if tc.streams[index] != "" {
+					create["stream_id"] = tc.streams[index]
+				}
+				if tc.continuation && index > 0 {
+					create["previous_response_id"] = fmt.Sprintf("switch-%d", index-1)
+				}
+				sendResponsesWSTestEvent(t, fixture.client, create)
+				count := 1
+				if tc.concurrent && index == 1 {
+					count = 2
+				}
+				for range count {
+					event := readResponsesWSTestEvent(t, fixture.client)
+					if tc.concurrent && index == 0 {
+						require.Equal(t, "response.created", event["type"], "%v", event)
+						continue
+					}
+					require.Equal(t, "response.completed", event["type"], "%v", event)
+					id := event["response"].(map[string]any)["id"].(string)
+					assert.NotContains(t, completed, id)
+					completed[id], _ = event["stream_id"].(string)
+				}
+				assert.Equal(t, []int{2900, 2700, 2600}[index], <-reserved)
+			}
+			assert.Equal(t, map[string]string{"switch-0": tc.streams[0], "switch-1": tc.streams[1], "switch-2": tc.streams[2]}, completed)
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("request_id").Find(&logs).Error)
+			require.Len(t, logs, 3)
+			for index, log := range logs {
+				assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), log.RequestId)
+				assert.Equal(t, []string{"ws-billing", "ws-switch", "ws-billing"}[index], log.ModelName)
+				assert.Equal(t, []int{100, 200, 100}[index], log.Quota)
+			}
+			require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+			require.NoError(t, model.DB.First(fixture.user, fixture.user.Id).Error)
+			assert.Equal(t, 2600, fixture.token.RemainQuota)
+			assert.Equal(t, 400, fixture.token.UsedQuota)
+			assert.Equal(t, 99600, fixture.user.Quota)
+			assert.Equal(t, 400, fixture.user.UsedQuota)
+		})
+	}
+}
+
+func TestResponsesWebSocketModelSwitchRevalidatesAccess(t *testing.T) {
+	for _, scenario := range []string{"token model access revoked", "token revoked", "channel model disabled", "channel disabled"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newResponsesWSModelSwitchTest(t, "gpt-4.1", func(ws *websocket.Conn, _ *http.Request) {
+				readResponsesWSTestEvent(t, ws)
+				completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				_, _, err := ws.ReadMessage()
+				assert.Error(t, err, "unauthorized model switch must not reach upstream")
+			})
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "first"})
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+			status := http.StatusForbidden
+			switch scenario {
+			case "token model access revoked":
+				fixture.token.ModelLimitsEnabled, fixture.token.ModelLimits = true, "ws-billing"
+				require.NoError(t, fixture.token.Update())
+			case "token revoked":
+				fixture.token.Status = common.TokenStatusDisabled
+				require.NoError(t, fixture.token.SelectUpdate())
+				status = http.StatusUnauthorized
+			case "channel model disabled":
+				require.NoError(t, model.DB.Model(&model.Ability{}).Where("channel_id = ? AND model = ?", fixture.channel.Id, "ws-switch").Update("enabled", false).Error)
+			case "channel disabled":
+				require.NoError(t, model.DB.Model(fixture.channel).Update("status", common.ChannelStatusManuallyDisabled).Error)
+			}
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "event_id": "switch", "stream_id": "critic", "model": "ws-switch", "input": "second"})
+			rejection := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "error", rejection["type"])
+			assert.Equal(t, float64(status), rejection["status"])
+			assert.Equal(t, "switch", rejection["event_id"])
+			assert.Equal(t, "critic", rejection["stream_id"])
+			_, _, err := fixture.client.ReadMessage()
+			assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation), "%v", err)
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assertResponsesWSAccounting(t, fixture, []int{100})
+		})
+	}
+}
+
+func TestResponsesWebSocketAzureAPIVersionReuse(t *testing.T) {
+	const defaultVersion = "2025-04-01-preview"
+	previousVersion := constant.AzureDefaultAPIVersion
+	constant.AzureDefaultAPIVersion = defaultVersion
+	t.Cleanup(func() { constant.AzureDefaultAPIVersion = previousVersion })
+
+	for _, tc := range []struct {
+		name, apiVersion, responsesVersion, wantVersion string
+		updatedVersion                                  *string
+		reconnect                                       bool
+	}{
+		{name: "custom api version", apiVersion: "2025-03-01-preview", wantVersion: "2025-03-01-preview"},
+		{name: "default api version", wantVersion: defaultVersion},
+		{name: "responses version override", apiVersion: "2025-03-01-preview", responsesVersion: "2025-05-01-preview", updatedVersion: common.GetPointer("2025-06-01-preview"), wantVersion: "2025-05-01-preview"},
+		{name: "api version changed", apiVersion: defaultVersion, updatedVersion: common.GetPointer("2025-03-01-preview"), wantVersion: defaultVersion, reconnect: true},
+		{name: "api version cleared", apiVersion: "2025-03-01-preview", updatedVersion: common.GetPointer(""), wantVersion: "2025-03-01-preview", reconnect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedQuotas := []int{100, 100}
+			if tc.reconnect {
+				expectedQuotas = expectedQuotas[:1]
+			}
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.0002))`, func(ws *websocket.Conn, r *http.Request) {
+				assert.Equal(t, "/cognitiveservices.azure.com/openai/responses", r.URL.Path)
+				assert.Equal(t, tc.wantVersion, r.URL.Query().Get("api-version"))
+				for index := range expectedQuotas {
+					create := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "gpt-4o", create["model"])
+					completeResponsesWSTestRequest(t, ws, "", fmt.Sprintf("azure-%d", index), 100)
+				}
+				_, _, err := ws.ReadMessage()
+				assert.Error(t, err, "a changed API version must not send another request on the old connection")
+			})
+			// The adaptor recognizes Cognitive Services by its base URL text.
+			baseURL := fixture.channel.GetBaseURL() + "/cognitiveservices.azure.com"
+			fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AzureResponsesVersion: tc.responsesVersion})
+			require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{
+				"type": constant.ChannelTypeAzure, "base_url": baseURL, "other": tc.apiVersion, "settings": fixture.channel.OtherSettings,
+			}).Error)
+
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "first"})
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.updatedVersion != nil {
+				require.NoError(t, model.DB.Model(fixture.channel).Update("other", *tc.updatedVersion).Error)
+			}
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "second"})
+			event := readResponsesWSTestEvent(t, fixture.client)
+			if tc.reconnect {
+				assert.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(http.StatusForbidden), event["status"])
+				body, err := common.Marshal(event)
+				require.NoError(t, err)
+				assert.Contains(t, string(body), "reconnect required")
+				_, _, err = fixture.client.ReadMessage()
+				assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation), "%v", err)
+			} else {
+				require.Equal(t, "response.completed", event["type"], "%v", event)
+			}
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assertResponsesWSAccounting(t, fixture, expectedQuotas)
+		})
+	}
+}
+
+func TestResponsesWebSocketModelSwitchChecksResolvedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, mappedModel string
+		allowed           bool
+	}{
+		{name: "same resolved address", mappedModel: "gpt-4o", allowed: true},
+		{name: "different resolved address", mappedModel: "gpt-4.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSModelSwitchTest(t, tc.mappedModel, func(ws *websocket.Conn, r *http.Request) {
+				assert.Equal(t, "/models/gpt-4o/responses", r.URL.Path)
+				assert.Equal(t, "upstream-first", r.URL.Query().Get("api_key"))
+				readResponsesWSTestEvent(t, ws)
+				completeResponsesWSTestRequest(t, ws, "", "first", 100)
+				if tc.allowed {
+					create := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "gpt-4o", create["model"])
+					completeResponsesWSTestRequest(t, ws, "", "second", 100)
+				}
+				_, _, err := ws.ReadMessage()
+				assert.Error(t, err, "a different upstream address must not reuse this connection")
+			})
+			fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AdvancedCustom: &dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{{
+				IncomingPath: "/v1/responses", UpstreamPath: "/models/{model}/responses",
+				Auth: &dto.AdvancedCustomRouteAuth{Type: dto.AdvancedCustomAuthTypeQuery, Name: "api_key", Value: "{api_key}"},
+			}}}})
+			require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{"type": constant.ChannelTypeAdvancedCustom, "settings": fixture.channel.OtherSettings}).Error)
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-billing", "input": "first"})
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "model": "ws-switch", "input": "second"})
+			event := readResponsesWSTestEvent(t, fixture.client)
+			expectedQuotas := []int{100}
+			if tc.allowed {
+				assert.Equal(t, "response.completed", event["type"])
+				expectedQuotas = append(expectedQuotas, 200)
+			} else {
+				assert.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(http.StatusForbidden), event["status"])
+				body, err := common.Marshal(event)
+				require.NoError(t, err)
+				assert.Contains(t, string(body), "reconnect required")
+				assert.NotContains(t, string(body), "upstream-first")
+				assert.NotContains(t, string(body), "api_key")
+				_, _, err = fixture.client.ReadMessage()
+				assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation), "%v", err)
+			}
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assertResponsesWSAccounting(t, fixture, expectedQuotas)
+		})
+	}
+}
+
+func TestResponsesWebSocketModelSwitchChecksResolvedHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name, header, initial, next, handshake string
+		remove, allowed                        bool
+	}{
+		{name: "authorization changed", header: "Authorization", initial: "Bearer credential-a", next: "Bearer credential-b", handshake: "Bearer credential-a"},
+		{name: "custom header changed", header: "X-Project", initial: "project-a", next: "project-b", handshake: "project-a"},
+		{name: "header added", header: "X-Project", next: "project-b"},
+		{name: "header removed", header: "X-Project", initial: "project-a", handshake: "project-a", remove: true},
+		{name: "equivalent key placeholder", header: "aUtHoRiZaTiOn", initial: "Bearer {api_key}", next: "Bearer upstream-first", handshake: "Bearer upstream-first", allowed: true},
+		{name: "equivalent header casing", header: "x-PrOjEcT", initial: "project-a", next: "project-a", handshake: "project-a", allowed: true},
+		{name: "explicit default authorization", header: "Authorization", next: "Bearer {api_key}", handshake: "Bearer upstream-first", allowed: true},
+		{name: "removed redundant authorization", header: "Authorization", initial: "Bearer {api_key}", handshake: "Bearer upstream-first", remove: true, allowed: true},
+		{name: "content type forced after overrides", header: "Content-Type", initial: "application/a", next: "application/b", handshake: "application/json", allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSModelSwitchTest(t, "gpt-4.1", func(ws *websocket.Conn, r *http.Request) {
+				assert.Equal(t, tc.handshake, r.Header.Get(tc.header))
+				initial := readResponsesWSTestEvent(t, ws)
+				assert.Equal(t, "gpt-4o", initial["model"])
+				completeResponsesWSTestRequest(t, ws, "planner", "first", 100)
+				if tc.allowed {
+					create := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "gpt-4.1", create["model"])
+					completeResponsesWSTestRequest(t, ws, "critic", "second", 100)
+				}
+				_, unexpected, err := ws.ReadMessage()
+				assert.Error(t, err, "a request with different handshake headers must not reach upstream: %s", unexpected)
+			})
+			var operations []map[string]any
+			if tc.initial != "" {
+				operations = append(operations, map[string]any{"mode": "set_header", "path": tc.header, "value": tc.initial})
+			}
+			override := map[string]any{
+				"mode": "set_header", "path": strings.ToUpper(tc.header), "value": tc.next,
+				"conditions": map[string]any{"upstream_model": "gpt-4.1"},
+			}
+			if tc.remove {
+				override["mode"] = "delete_header"
+				delete(override, "value")
+			}
+			operations = append(operations, override)
+			paramOverride, err := common.Marshal(map[string]any{"operations": operations})
+			require.NoError(t, err)
+			require.NoError(t, model.DB.Model(fixture.channel).Update("param_override", string(paramOverride)).Error)
+
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "planner", "model": "ws-billing", "input": "first"})
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "event_id": "switch-headers", "stream_id": "critic", "model": "ws-switch", "input": "second"})
+			event := readResponsesWSTestEvent(t, fixture.client)
+			expectedQuotas := []int{100}
+			if tc.allowed {
+				require.Equal(t, "response.completed", event["type"], "%v", event)
+				expectedQuotas = append(expectedQuotas, 200)
+			} else {
+				assert.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(http.StatusForbidden), event["status"])
+				assert.Equal(t, "switch-headers", event["event_id"])
+				assert.Equal(t, "critic", event["stream_id"])
+				body, err := common.Marshal(event)
+				require.NoError(t, err)
+				assert.Contains(t, string(body), "reconnect required")
+				for _, secret := range []string{"credential-a", "credential-b", "upstream-first", "upstream-second", "project-a", "project-b"} {
+					assert.NotContains(t, string(body), secret)
+				}
+				_, _, err = fixture.client.ReadMessage()
+				assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation), "%v", err)
+			}
+			fixture.closeAndWait(t)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assertResponsesWSAccounting(t, fixture, expectedQuotas)
+		})
+	}
+}
+
 // Both transports must reach the same upstream target with the same
 // credential placement and settle identically for every supported channel type.
 func TestResponsesWebSocketDialsNativeResponsesChannelTypes(t *testing.T) {
@@ -1453,6 +1799,7 @@ func TestResponsesWebSocketSteeringSettlesEachResponse(t *testing.T) {
 		name, expression, terminal, stream string
 		input                              any
 		quotas                             []int
+		runtimeHeaders                     bool
 	}{
 		{name: "tokens", expression: `tier("input", p * 2)`, terminal: "response.incomplete", quotas: []int{100, 200}, input: "Keep it short"},
 		{name: "tiered-completed", expression: `len <= 150 ? tier("small", p * 2) : tier("large", p * 4)`, terminal: "response.completed", stream: "planner", quotas: []int{100, 400}, input: "Keep it short"},
@@ -1461,9 +1808,13 @@ func TestResponsesWebSocketSteeringSettlesEachResponse(t *testing.T) {
 			map[string]any{"type": "input_image", "file_id": "file-image"},
 			map[string]any{"type": "input_file", "file_id": "file-document"},
 		}}}},
+		{name: "runtime-headers", expression: `tier("request", fixed(0.0002))`, terminal: "response.completed", stream: "planner", quotas: []int{100, 100}, input: "Keep it short", runtimeHeaders: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newResponsesWSBillingTest(t, tc.expression, func(ws *websocket.Conn, _ *http.Request) {
+			fixture := newResponsesWSBillingTest(t, tc.expression, func(ws *websocket.Conn, r *http.Request) {
+				if tc.runtimeHeaders {
+					assert.Equal(t, "Bearer steering-credential", r.Header.Get("Authorization"))
+				}
 				initial := readResponsesWSTestEvent(t, ws)
 				assert.Equal(t, "response.create", initial["type"])
 				created := map[string]any{"type": "response.created", "response": map[string]any{"id": "parent", "status": "in_progress"}}
@@ -1498,6 +1849,9 @@ func TestResponsesWebSocketSteeringSettlesEachResponse(t *testing.T) {
 				_, extra, err := ws.ReadMessage()
 				assert.Error(t, err, "automatic continuation must not send an extra create: %s", extra)
 			})
+			if tc.runtimeHeaders {
+				require.NoError(t, model.DB.Model(fixture.channel).Update("param_override", `{"operations":[{"mode":"set_header","path":"Authorization","value":"Bearer steering-credential","conditions":{"upstream_model":"gpt-4o"}}]}`).Error)
+			}
 			initial := map[string]any{"type": "response.create", "model": "ws-billing", "input": "Plan"}
 			if tc.stream != "" {
 				initial["stream_id"] = tc.stream

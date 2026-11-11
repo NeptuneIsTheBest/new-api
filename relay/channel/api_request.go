@@ -455,29 +455,53 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 // request context, and reports a rejected handshake as a *types.NewAPIError
 // carrying the upstream status code (types.NewError preserves it).
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
+	requestURL, headers, err := PrepareWssRequest(a, c, info)
+	if err != nil {
+		return nil, err
+	}
+	return DialWssRequest(c, info, requestURL, headers)
+}
+
+// PrepareWssRequest resolves the application-controlled handshake URL and
+// headers after request conversion has applied any runtime header overrides.
+// The dialer's generated WebSocket handshake fields are not included.
+func PrepareWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo) (string, http.Header, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return "", nil, fmt.Errorf("get request url failed: %w", err)
 	}
-	fullRequestURL = toWebSocketURL(fullRequestURL)
-	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
-		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
-	}
-	targetHeader := http.Header{}
-	err = a.SetupRequestHeader(c, &targetHeader, info)
+	headers := http.Header{}
+	err = a.SetupRequestHeader(c, &headers, info)
 	if err != nil {
-		return nil, fmt.Errorf("setup request header failed: %w", err)
+		return "", nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	// Normalize adaptor header names before overrides so casing cannot leave
+	// duplicate credential headers or affect connection reuse comparisons.
+	targetHeader := make(http.Header, len(headers))
+	for key, values := range headers {
+		key = http.CanonicalHeaderKey(key)
+		targetHeader[key] = append(targetHeader[key], values...)
 	}
 	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
 	// 这样可以覆盖默认的 Authorization header 设置
 	headerOverride, err := processHeaderOverride(info, c)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	for key, value := range headerOverride {
 		targetHeader.Set(key, value)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+	return fullRequestURL, targetHeader, nil
+}
+
+// DialWssRequest sends exactly the prepared application headers, allowing the
+// caller to retain the handshake settings for subsequent connection reuse.
+func DialWssRequest(c *gin.Context, info *common.RelayInfo, fullRequestURL string, targetHeader http.Header) (*websocket.Conn, error) {
+	fullRequestURL = toWebSocketURL(fullRequestURL)
+	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
+		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
+	}
 	dialer := *websocket.DefaultDialer
 	dialer.EnableCompression = info.ChannelSetting.WebSocketCompressionEnabled
 	if info.ChannelSetting.Proxy != "" {

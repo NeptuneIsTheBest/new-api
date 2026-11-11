@@ -187,13 +187,14 @@ type responsesWSSession struct {
 
 	// The first worker publishes these immutable connection bindings before
 	// connected becomes true and other request workers can start.
-	lockedModel     string
-	lockedChannelID int
-	lockedGroup     string
-	lockedKey       string
-	lockedKeyIndex  int
-	lockedContext   map[appconstant.ContextKey]any
-	lockedRoute     dto.AdvancedCustomRoute
+	lockedRequestURL     string
+	lockedRequestHeaders http.Header
+	lockedChannelID      int
+	lockedGroup          string
+	lockedKey            string
+	lockedKeyIndex       int
+	lockedContext        map[appconstant.ContextKey]any
+	lockedRoute          dto.AdvancedCustomRoute
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -473,9 +474,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	if modelName == "" {
 		return newResponsesWSInvalidRequestError(errors.New("model is required"))
 	}
-	if s.lockedModel != "" && modelName != s.lockedModel {
-		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
-	}
 	if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
 		return apiErr
 	}
@@ -511,16 +509,42 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return apiErr
 		}
 		billingPrepared = true
+		var payload []byte
 		if state.automatic {
 			meta := state.channelMeta
 			info.ChannelMeta = &meta
-			adaptor := GetAdaptor(info.ApiType)
-			adaptor.Init(info)
 		} else {
-			var payload []byte
 			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 			if apiErr != nil {
 				return apiErr
+			}
+		}
+		adaptor := GetAdaptor(info.ApiType)
+		adaptor.Init(info)
+		var requestURL string
+		var requestHeaders http.Header
+		var err error
+		if state.automatic {
+			// Steering keeps the parent's verified handshake and does not run
+			// request conversion to regenerate its runtime header overrides.
+			requestURL, err = adaptor.GetRequestURL(info)
+			if err != nil {
+				err = fmt.Errorf("get request url failed: %w", err)
+			}
+		} else {
+			requestURL, requestHeaders, err = relaychannel.PrepareWssRequest(adaptor, c, info)
+		}
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		// A model change can alter a templated URL even when the route itself
+		// is unchanged. Compare after mapping, without exposing query credentials.
+		if requestURL != s.lockedRequestURL {
+			return types.NewErrorWithStatusCode(errors.New("upstream route changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		if !state.automatic {
+			if !reflect.DeepEqual(requestHeaders, s.lockedRequestHeaders) {
+				return types.NewErrorWithStatusCode(errors.New("upstream connection settings changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 			}
 			s.rememberResponsesRequest(state, create, info)
 			if err := s.writeCreate(state, payload); err != nil {
@@ -561,7 +585,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
-			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
+			requestURL, requestHeaders, dialErr := relaychannel.PrepareWssRequest(adaptor, c, info)
+			var target *websocket.Conn
+			if dialErr == nil {
+				target, dialErr = relaychannel.DialWssRequest(c, info, requestURL, requestHeaders)
+			}
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
@@ -582,7 +610,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				state.closeCode = websocket.CloseInternalServerErr
 				return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
-			s.lockedModel, s.lockedChannelID, s.lockedGroup = modelName, channel.Id, info.UsingGroup
+			s.lockedRequestURL, s.lockedChannelID, s.lockedGroup = requestURL, channel.Id, info.UsingGroup
+			s.lockedRequestHeaders = requestHeaders.Clone()
 			s.lockedKey, s.lockedKeyIndex = info.ApiKey, info.ChannelMultiKeyIndex
 			s.lockedRoute, _ = channel.GetOtherSettings().AdvancedCustom.MatchPathForModel(c.Request.URL.Path, modelName)
 			s.lockedContext = make(map[appconstant.ContextKey]any)
@@ -900,6 +929,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	}
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)
+	}
+	if common.GetContextKeyInt(c, appconstant.ContextKeyChannelType) == appconstant.ChannelTypeAzure {
+		c.Set("api_version", channel.Other)
 	}
 	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, channel.GetSetting())
 	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
