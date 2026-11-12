@@ -357,7 +357,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				logger.LogDebug(c, "received [DONE], stopping scanner")
 				return
 			}
-			info.SetFirstResponseTime()
+			if strings.TrimSpace(data) != "" {
+				info.SetFirstResponseTime()
+			}
 			info.ReceivedResponseCount++
 
 			select {

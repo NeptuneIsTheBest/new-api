@@ -484,6 +484,110 @@ func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 	assert.Equal(t, "  {\"preserved\":true}  ", got)
 }
 
+func TestStreamScannerHandler_FirstResponseTime(t *testing.T) {
+	t.Parallel()
+
+	type streamEvent struct {
+		body          string
+		data          string
+		firstResponse bool
+	}
+	for _, tc := range []struct {
+		name       string
+		withData   bool
+		terminator string
+		endReason  relaycommon.StreamEndReason
+	}{
+		{name: "empty events then EOF", endReason: relaycommon.StreamEndReasonEOF},
+		{name: "empty events then DONE", terminator: "data: [DONE]\n\n", endReason: relaycommon.StreamEndReasonDone},
+		{name: "data after empty events then EOF", withData: true, endReason: relaycommon.StreamEndReasonEOF},
+		{name: "data after empty events then DONE", withData: true, terminator: "data: [DONE]\n\n", endReason: relaycommon.StreamEndReasonDone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := []streamEvent{
+				{body: "data:\n\n", data: ""},
+				{body: "data: \t \n\n", data: "\t "},
+				{body: "data:\ndata: \n\n", data: "\n"},
+			}
+			if tc.withData {
+				events = append(events,
+					streamEvent{body: "data:  {\"role\":\"assistant\"} \t\n\n", data: " {\"role\":\"assistant\"} \t", firstResponse: true},
+					streamEvent{body: "data: \n\n", data: ""},
+					streamEvent{body: "data: {\"content\":\"hello\"}\n\n", data: `{"content":"hello"}`},
+					streamEvent{body: "data:\ndata:\n\n", data: "\n"},
+				)
+			}
+
+			reader, writer := io.Pipe()
+			c, resp, _ := setupStreamTest(t, reader)
+			resp.Body = reader
+			info := relaycommon.GenRelayInfoOpenAI(c, nil)
+			info.ChannelMeta = &relaycommon.ChannelMeta{}
+			info.DisablePing = true
+			firstResponseTime := info.FirstResponseTime
+
+			type observation struct {
+				data              string
+				firstResponseTime time.Time
+			}
+			received := make(chan observation, len(events))
+			done := make(chan struct{})
+			t.Cleanup(func() {
+				_ = writer.Close()
+				_ = reader.Close()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					assert.Fail(t, "stream handler did not stop")
+				}
+			})
+			go func() {
+				defer close(done)
+				StreamScannerHandler(c, resp, info, func(data string, _ *StreamResult) {
+					received <- observation{data: data, firstResponseTime: info.FirstResponseTime}
+				})
+			}()
+
+			for _, event := range events {
+				_, err := io.WriteString(writer, event.body)
+				require.NoError(t, err)
+
+				// Wait for this event before supplying the next one so the scanner
+				// cannot record a later response before we inspect this snapshot.
+				select {
+				case got := <-received:
+					assert.Equal(t, event.data, got.data)
+					if event.firstResponse {
+						assert.True(t, got.firstResponseTime.After(info.StartTime))
+						firstResponseTime = got.firstResponseTime
+					}
+					assert.Equal(t, firstResponseTime, got.firstResponseTime)
+				case <-time.After(2 * time.Second):
+					require.FailNow(t, "timed out waiting for SSE event")
+				}
+			}
+
+			if tc.terminator != "" {
+				_, err := io.WriteString(writer, tc.terminator)
+				require.NoError(t, err)
+			}
+			require.NoError(t, writer.Close())
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				require.FailNow(t, "stream handler did not finish")
+			}
+
+			assert.Equal(t, firstResponseTime, info.FirstResponseTime)
+			assert.Equal(t, tc.withData, info.HasSendResponse())
+			assert.Equal(t, len(events), info.ReceivedResponseCount)
+			require.NotNil(t, info.StreamStatus)
+			assert.Equal(t, tc.endReason, info.StreamStatus.EndReason)
+			assert.NoError(t, info.StreamStatus.EndError)
+		})
+	}
+}
+
 func TestStreamScannerHandler_SSEEvents(t *testing.T) {
 	t.Parallel()
 

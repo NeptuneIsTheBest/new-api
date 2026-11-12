@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -102,6 +103,10 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 		return lane, types.NewErrorWithStatusCode(errors.New(i18n.Translate(s.lang, limitMessage)), types.ErrorCodeInvalidRequest, http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
 	}
 	reserveInput := event.Type == "response.inject" && constant.CountToken && owner != nil && !owner.upstreamDone
+	var modelName string
+	if reserveInput {
+		modelName = owner.create.Request.Model
+	}
 	s.stateMu.Unlock()
 	// Sensitive checks also apply when counting is disabled or the response has finished.
 	if event.Type == "response.inject" && setting.ShouldCheckPromptSensitive() {
@@ -112,10 +117,22 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 	}
 	var reservation responsesWSInputReservation
 	if reserveInput {
+		// Media loading stays on the serial client reader so the request worker
+		// can keep draining its inbox and cannot stall other upstream lanes.
+		estimateContext := &gin.Context{Request: s.request.Clone(s.ctx)}
+		common.SetContextKey(estimateContext, constant.ContextKeyOriginalModel, modelName)
+		defer service.CleanupFileSources(estimateContext)
+		request := dto.OpenAIResponsesRequest{Input: injectInput}
+		tokens, err := service.EstimateRequestToken(estimateContext, request.GetTokenCountMeta(), &relaycommon.RelayInfo{
+			RelayMode: relayconstant.RelayModeResponses, RelayFormat: types.RelayFormatOpenAIResponses, IsStream: true,
+		})
+		if err != nil {
+			return lane, types.NewError(err, types.ErrorCodeCountTokenFailed, types.ErrOptionWithSkipRetry())
+		}
 		// Reserve on the request worker before forwarding. Only an upstream
 		// acknowledgement can commit the input to its estimated usage.
 		reply := make(chan responsesWSInputReservation, 1)
-		control := responsesWSControl{injectInput: injectInput, reserveReply: reply}
+		control := responsesWSControl{inputTokens: tokens, reserveReply: reply}
 		select {
 		case owner.controls <- control:
 			select {
@@ -161,18 +178,12 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 // The request worker owns both the accepted estimate and pending input. Price
 // and request settings stay frozen, and rejected inputs can reuse a reservation
 // until final settlement refunds the unused quota.
-func (s *responsesWSSession) reserveInjectedInput(c *gin.Context, info *relaycommon.RelayInfo, state *responsesWSCallState, input common.RawMessage, pendingTokens int) (int, *types.NewAPIError) {
+func (s *responsesWSSession) reserveInjectedInput(c *gin.Context, info *relaycommon.RelayInfo, state *responsesWSCallState, tokens, pendingTokens int) (int, *types.NewAPIError) {
 	s.stateMu.Lock()
 	finished := state.upstreamDone || s.closing
 	s.stateMu.Unlock()
 	if finished {
 		return 0, nil
-	}
-	request := dto.OpenAIResponsesRequest{Input: input}
-	tokens, err := service.EstimateRequestToken(c, request.GetTokenCountMeta(), info)
-	common.SetContextKey(c, constant.ContextKeyPromptTokens, info.GetEstimatePromptTokens())
-	if err != nil {
-		return 0, types.NewError(err, types.ErrorCodeCountTokenFailed, types.ErrOptionWithSkipRetry())
 	}
 	totalTokens, err := common.QuotaFromFloatStrict(float64(info.GetEstimatePromptTokens()) + float64(pendingTokens) + float64(tokens))
 	if err != nil {
@@ -201,8 +212,8 @@ func (s *responsesWSSession) reserveInjectedInput(c *gin.Context, info *relaycom
 	if err != nil {
 		return 0, types.NewErrorWithStatusCode(err, types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
-	// Token estimation may fetch media while a terminal arrives. The worker
-	// has not settled yet, but a finished response no longer needs a top-up.
+	// The upstream reader may mark a terminal while quota is calculated.
+	// A finished response no longer needs a top-up.
 	s.stateMu.Lock()
 	finished = state.upstreamDone || s.closing
 	s.stateMu.Unlock()

@@ -29,6 +29,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -4645,6 +4646,184 @@ func TestResponsesWebSocketInjectInputUniqueness(t *testing.T) {
 			require.Len(t, logs, 1)
 			assert.Equal(t, reserved, logs[0].Quota)
 			assert.Equal(t, reserved, logs[0].PromptTokens, "missing upstream usage must include only accepted input")
+		})
+	}
+}
+
+func TestResponsesWebSocketInjectMediaDoesNotBlockResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		completeDuringDownload bool
+		failDownload           bool
+		wantPrompt             int
+	}{
+		{name: "active response", wantPrompt: 516},
+		{name: "completed during download", completeDuringDownload: true, wantPrompt: 2},
+		{name: "download failure", failDownload: true, wantPrompt: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousMedia, previousNonStream, previousLimit := constant.GetMediaToken, constant.GetMediaTokenNotStream, constant.MaxFileDownloadMB
+			previousFetch, previousWorker := *system_setting.GetFetchSetting(), system_setting.WorkerUrl
+			previousQuota := *operation_setting.GetQuotaSetting()
+			previousCache := common.GetDiskCacheConfig()
+			t.Cleanup(func() {
+				constant.GetMediaToken, constant.GetMediaTokenNotStream, constant.MaxFileDownloadMB = previousMedia, previousNonStream, previousLimit
+				*system_setting.GetFetchSetting(), system_setting.WorkerUrl = previousFetch, previousWorker
+				*operation_setting.GetQuotaSetting() = previousQuota
+				common.SetDiskCacheConfig(previousCache)
+			})
+			constant.GetMediaToken, constant.GetMediaTokenNotStream, constant.MaxFileDownloadMB = true, false, 1
+			system_setting.GetFetchSetting().AllowPrivateIp = true
+			system_setting.GetFetchSetting().AllowedPorts = []string{"1-65535"}
+			system_setting.WorkerUrl = ""
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
+			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: true, ThresholdMB: 0, MaxSizeMB: 16, Path: t.TempDir()})
+			service.InitHttpClient()
+
+			mediaRequested, releaseMedia := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseMedia) })
+			defer release()
+			media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/blocked" {
+					close(mediaRequested)
+					<-releaseMedia
+					if tc.failDownload {
+						w.WriteHeader(http.StatusBadGateway)
+						return
+					}
+				}
+				w.Header().Set("Content-Type", "audio/mpeg")
+				_, _ = io.WriteString(w, "media content")
+			}))
+			t.Cleanup(media.Close)
+
+			ready := make(chan struct{})
+			var fixture *responsesWSBillingTest
+			fixture = newResponsesWSBillingTest(t, `tier("input", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				<-ready
+				for _, lane := range []string{"a", "b"} {
+					create := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, lane, create["stream_id"])
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": lane, "response": map[string]any{"id": lane, "status": "in_progress"}})
+				}
+				select {
+				case <-mediaRequested:
+				case <-time.After(3 * time.Second):
+					t.Error("injected media download did not start")
+					return
+				}
+				// Two A events exceed its single-slot inbox if its worker is downloading.
+				for _, delta := range []string{"first", "second"} {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "stream_id": "a", "response_id": "a", "delta": delta})
+				}
+				sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.output_text.delta", "stream_id": "b", "response_id": "b", "delta": "other"})
+				completeResponsesWSTestRequest(t, ws, "b", "b", 3)
+				if tc.completeDuringDownload {
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "stream_id": "a", "response": map[string]any{"id": "a", "status": "completed"}})
+				}
+				if !tc.failDownload {
+					injection := readResponsesWSTestEvent(t, ws)
+					assert.Equal(t, "media", injection["event_id"])
+					assert.Equal(t, "a", injection["response_id"])
+					assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, tc.wantPrompt+3)
+					if !tc.completeDuringDownload {
+						sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "a"})
+					}
+				}
+				followup := readResponsesWSTestEvent(t, ws)
+				// The next client frame proves submitResponseControl returned and
+				// cleaned its own media, even while the original worker remains active.
+				cachedFiles, err := filepath.Glob(filepath.Join(common.GetDiskCacheDir(), "file-*.tmp"))
+				require.NoError(t, err)
+				assert.Empty(t, cachedFiles)
+				if tc.completeDuringDownload {
+					assert.Equal(t, "response.create", followup["type"])
+					assert.Equal(t, "a", followup["stream_id"])
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.created", "stream_id": "a", "response": map[string]any{"id": "next", "status": "in_progress"}})
+					// A late acknowledgement must not add the old media to the new response.
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "a"})
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "stream_id": "a", "response": map[string]any{"id": "next", "status": "completed"}})
+				} else {
+					assert.Equal(t, "response.inject", followup["type"])
+					assert.Equal(t, "followup", followup["event_id"], "failed media must never reach upstream")
+					assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, tc.wantPrompt+3)
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.inject.created", "response_id": "a"})
+					sendResponsesWSTestEvent(t, ws, map[string]any{"type": "response.completed", "stream_id": "a", "response": map[string]any{"id": "a", "status": "completed"}})
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			close(ready)
+			for _, lane := range []string{"a", "b"} {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": lane, "model": "ws-billing", "input": "hey"})
+				require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			// Each audio file contributes 256 tokens; the original ws-billing
+			// model estimates "hey" as two, unlike the mapped upstream gpt-4o.
+			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
+				"type": "response.inject", "response_id": "a", "event_id": "media",
+				"input": []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": []any{
+					map[string]any{"type": "input_text", "text": "hey"},
+					map[string]any{"type": "input_file", "file_url": media.URL + "/cached"},
+					map[string]any{"type": "input_file", "file_url": media.URL + "/blocked"},
+				}}},
+			})
+			wantEvents := []string{"a:response.output_text.delta", "a:response.output_text.delta", "b:response.output_text.delta", "b:response.completed"}
+			if tc.completeDuringDownload {
+				wantEvents = append(wantEvents, "a:response.completed")
+			}
+			var events []string
+			for range len(wantEvents) {
+				event := readResponsesWSTestEvent(t, fixture.client)
+				events = append(events, fmt.Sprintf("%v:%v", event["stream_id"], event["type"]))
+			}
+			assert.ElementsMatch(t, wantEvents, events, "both lanes must drain before releasing the download")
+			cachedFiles, err := filepath.Glob(filepath.Join(common.GetDiskCacheDir(), "file-*.tmp"))
+			require.NoError(t, err)
+			require.Len(t, cachedFiles, 1, "the first file is cached while the second download is blocked")
+			release()
+			if tc.completeDuringDownload {
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.create", "stream_id": "a", "model": "ws-billing", "input": "hey", "previous_response_id": "a"})
+				var nextEvents []any
+				for range 3 {
+					nextEvents = append(nextEvents, readResponsesWSTestEvent(t, fixture.client)["type"])
+				}
+				assert.ElementsMatch(t, []any{"response.created", "response.inject.created", "response.completed"}, nextEvents)
+			} else {
+				reply := readResponsesWSTestEvent(t, fixture.client)
+				input := []any{}
+				if tc.failDownload {
+					require.Equal(t, "error", reply["type"])
+					assert.Equal(t, "media", reply["event_id"])
+					assert.Equal(t, "a", reply["response_id"])
+					require.IsType(t, map[string]any{}, reply["error"])
+					assert.Equal(t, string(types.ErrorCodeCountTokenFailed), reply["error"].(map[string]any)["code"])
+					input = []any{map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "yes"}}
+				} else {
+					require.Equal(t, "response.inject.created", reply["type"])
+				}
+				sendResponsesWSTestEvent(t, fixture.client, map[string]any{"type": "response.inject", "response_id": "a", "event_id": "followup", "input": input})
+				require.Equal(t, "response.inject.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			fixture.closeAndWait(t)
+			wantPrompts := map[string]int{"responses-ws-billing-ws-0": tc.wantPrompt, "responses-ws-billing-ws-1": 3}
+			wantQuota := tc.wantPrompt + 3
+			if tc.completeDuringDownload {
+				wantPrompts["responses-ws-billing-ws-2"] = 2
+				wantQuota += 2
+			}
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, len(wantPrompts))
+			prompts := make(map[string]int)
+			for _, log := range logs {
+				prompts[log.RequestId] = log.PromptTokens
+				assert.Equal(t, log.PromptTokens, log.Quota)
+			}
+			assert.Equal(t, wantPrompts, prompts)
+			assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, wantQuota)
 		})
 	}
 }

@@ -91,7 +91,7 @@ type responsesWSMessage struct {
 type responsesWSControl struct {
 	body              []byte
 	eventID, streamID string
-	injectInput       common.RawMessage
+	inputTokens       int
 	reserveReply      chan responsesWSInputReservation
 }
 
@@ -693,7 +693,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			continue
 		case control := <-state.controls:
 			if control.reserveReply != nil {
-				tokens, apiErr := s.reserveInjectedInput(c, info, state, control.injectInput, pendingInputTokens)
+				tokens, apiErr := s.reserveInjectedInput(c, info, state, control.inputTokens, pendingInputTokens)
 				// The combined total was bounded before reservation succeeded.
 				pendingInputTokens += tokens
 				control.reserveReply <- responsesWSInputReservation{tokens: tokens, err: apiErr}
