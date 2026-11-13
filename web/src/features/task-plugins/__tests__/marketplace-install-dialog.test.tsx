@@ -107,6 +107,8 @@ function renderDialog(
   }
 }
 afterEach(() => {
+  // sonner keeps toasts in module state and replays undismissed ones to a
+  // newly mounted Toaster, so toasts from earlier tests must not carry over.
   toast.dismiss()
   clients.forEach((client) => client.clear())
   clients.length = 0
