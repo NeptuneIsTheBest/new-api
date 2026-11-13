@@ -2357,9 +2357,11 @@ export function ChannelMutateDrawer({
       render={({ field }) => (
         <FormItem className='flex items-center justify-between gap-4 px-4 py-3'>
           <div className='space-y-0.5'>
-            <FormLabel>{t('Enable WebSocket compression')}</FormLabel>
+            <FormLabel>{t('WebSocket message compression')}</FormLabel>
             <FormDescription>
-              {t('Compress upstream WebSocket messages.')}
+              {t(
+                'Compress WebSocket messages exchanged with the upstream to reduce data transfer. Automatically use uncompressed messages if the upstream does not support compression.'
+              )}
             </FormDescription>
           </div>
           <FormControl>
@@ -2387,8 +2389,10 @@ export function ChannelMutateDrawer({
           checked={field.value === true}
           onCheckedChange={field.onChange}
           disabled={sensitiveLocked || isSubmitting}
-          label={t('Enable Responses request compression')}
-          description={t('Compress Responses request bodies sent upstream.')}
+          label={t('Responses request body compression')}
+          description={t(
+            'Use Zstd to compress Responses request bodies sent upstream and reduce data transfer. Enable only if the upstream supports Zstd.'
+          )}
           className='px-4 py-3'
         />
       )}
