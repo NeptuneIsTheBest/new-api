@@ -2,13 +2,8 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
@@ -19,44 +14,81 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 )
 
-func TestModelJSONRoutingPreservesValidationAndReplay(t *testing.T) {
+type streamedBodyStorage struct {
+	common.BodyStorage
+}
+
+func (streamedBodyStorage) Bytes() ([]byte, error) {
+	return nil, errors.New("disk body must be read through readers")
+}
+
+func TestJSONModelRoutingUsesReadersForDiskBodies(t *testing.T) {
 	previous := common.GetDiskCacheConfig()
 	t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+	large := strings.Repeat("image-data", 32<<10)
+	prefix := `{"model":"model-a",`
+	acrossRead := prefix + strings.Repeat(" ", (64<<10)-len(prefix)-3) + `"\u006d\u006f\u0064\u0065\u006c":"model-b"}`
 	for _, disk := range []bool{false, true} {
-		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
-			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
-			for _, tc := range []struct{ name, body, model, group, wantError string }{
-				{name: "large field before routing fields", body: `{"input":"` + strings.Repeat("a", 1<<20) + `","mo\u0064el":"m","group":"g"}`, model: "m", group: "g"},
-				{name: "nested and duplicate group", body: `{"nested":[{"model":"nested"}],"model":"m","group":"first","group":"last"}`, model: "m", group: "first"},
-				{name: "null fields", body: `{"model":null,"group":null}`},
-				{name: "missing fields", body: `{"Model":"case sensitive"}`},
-				{name: "duplicate escaped model", body: `{"model":"m","mo\u0064el":"m"}`, wantError: "model must be provided once"},
-				{name: "duplicate before type error", body: `{"model":1,"model":"m"}`, wantError: "model must be provided once"},
-				{name: "model type", body: `{"model":[]}`, wantError: "field model must be a string"},
-				{name: "group type", body: `{"group":true}`, wantError: "field group must be a string"},
-				{name: "invalid after routing fields", body: `{"model":"m","ignored":[1,]}`, wantError: "invalid JSON request body"},
-				{name: "trailing data", body: `{"model":"m"}null`, wantError: "invalid JSON request body"},
+		storageName := "memory"
+		if disk {
+			storageName = "file"
+		}
+		t.Run(storageName, func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 16, Path: t.TempDir()})
+			for _, tt := range []struct {
+				name, body, model, group, wantError string
+			}{
+				{"large body", `{"model":"model-a","group":"g","stream":true,"background":false,"input":"` + large + `"}`, "model-a", "g", ""},
+				{"fields after payload", `{"input":"` + large + `","model":"model-a","group":"g"}`, "model-a", "g", ""},
+				{"escaped model key", `{"\u006d\u006f\u0064\u0065\u006c":"model-a"}`, "model-a", "", ""},
+				{"nested models", `{"model":"model-a","nested":[{"model":"x"},{"model":"y"}],"text":"\"model\":false"}`, "model-a", "", ""},
+				{"long unrelated key", `{"` + large + `":"x","model":"model-a"}`, "model-a", "", ""},
+				{"duplicate model", `{"model":"model-a","model":"model-b"}`, "", "", "model must be provided once"},
+				{"duplicate key across reads", acrossRead, "", "", "model must be provided once"},
+				{"wrong model type", `{"model":false}`, "", "", "field model must be a string"},
+				{"wrong group type", `{"model":"model-a","group":[]}`, "", "", "field group must be a string"},
+				{"trailing JSON", `{"model":"model-a"} {}`, "", "", "invalid JSON request body"},
+				{"truncated payload", `{"model":"model-a","input":"` + large, "", "", "invalid JSON request body"},
 			} {
-				t.Run(tc.name, func(t *testing.T) {
+				t.Run(tt.name, func(t *testing.T) {
+					storage, err := common.CreateBodyStorage([]byte(tt.body))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, storage.Close()) })
+					require.Equal(t, disk, storage.IsDisk())
 					c, _ := gin.CreateTestContext(httptest.NewRecorder())
-					c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tt.body))
 					c.Request.Header.Set("Content-Type", "application/json")
-					defer common.CleanupBodyStorage(c)
-					result, err := getModelFromJSONBody(c)
-					if tc.wantError != "" {
-						require.EqualError(t, err, tc.wantError)
+					if disk {
+						c.Set(common.KeyBodyStorage, streamedBodyStorage{storage})
+					} else {
+						c.Set(common.KeyBodyStorage, storage)
+					}
+					request, err := getModelFromJSONBody(c)
+					if tt.wantError != "" {
+						require.EqualError(t, err, tt.wantError)
 						return
 					}
 					require.NoError(t, err)
-					assert.Equal(t, &ModelRequest{Model: tc.model, Group: tc.group}, result)
-					body, err := io.ReadAll(c.Request.Body)
+					assert.Equal(t, tt.model, request.Model)
+					assert.Equal(t, tt.group, request.Group)
+					if tt.name == "large body" {
+						stream, background := jsonBodyBoolFlags(c)
+						assert.True(t, stream)
+						assert.False(t, background)
+					}
+					var decoded ModelRequest
+					require.NoError(t, common.UnmarshalBodyReusableNoCopy(c, &decoded))
+					assert.Equal(t, *request, decoded)
+					replayed, err := io.ReadAll(c.Request.Body)
 					require.NoError(t, err)
-					assert.Equal(t, tc.body, string(body))
-					repeated, err := getModelFromJSONBody(c)
-					require.NoError(t, err)
-					assert.Equal(t, result, repeated)
+					assert.Equal(t, tt.body, string(replayed))
 				})
 			}
 		})
@@ -442,4 +474,46 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "alpha", c.GetString("task_plugin_key"), "the first bound candidate executes regardless of the earlier pin")
 	assert.Equal(t, "alpha", c.MustGet(jsplugin.ContextKeyPinnedEndpoint).(jsplugin.PinnedEndpoint).Plugin.Meta.Key)
+}
+
+func TestModelJSONRoutingPreservesValidationAndReplay(t *testing.T) {
+	previous := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+	for _, disk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+			for _, tc := range []struct{ name, body, model, group, wantError string }{
+				{name: "large field before routing fields", body: `{"input":"` + strings.Repeat("a", 1<<20) + `","mo\u0064el":"m","group":"g"}`, model: "m", group: "g"},
+				{name: "nested and duplicate group", body: `{"nested":[{"model":"nested"}],"model":"m","group":"first","group":"last"}`, model: "m", group: "first"},
+				{name: "null fields", body: `{"model":null,"group":null}`},
+				{name: "missing fields", body: `{"Model":"case sensitive"}`},
+				{name: "duplicate escaped model", body: `{"model":"m","mo\u0064el":"m"}`, wantError: "model must be provided once"},
+				{name: "duplicate before type error", body: `{"model":1,"model":"m"}`, wantError: "model must be provided once"},
+				{name: "model type", body: `{"model":[]}`, wantError: "field model must be a string"},
+				{name: "group type", body: `{"group":true}`, wantError: "field group must be a string"},
+				{name: "invalid after routing fields", body: `{"model":"m","ignored":[1,]}`, wantError: "invalid JSON request body"},
+				{name: "trailing data", body: `{"model":"m"}null`, wantError: "invalid JSON request body"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+					c.Request.Header.Set("Content-Type", "application/json")
+					defer common.CleanupBodyStorage(c)
+					result, err := getModelFromJSONBody(c)
+					if tc.wantError != "" {
+						require.EqualError(t, err, tc.wantError)
+						return
+					}
+					require.NoError(t, err)
+					assert.Equal(t, &ModelRequest{Model: tc.model, Group: tc.group}, result)
+					body, err := io.ReadAll(c.Request.Body)
+					require.NoError(t, err)
+					assert.Equal(t, tc.body, string(body))
+					repeated, err := getModelFromJSONBody(c)
+					require.NoError(t, err)
+					assert.Equal(t, result, repeated)
+				})
+			}
+		})
+	}
 }

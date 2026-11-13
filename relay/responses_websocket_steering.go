@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -14,14 +15,15 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type responsesWSSteerSubmission struct {
@@ -51,6 +53,8 @@ func (p *responsesWSSteering) input() []common.RawMessage {
 type responsesWSSteerUpdate struct {
 	create responsesWSCreateRequest
 	reply  chan *types.NewAPIError
+	steps  []relaycommon.RequestPluginStep
+	record []relaycommon.RequestPluginRecord
 }
 
 func (s *responsesWSSession) sendSteerError(body []byte, apiErr *types.NewAPIError) {
@@ -170,11 +174,12 @@ func responsesWSContinuationRequest(base responsesWSCreateRequest, items []commo
 	return create, nil
 }
 
-func (s *responsesWSSession) rememberResponsesRequest(state *responsesWSCallState, create responsesWSCreateRequest, info *relaycommon.RelayInfo) {
+func (s *responsesWSSession) rememberResponsesRequest(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest, info *relaycommon.RelayInfo) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	state.create = create
 	state.channelMeta = *info.ChannelMeta
+	state.inputPlugins = requestplugin.NewSocketInput(c, info)
 	state.reserveMultiplier, _ = operation_setting.InputPreConsumeMultiplier()
 }
 
@@ -197,11 +202,36 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 		s.stateMu.Unlock()
 		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)))
 	}
+	parent := stream.current
+	inputPlugins := parent.inputPlugins
+	s.stateMu.Unlock()
+	controlContext := &gin.Context{Request: s.request.Clone(s.ctx)}
+	controlContext.Request.Method = http.MethodPost
+	controlContext.Set(common.RequestIdKey, s.requestID)
+	checked, steps, record, inputErr := inputPlugins.Check(controlContext, input)
+	if inputErr != nil {
+		return inputErr
+	}
+	if !bytes.Equal(input, checked) {
+		var err error
+		body, err = sjson.SetRawBytes(body, "input", checked)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeRequestPluginFailed, types.ErrOptionWithSkipRetry())
+		}
+		_, input, valid = parseResponsesWSSteer(body)
+		if !valid {
+			return types.NewErrorWithStatusCode(errors.New(i18n.Translate(s.lang, i18n.MsgRelayRequestPluginFailed)), types.ErrorCodeRequestPluginFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+		}
+	}
+	s.stateMu.Lock()
+	if stream.current != parent || parent.upstreamDone || s.closing {
+		s.stateMu.Unlock()
+		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)))
+	}
 	if s.steerCount >= responsesWSMaxQueued || int64(len(input)) > s.maxQueuedBytes-s.steerBytes {
 		s.stateMu.Unlock()
 		return types.NewErrorWithStatusCode(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerLimit)), types.ErrorCodeInvalidRequest, http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
 	}
-	parent := stream.current
 	pending := stream.steering
 	if pending != nil && pending.parentID != parentID {
 		s.stateMu.Unlock()
@@ -232,6 +262,7 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 	if apiErr == nil && first {
 		reservation = &responsesWSCallState{streamID: parent.streamID, previousResponseID: parentID,
 			automatic: true, parentID: parentID, parentDone: parent.done, create: create, channelMeta: parent.channelMeta,
+			inputPlugins: inputPlugins, inputSteps: steps, inputRecord: record,
 			reserveMultiplier: parent.reserveMultiplier, inbox: make(chan responsesWSMessage, 1),
 			controls: make(chan responsesWSControl, 1), done: make(chan struct{}), ready: make(chan *types.NewAPIError, 1),
 			updates: make(chan responsesWSSteerUpdate), abort: make(chan struct{})}
@@ -249,7 +280,7 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 				return types.NewError(s.ctx.Err(), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
 		} else {
-			apiErr = s.updateSteerReservation(reservation, create)
+			apiErr = s.updateSteerReservation(reservation, create, steps, record)
 		}
 	}
 	if apiErr != nil {
@@ -271,8 +302,8 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 	return nil
 }
 
-func (s *responsesWSSession) updateSteerReservation(state *responsesWSCallState, create responsesWSCreateRequest) *types.NewAPIError {
-	update := responsesWSSteerUpdate{create: create, reply: make(chan *types.NewAPIError, 1)}
+func (s *responsesWSSession) updateSteerReservation(state *responsesWSCallState, create responsesWSCreateRequest, steps []relaycommon.RequestPluginStep, record []relaycommon.RequestPluginRecord) *types.NewAPIError {
+	update := responsesWSSteerUpdate{create: create, reply: make(chan *types.NewAPIError, 1), steps: steps, record: record}
 	select {
 	case state.updates <- update:
 		select {
@@ -330,15 +361,10 @@ func (s *responsesWSSession) resumeSteeringCreate(streamID string, body []byte) 
 
 // Re-estimate queued input with the existing price snapshot. Changing queued
 // text must neither reload administrator prices nor replace its funding source.
-func updateResponsesWSSteerReservation(c *gin.Context, info *relaycommon.RelayInfo, state *responsesWSCallState, create responsesWSCreateRequest) *types.NewAPIError {
+func (s *responsesWSSession) updateResponsesWSSteerReservation(c *gin.Context, info *relaycommon.RelayInfo, state *responsesWSCallState, create responsesWSCreateRequest) *types.NewAPIError {
 	meta := &types.TokenCountMeta{TokenType: types.TokenTypeTokenizer}
-	if constant.CountToken || setting.ShouldCheckPromptSensitive() {
+	if constant.CountToken {
 		meta = create.Request.GetTokenCountMeta()
-	}
-	if setting.ShouldCheckPromptSensitive() {
-		if sensitive, _ := service.CheckSensitiveText(meta.CombineText); sensitive {
-			return types.NewError(errors.New("user sensitive words detected"), types.ErrorCodeSensitiveWordsDetected)
-		}
 	}
 	tokens, err := service.EstimateRequestToken(c, meta, info)
 	if err != nil {
@@ -374,10 +400,20 @@ func updateResponsesWSSteerReservation(c *gin.Context, info *relaycommon.RelayIn
 			return apiErr
 		}
 	}
+	storage, err := common.CreateBodyStorage(create.Body)
+	if err != nil {
+		return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+	}
+	common.CleanupBodyStorage(c)
+	c.Set(common.KeyBodyStorage, storage)
+	c.Request.Body = io.NopCloser(storage)
+	c.Request.ContentLength = int64(len(create.Body))
 	info.Request, info.BillingRequestInput, info.TieredBillingSnapshot = &create.Request, &request, snapshot
 	info.SetEstimatePromptTokens(tokens)
 	info.PriceData.QuotaToPreConsume = quota
+	s.stateMu.Lock()
 	state.create = create
+	s.stateMu.Unlock()
 	return nil
 }
 
@@ -447,7 +483,7 @@ func (s *responsesWSSession) handleSteeringEvent(incoming responsesWSMessage) bo
 	}
 	s.stateMu.Unlock()
 	if update != nil {
-		if apiErr := s.updateSteerReservation(update, create); apiErr != nil {
+		if apiErr := s.updateSteerReservation(update, create, nil, nil); apiErr != nil {
 			s.shutdown(websocket.CloseInternalServerErr, "continuation reservation failed")
 		}
 	}

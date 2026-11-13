@@ -10,6 +10,7 @@
   },
   "globals": {
     "console": "readonly",
+    "TextEncoder": "readonly",
     "utils": "readonly"
   },
   "rules": {

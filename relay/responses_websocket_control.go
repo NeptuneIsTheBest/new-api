@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"slices"
@@ -12,13 +13,14 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Inject and interrupt acknowledgements can follow the response's terminal. Retain only
@@ -28,6 +30,7 @@ type responsesWSPendingControl struct {
 	eventType, responseID, eventID, streamID string
 	size                                     int64
 	inputTokens                              int
+	inputPlugins                             *requestplugin.SocketInput
 }
 
 type responsesWSInputReservation struct {
@@ -68,11 +71,13 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 		return streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, invalidMessage)))
 	}
 	s.stateMu.Lock()
-	lane, known := s.completedResponses[event.ResponseID]
+	completed, known := s.completedResponses[event.ResponseID]
+	lane, inputPlugins := completed.streamID, completed.inputPlugins
 	for _, pending := range s.responseControls {
 		if pending.responseID == event.ResponseID {
 			// Outstanding acknowledgements can outlive completion history.
 			lane, known = pending.streamID, true
+			inputPlugins = pending.inputPlugins
 			break
 		}
 	}
@@ -80,10 +85,12 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 	for id, stream := range s.streams {
 		if state := stream.current; state != nil && state.responseID == event.ResponseID {
 			lane, known, owner = id, true, state
+			inputPlugins = state.inputPlugins
 			break
 		}
 		if stream.lastResponseID == event.ResponseID {
 			lane, known = id, true
+			inputPlugins = stream.lastInputPlugins
 		}
 	}
 	if !known || streamID != "" && streamID != lane || s.closing {
@@ -108,14 +115,32 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 		modelName = owner.create.Request.Model
 	}
 	s.stateMu.Unlock()
-	// Sensitive checks also apply when counting is disabled or the response has finished.
-	if event.Type == "response.inject" && setting.ShouldCheckPromptSensitive() {
-		request := dto.OpenAIResponsesRequest{Input: injectInput}
-		if sensitive, _ := service.CheckSensitiveText(request.GetTokenCountMeta().CombineText); sensitive {
-			return lane, types.NewError(errors.New("user sensitive words detected"), types.ErrorCodeSensitiveWordsDetected, types.ErrOptionWithSkipRetry())
+	var inputSteps []relaycommon.RequestPluginStep
+	var inputRecord []relaycommon.RequestPluginRecord
+	if event.Type == "response.inject" {
+		// Check even when counting is disabled or the response has finished.
+		controlContext := &gin.Context{Request: s.request.Clone(s.ctx)}
+		controlContext.Request.Method = http.MethodPost
+		controlContext.Set(common.RequestIdKey, s.requestID)
+		checked, steps, record, apiErr := inputPlugins.Check(controlContext, injectInput)
+		if apiErr != nil {
+			return lane, apiErr
+		}
+		inputSteps, inputRecord = steps, record
+		if !bytes.Equal(checked, injectInput) {
+			if !gjson.ParseBytes(checked).IsArray() {
+				return lane, types.NewErrorWithStatusCode(errors.New(i18n.Translate(s.lang, i18n.MsgRelayRequestPluginFailed)), types.ErrorCodeRequestPluginFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+			}
+			var err error
+			body, err = sjson.SetRawBytes(body, "input", checked)
+			if err != nil {
+				return lane, types.NewError(err, types.ErrorCodeRequestPluginFailed, types.ErrOptionWithSkipRetry())
+			}
+			injectInput = checked
 		}
 	}
 	var reservation responsesWSInputReservation
+	tokens := 0
 	if reserveInput {
 		// Media loading stays on the serial client reader so the request worker
 		// can keep draining its inbox and cannot stall other upstream lanes.
@@ -123,16 +148,22 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 		common.SetContextKey(estimateContext, constant.ContextKeyOriginalModel, modelName)
 		defer service.CleanupFileSources(estimateContext)
 		request := dto.OpenAIResponsesRequest{Input: injectInput}
-		tokens, err := service.EstimateRequestToken(estimateContext, request.GetTokenCountMeta(), &relaycommon.RelayInfo{
+		var err error
+		tokens, err = service.EstimateRequestToken(estimateContext, request.GetTokenCountMeta(), &relaycommon.RelayInfo{
 			RelayMode: relayconstant.RelayModeResponses, RelayFormat: types.RelayFormatOpenAIResponses, IsStream: true,
 		})
 		if err != nil {
 			return lane, types.NewError(err, types.ErrorCodeCountTokenFailed, types.ErrOptionWithSkipRetry())
 		}
+	}
+	s.stateMu.Lock()
+	activeOwner := owner != nil && !owner.upstreamDone
+	s.stateMu.Unlock()
+	if event.Type == "response.inject" && activeOwner && (reserveInput || len(inputSteps) > 0) {
 		// Reserve on the request worker before forwarding. Only an upstream
 		// acknowledgement can commit the input to its estimated usage.
 		reply := make(chan responsesWSInputReservation, 1)
-		control := responsesWSControl{inputTokens: tokens, reserveReply: reply}
+		control := responsesWSControl{inputTokens: tokens, reserveReply: reply, inputSteps: inputSteps, inputRecord: inputRecord}
 		select {
 		case owner.controls <- control:
 			select {
@@ -164,6 +195,7 @@ func (s *responsesWSSession) submitResponseControl(body []byte, event responsesW
 	// can release pending capacity but cannot consume the slot checked above.
 	s.responseControls = append(s.responseControls, &responsesWSPendingControl{
 		eventType: event.Type, responseID: event.ResponseID, eventID: event.EventID, streamID: lane, size: size, inputTokens: reservation.tokens,
+		inputPlugins: inputPlugins,
 	})
 	s.responseControlBytes += size
 	s.stateMu.Unlock()

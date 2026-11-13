@@ -4433,7 +4433,7 @@ func TestResponsesWebSocketInjectEstimatesStayWithGeneration(t *testing.T) {
 	assert.Equal(t, []int{4, 5, 6}, []int{logs[0].PromptTokens, logs[1].PromptTokens, logs[2].PromptTokens})
 }
 
-func TestResponsesWebSocketInjectSensitiveCheck(t *testing.T) {
+func TestResponsesWebSocketInjectPluginFilter(t *testing.T) {
 	const toolInput = `[{"type":"function_call_output","call_id":"call_1","output":"forbidden"}]`
 	for _, tc := range []struct {
 		name, input                                                     string
@@ -4451,14 +4451,11 @@ func TestResponsesWebSocketInjectSensitiveCheck(t *testing.T) {
 		{name: "empty input", input: `[]`, allow: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			previousSensitive, previousPrompt, previousWords := setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords
 			previousQuota := *operation_setting.GetQuotaSetting()
 			t.Cleanup(func() {
-				setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords = previousSensitive, previousPrompt, previousWords
 				*operation_setting.GetQuotaSetting() = previousQuota
 			})
-			setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled = !tc.disableSensitive, !tc.disablePrompt
-			setting.SensitiveWords = []string{"forbidden"}
+			configureResponsesWSInputFilter(t, !tc.disableSensitive && !tc.disablePrompt)
 			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
 			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
 
@@ -4512,8 +4509,8 @@ func TestResponsesWebSocketInjectSensitiveCheck(t *testing.T) {
 				assert.Equal(t, "planner", reply["stream_id"])
 				require.IsType(t, map[string]any{}, reply["error"])
 				apiErr := reply["error"].(map[string]any)
-				assert.Equal(t, string(types.ErrorCodeSensitiveWordsDetected), apiErr["code"])
-				assert.Equal(t, "user sensitive words detected", apiErr["message"])
+				assert.Equal(t, string(types.ErrorCodeRequestRejected), apiErr["code"])
+				assert.Contains(t, apiErr["message"], "Blocked")
 				assertResponsesWSReservedQuota(t, fixture, nil, 100000, 3000, reserved)
 			}
 			sendResponsesWSTestEvent(t, fixture.client, map[string]any{
@@ -4558,14 +4555,11 @@ func TestResponsesWebSocketInjectInputUniqueness(t *testing.T) {
 		{name: "single input with nested field", members: `"input": ` + input + `, "vendor":{"input":[],"number":9007199254740993}`, inputTokens: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			previousSensitive, previousPrompt, previousWords := setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords
 			previousQuota := *operation_setting.GetQuotaSetting()
 			t.Cleanup(func() {
-				setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled, setting.SensitiveWords = previousSensitive, previousPrompt, previousWords
 				*operation_setting.GetQuotaSetting() = previousQuota
 			})
-			setting.CheckSensitiveEnabled, setting.CheckSensitiveOnPromptEnabled = tc.sensitive, tc.sensitive
-			setting.SensitiveWords = []string{"forbidden"}
+			configureResponsesWSInputFilter(t, tc.sensitive)
 			operation_setting.GetQuotaSetting().TrustQuotaUSD = 0
 			operation_setting.GetQuotaSetting().PreConsumeMultiplier = 1
 			candidate := `{"type":"response.inject", "response_id":"first","stream_id":"planner","event_id":"candidate",` + tc.members + `}`
