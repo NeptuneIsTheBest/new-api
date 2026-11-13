@@ -70,7 +70,6 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.2 // indirect
-	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tiktoken-go/tokenizer v0.10.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
@@ -94,10 +93,11 @@ require (
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.1
-	github.com/Calcium-Ion/go-epay v0.0.5
-	github.com/Calcium-Ion/moejs v0.1.0-alpha.7
+	github.com/Calcium-Ion/go-epay v0.0.6
 	github.com/ClickHouse/clickhouse-go/v2 v2.50.0
-	github.com/MoeForge/moego v0.1.0-alpha.1
+	github.com/HugoSmits86/nativewebp v1.3.0
+	github.com/MoeForge/moego v0.1.0-alpha.2
+	github.com/MoeForge/moejs v0.1.0
 	github.com/QuantumNous/new-api/relaykit v0.0.0
 	github.com/QuantumNous/new-api/tokenkit v0.0.0
 	github.com/abema/go-mp4 v1.7.4
@@ -136,6 +136,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.20.3
+	github.com/ledongthuc/pdf v0.0.0-20261020125853-5e46805f718e
 	github.com/mewkiz/flac v1.0.14
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
 	github.com/openai/openai-go v1.12.0
@@ -151,6 +152,7 @@ require (
 	github.com/tcolgate/mp3 v0.0.0-20170426193717-e79c5a46d300
 	github.com/thanhpk/randstr v1.0.7
 	github.com/tidwall/gjson v1.20.0
+	github.com/tidwall/sjson v1.2.5
 	github.com/waffo-com/waffo-go v1.6.0
 	github.com/waffo-com/waffo-pancake-sdk-go v0.9.0
 	github.com/yapingcat/gomedia v0.0.0-20240906162731-17feea57090c

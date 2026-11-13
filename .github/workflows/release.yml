@@ -114,7 +114,7 @@ jobs:
             LDFLAGS="-s -w $LDFLAGS"
           fi
           mkdir -p release-assets
-          go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "$LDFLAGS" -o "release-assets/$BINARY_NAME"
+          go build -pgo="$(go list -m -f '{{.Dir}}' github.com/MoeForge/moejs)/default.pgo" -ldflags "$LDFLAGS" -o "release-assets/$BINARY_NAME"
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -135,6 +135,11 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
       - name: Download binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -149,6 +154,9 @@ jobs:
           sha256sum "new-api-macos-$VERSION" > checksums-macos.txt
           sha256sum "new-api-$VERSION.exe" > checksums-windows.txt
           sha256sum --check checksums-linux.txt checksums-macos.txt checksums-windows.txt
+
+      - name: Include third-party licenses
+        run: cp THIRD-PARTY-LICENSES.md release-assets/
 
       - name: Name release artifact
         id: artifact
