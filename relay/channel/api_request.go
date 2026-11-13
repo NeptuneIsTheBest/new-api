@@ -519,6 +519,17 @@ type WebSocketPreparer interface {
 	PrepareWebSocket(c *gin.Context, info *common.RelayInfo) error
 }
 
+// GetWebSocketRequestURL resolves the adaptor's target with the scheme used
+// by the WebSocket dialer. Connection reuse checks must use the same target
+// construction as the handshake, after the request's model is prepared.
+func GetWebSocketRequestURL(a Adaptor, info *common.RelayInfo) (string, error) {
+	requestURL, err := a.GetRequestURL(info)
+	if err != nil {
+		return "", fmt.Errorf("get request url failed: %w", err)
+	}
+	return toWebSocketURL(requestURL), nil
+}
+
 // DoWssRequest dials the adaptor's upstream over WebSocket for the realtime
 // and Responses WebSocket relays. It honors the channel proxy, is bound to the
 // request context, and reports a rejected handshake as a *types.NewAPIError
@@ -529,11 +540,10 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 			return nil, err
 		}
 	}
-	fullRequestURL, err := a.GetRequestURL(info)
+	fullRequestURL, err := GetWebSocketRequestURL(a, info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return nil, err
 	}
-	fullRequestURL = toWebSocketURL(fullRequestURL)
 	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
 		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
 	}

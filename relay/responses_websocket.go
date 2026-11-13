@@ -194,13 +194,13 @@ type responsesWSSession struct {
 
 	// The first worker publishes these immutable connection bindings before
 	// connected becomes true and other request workers can start.
-	lockedModel     string
 	lockedChannelID int
 	lockedGroup     string
 	lockedKey       string
 	lockedKeyIndex  int
 	lockedContext   map[appconstant.ContextKey]any
 	lockedRoute     dto.AdvancedCustomRoute
+	lockedURL       string
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -488,9 +488,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	if modelName == "" {
 		return newResponsesWSInvalidRequestError(errors.New("model is required"))
 	}
-	if s.lockedModel != "" && modelName != s.lockedModel {
-		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
-	}
 	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	// As on HTTP, the request plugins' ingress reads the create before the
@@ -559,6 +556,18 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				recordResponsesWSPluginError(c, info, apiErr)
 				return apiErr
 			}
+			// The same route template can resolve to a different endpoint after
+			// model mapping and suffix normalization. Check before any frame is
+			// sent on the connection established by the first request.
+			adaptor := GetAdaptor(info.ApiType)
+			adaptor.Init(info)
+			requestURL, err := relaychannel.GetWebSocketRequestURL(adaptor, info)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			if requestURL != s.lockedURL {
+				return types.NewErrorWithStatusCode(errors.New("upstream route changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
 			s.rememberResponsesRequest(c, state, create, info)
 			if err := s.writeCreate(state, payload); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
@@ -616,13 +625,21 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			if !s.setTarget(target) {
 				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
+			// Use the handshake's adaptor after it has prepared the channel key.
+			// Resolving its target again does not repeat preparation or signing.
+			requestURL, err := relaychannel.GetWebSocketRequestURL(adaptor, info)
+			if err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+				return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+			}
 			s.rememberResponsesRequest(c, state, create, info)
 			if err := s.writeCreate(state, payload); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
 				return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 			}
-			s.lockedModel, s.lockedChannelID, s.lockedGroup = modelName, channel.Id, info.UsingGroup
+			s.lockedChannelID, s.lockedGroup = channel.Id, info.UsingGroup
 			s.lockedKey, s.lockedKeyIndex = info.ApiKey, info.ChannelMultiKeyIndex
+			s.lockedURL = requestURL
 			s.lockedRoute, _ = connectionOtherSettings(c, channel).AdvancedCustom.MatchPathForModel(c.Request.URL.Path, modelName)
 			s.lockedContext = make(map[appconstant.ContextKey]any)
 			for _, key := range []appconstant.ContextKey{
