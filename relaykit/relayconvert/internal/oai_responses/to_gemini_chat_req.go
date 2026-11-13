@@ -25,7 +25,7 @@ func OpenAIResponsesRequestToGeminiChat(c context.Context, req *dto.OpenAIRespon
 	if req.Model == "" {
 		return nil, fmt.Errorf("model is required")
 	}
-	if err := ValidateRequestChatUnsupportedFields(req); err != nil {
+	if err := validateResponsesRequestUnsupportedFields(req, types.RelayFormatGemini); err != nil {
 		return nil, err
 	}
 

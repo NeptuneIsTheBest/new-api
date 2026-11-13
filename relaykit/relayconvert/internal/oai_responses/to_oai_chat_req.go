@@ -38,7 +38,7 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 	if req.Model == "" {
 		return nil, errors.New("model is required")
 	}
-	if err := validateResponsesRequestChatUnsupportedFields(req); err != nil {
+	if err := validateResponsesRequestUnsupportedFields(req, types.RelayFormatOpenAI); err != nil {
 		return nil, err
 	}
 
@@ -119,7 +119,17 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 	return out, nil
 }
 
-func validateResponsesRequestChatUnsupportedFields(req *dto.OpenAIResponsesRequest) error {
+func validateResponsesRequestUnsupportedFields(req *dto.OpenAIResponsesRequest, target types.RelayFormat) error {
+	if rawJSONPresent(req.Image) {
+		return &types.ConversionLossError{Diagnostics: []types.ConversionDiagnostic{{
+			Code:     "unsupported_image_options",
+			Path:     "image",
+			Message:  "image context compression requires a native Responses upstream",
+			Severity: types.ConversionDiagnosticError,
+			From:     types.RelayFormatOpenAIResponses,
+			To:       target,
+		}}}
+	}
 	unsupported := make([]string, 0, 4)
 	if rawJSONPresent(req.Conversation) {
 		unsupported = append(unsupported, "conversation")
@@ -137,10 +147,6 @@ func validateResponsesRequestChatUnsupportedFields(req *dto.OpenAIResponsesReque
 		return fmt.Errorf("responses to chat conversion does not support stateful fields: %s", strings.Join(unsupported, ", "))
 	}
 	return nil
-}
-
-func ValidateRequestChatUnsupportedFields(req *dto.OpenAIResponsesRequest) error {
-	return validateResponsesRequestChatUnsupportedFields(req)
 }
 
 func responsesRequestMessagesToChat(ctx context.Context, req *dto.OpenAIResponsesRequest) ([]dto.Message, error) {
