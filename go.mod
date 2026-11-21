@@ -1,7 +1,7 @@
 module github.com/QuantumNous/new-api
 
-// +heroku goVersion go1.27.3
-go 1.27.3
+// +heroku goVersion go1.27.4
+go 1.27.4
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
