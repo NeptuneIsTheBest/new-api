@@ -59,6 +59,33 @@ type ResponsesUsageInfo struct {
 	BuiltInTools map[string]*BuildInToolInfo
 }
 
+type WarmupUsage uint8
+
+const (
+	WarmupUsageUnknown WarmupUsage = iota
+	WarmupUsageZero
+	WarmupUsageBillable
+)
+
+// ResponsesBilling reserves each create once its final upstream payload is known.
+// Retries keep the same funding session and pricing snapshot.
+type ResponsesBilling struct {
+	Prepared             bool
+	ReservationFailed    bool
+	Warmup               bool
+	Usage                WarmupUsage
+	NeedsPromptEstimate  bool
+	PreConsumeMultiplier float64
+}
+
+func (info *RelayInfo) IsResponsesWarmup() bool {
+	return info != nil && info.ResponsesBilling != nil && info.ResponsesBilling.Warmup
+}
+
+func (info *RelayInfo) IsZeroUsageWarmup() bool {
+	return info.IsResponsesWarmup() && info.ResponsesBilling.Usage == WarmupUsageZero
+}
+
 type ChannelMeta struct {
 	ChannelType          int
 	ChannelId            int
@@ -192,6 +219,7 @@ type RelayInfo struct {
 	// and again before settlement. Non-nil only when billing mode is "tiered_expr".
 	TieredBillingSnapshot *billingexpr.BillingSnapshot
 	BillingRequestInput   *billingexpr.RequestInput
+	ResponsesBilling      *ResponsesBilling
 	BillingImageCount     *int
 	// ImageRequestCount is the effective quantity sent on the current attempt;
 	// ImageQuotaBeforeGroup is the frozen legacy estimate before request ratios.

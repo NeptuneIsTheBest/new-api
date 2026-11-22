@@ -66,7 +66,6 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 		Model:                req.Model,
 		Messages:             messages,
 		Stream:               req.Stream,
-		StreamOptions:        req.StreamOptions,
 		MaxCompletionTokens:  req.MaxOutputTokens,
 		Temperature:          req.Temperature,
 		TopP:                 req.TopP,
@@ -81,6 +80,9 @@ func ResponsesRequestToChatCompletionsRequest(ctx context.Context, req *dto.Open
 		PromptCacheRetention: req.PromptCacheRetention,
 		EnableThinking:       req.EnableThinking,
 		ThinkingBudget:       req.ThinkingBudget,
+	}
+	if req.StreamOptions != nil {
+		out.StreamOptions = &req.StreamOptions.StreamOptions
 	}
 
 	out.FrequencyPenalty, err = responsesRawFloat(req.FrequencyPenalty)

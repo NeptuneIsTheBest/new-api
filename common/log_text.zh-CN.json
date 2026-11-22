@@ -490,6 +490,7 @@
   "failed to delete old revoked user sessions: %s": "清理超过保留期的已吊销会话失败: %s",
   "failed to download file from %s, status code: %d": "从 %s 下载文件失败，状态码: %d",
   "failed to encode log admin info: %s": "序列化日志的 admin_info 失败: %s",
+  "failed to estimate Responses warmup input at settlement: %s": "结算时估算 Responses 预热输入用量失败: %s",
   "failed to fetch codex reset credits": "获取 Codex 重置次数失败",
   "failed to fetch codex usage": "获取 Codex 用量失败",
   "failed to finalize bulk user session revoke tombstone: %s": "批量吊销会话后，写入吊销缓存失败: %s",

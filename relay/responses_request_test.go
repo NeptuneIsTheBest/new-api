@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"cmp"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +28,64 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+type readerOnlyResponsesStorage struct{ common.BodyStorage }
+
+func (readerOnlyResponsesStorage) Bytes() ([]byte, error) {
+	return nil, errors.New("disk passthrough body must be streamed")
+}
+
+func TestResponsesHTTPPrewarmPassthrough(t *testing.T) {
+	previous := common.GetDiskCacheConfig()
+	t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+	const base = `{"model":"test","input":"hello",`
+	const options = `"prompt_cache_options":{"prewarm":true}`
+	image := `"input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,` + strings.Repeat("A", 256<<10) + `"}]}]`
+	for _, backend := range []string{"memory", "disk"} {
+		t.Run(backend, func(t *testing.T) {
+			disk := backend == "disk"
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
+			for _, tc := range []struct {
+				name, body, contentType string
+				want                    bool
+			}{
+				{name: "large image after options", body: `{"model":"test",` + options + "," + image + "}", want: true},
+				{name: "override after large image", body: `{"model":"test",` + options + "," + image + `,"prompt_cache_options":{"prewarm":false}}`},
+				{name: "field after options", body: base + options + `,"stream":false}`, want: true},
+				{name: "trailing newline", body: base + options + "}\r\n", want: true},
+				{name: "escaped duplicate keys", body: base + `"prompt_cache_options":null,"prompt_cache_\u006fptions":{"prewarm":false,"pre\u0077arm":true}}`, want: true},
+				{name: "case variants ignored", body: base + `"prompt_cache_options":{"prewarm":true,"Prewarm":false},"Prompt_Cache_Options":null}`, want: true},
+				{name: "last options empty", body: base + options + `,"prompt_cache_options":{}}`},
+				{name: "last options array", body: base + options + `,"prompt_cache_options":[{"prewarm":true}]}`},
+				{name: "last prewarm is a string", body: base + `"prompt_cache_options":{"prewarm":true,"prewarm":"true"}}`},
+				{name: "nested lookalikes", body: base + `"prompt_cache_options":{"other":{"prewarm":true}},"other":{"prompt_cache_options":{"prewarm":true}}}`},
+				{name: "form field", body: "model=test&input=hello&prompt_cache_options=%7B%22prewarm%22%3Atrue%7D", contentType: gin.MIMEPOSTForm},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
+					c.Request.Header.Set("Content-Type", cmp.Or(tc.contentType, gin.MIMEJSON))
+					t.Cleanup(func() { common.CleanupBodyStorage(c) })
+					req, err := helper.GetAndValidateResponsesRequest(c)
+					require.NoError(t, err)
+
+					storage, err := common.GetBodyStorage(c)
+					require.NoError(t, err)
+					require.Equal(t, disk, storage.IsDisk())
+					if disk {
+						storage = readerOnlyResponsesStorage{storage}
+					}
+					warmup, err := responsesHTTPPrewarm(nil, storage, req.PromptCacheOptions)
+					require.NoError(t, err)
+					assert.Equal(t, tc.want, warmup)
+					replayed, err := io.ReadAll(c.Request.Body)
+					require.NoError(t, err)
+					assert.Equal(t, tc.body, string(replayed))
+				})
+			}
+		})
+	}
+}
 
 // Return an upstream error after capturing the request so forwarding tests
 // exercise ResponsesHelper without entering quota settlement.
@@ -123,7 +183,8 @@ func TestResponsesImageContextCompressionForwarding(t *testing.T) {
 				if isWebSocket {
 					info := relaycommon.GenRelayInfoResponses(c, &create.Request)
 					var apiErr *types.NewAPIError
-					wire, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, "image-test")
+					create.StreamID = "image-test"
+					wire, apiErr = buildResponsesWSCreatePayload(c, info, &create)
 					require.Nil(t, apiErr)
 					assert.Equal(t, "response.create", gjson.GetBytes(wire, "type").String())
 					assert.Equal(t, "image-test", gjson.GetBytes(wire, "stream_id").String())
@@ -322,7 +383,7 @@ func TestPrepareResponsesRequestDeepSeekEffectiveReasoning(t *testing.T) {
 			wire, err := io.ReadAll(body)
 			require.NoError(t, err)
 			wsInfo := relaycommon.GenRelayInfoResponses(c, &req)
-			event, wsErr := buildResponsesWSCreatePayload(c, wsInfo, req, nil, "deepseek-test")
+			event, wsErr := buildResponsesWSCreatePayload(c, wsInfo, &responsesWSCreateRequest{Request: req, StreamID: "deepseek-test"})
 			require.Nil(t, wsErr)
 			assert.Equal(t, "response.create", gjson.GetBytes(event, "type").String())
 			assert.Equal(t, "deepseek-test", gjson.GetBytes(event, "stream_id").String())

@@ -95,6 +95,9 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		if err != nil {
 			return hosttypes.PriceData{}, err
 		}
+		if info.ResponsesBilling != nil {
+			info.ResponsesBilling.PreConsumeMultiplier = preConsumeMultiplier
+		}
 		preConsumedTokens := float64(promptTokens) * preConsumeMultiplier
 		var success bool
 		var matchName string
@@ -193,7 +196,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 			priceData.QuotaToPreConsume = quota
 		}
 	}
-	if usePrice {
+	if usePrice && !info.IsResponsesWarmup() {
 		quotaToPreConsume := priceData.ApplyOtherRatiosToFloat(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 		quota, err := common.QuotaFromFloatStrict(quotaToPreConsume)
 		if err != nil {
@@ -393,64 +396,54 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 		}
 	}
 
-	rawCost, trace, err := billingexpr.RunExprByHashWithRequest(exprStr, exprHash, billingexpr.TokenParams{
-		P:   float64(promptTokens),
-		C:   0,
-		Len: float64(promptTokens),
-	}, requestInput)
-	if err != nil {
-		return hosttypes.PriceData{}, fmt.Errorf("model %s tiered expr run failed: %w", billingModelName, err)
-	}
-
-	// Expression coefficients are $/1M tokens prices; convert to quota the same way per-call billing does.
-	quotaBeforeGroup := rawCost / 1_000_000 * common.QuotaPerUnit
-	// Scale the reservation, preserving the expression's context-length tier
-	// and leaving actual settlement and fixed request prices unchanged.
-	if trace.BillingUnit != billingexpr.BillingUnitRequest {
-		quotaBeforeGroup *= preConsumeMultiplier
-	}
-	preConsumedQuota, err := billingexpr.QuotaRoundStrict(quotaBeforeGroup * groupRatioInfo.GroupRatio)
-	if err != nil {
-		return hosttypes.PriceData{}, err
-	}
-
-	freeModel := false
-	if !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
-		if groupRatioInfo.GroupRatio == 0 {
-			preConsumedQuota = 0
-			freeModel = true
-		}
-	}
-
 	snapshot := &billingexpr.BillingSnapshot{
-		EstimatedImageCount:       trace.ImageCount,
-		BillingMode:               billing_setting.BillingModeTieredExpr,
-		ModelName:                 billingModelName,
-		ExprString:                exprStr,
-		ExprHash:                  exprHash,
-		GroupRatio:                groupRatioInfo.GroupRatio,
-		EstimatedPromptTokens:     promptTokens,
-		EstimatedCompletionTokens: 0,
-		PreConsumeMultiplier:      preConsumeMultiplier,
-		EstimatedQuotaBeforeGroup: quotaBeforeGroup,
-		EstimatedQuotaAfterGroup:  preConsumedQuota,
-		EstimatedTier:             trace.MatchedTier,
-		EstimatedBillingUnit:      trace.BillingUnit,
-		EstimatedFixedPrice:       trace.FixedPrice,
-		QuotaPerUnit:              common.QuotaPerUnit,
-		ExprVersion:               billingexpr.ExprVersion(exprStr),
+		BillingMode:          billing_setting.BillingModeTieredExpr,
+		ModelName:            billingModelName,
+		ExprString:           exprStr,
+		ExprHash:             exprHash,
+		PreConsumeMultiplier: preConsumeMultiplier,
+		QuotaPerUnit:         common.QuotaPerUnit,
+		ExprVersion:          billingexpr.ExprVersion(exprStr),
+	}
+	if err := EstimateTieredReservation(snapshot, requestInput, promptTokens, groupRatioInfo.GroupRatio, info.IsResponsesWarmup()); err != nil {
+		return hosttypes.PriceData{}, err
 	}
 	info.TieredBillingSnapshot = snapshot
 	info.BillingRequestInput = &requestInput
 
 	priceData := hosttypes.PriceData{
-		FreeModel:         freeModel,
+		FreeModel:         groupRatioInfo.GroupRatio == 0 && !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume,
 		GroupRatioInfo:    groupRatioInfo,
-		QuotaToPreConsume: preConsumedQuota,
+		QuotaToPreConsume: snapshot.EstimatedQuotaAfterGroup,
 	}
 
-	logger.LogDebug(c, "model_price_helper_tiered result: model=%s preConsume=%d quotaBeforeGroup=%.2f groupRatio=%.2f tier=%s", billingModelName, preConsumedQuota, quotaBeforeGroup, groupRatioInfo.GroupRatio, trace.MatchedTier)
+	logger.LogDebug(c, "model_price_helper_tiered result: model=%s preConsume=%d quotaBeforeGroup=%.2f groupRatio=%.2f tier=%s", billingModelName, snapshot.EstimatedQuotaAfterGroup, snapshot.EstimatedQuotaBeforeGroup, groupRatioInfo.GroupRatio, snapshot.EstimatedTier)
 
 	info.PriceData = priceData
 	return priceData, nil
+}
+
+// EstimateTieredReservation prices a submission against its frozen expression.
+// A warmup retains the pricing contract for any usage the provider reports.
+func EstimateTieredReservation(snap *billingexpr.BillingSnapshot, request billingexpr.RequestInput, tokens int, groupRatio float64, warmup bool) error {
+	rawCost, trace, err := billingexpr.RunExprByHashWithRequest(snap.ExprString, snap.ExprHash, billingexpr.TokenParams{P: float64(tokens), Len: float64(tokens)}, request)
+	if err != nil {
+		return fmt.Errorf("model %s tiered expr run failed: %w", snap.ModelName, err)
+	}
+	beforeGroup := rawCost / 1_000_000 * snap.QuotaPerUnit
+	if warmup {
+		beforeGroup = 0
+	} else if trace.BillingUnit != billingexpr.BillingUnitRequest {
+		beforeGroup *= snap.PreConsumeMultiplier
+	}
+	quota, err := billingexpr.QuotaRoundStrict(beforeGroup * groupRatio)
+	if err != nil {
+		return err
+	}
+	snap.GroupRatio = groupRatio
+	snap.EstimatedPromptTokens = tokens
+	snap.EstimatedQuotaBeforeGroup, snap.EstimatedQuotaAfterGroup = beforeGroup, quota
+	snap.EstimatedTier, snap.EstimatedBillingUnit, snap.EstimatedFixedPrice = trace.MatchedTier, trace.BillingUnit, trace.FixedPrice
+	snap.EstimatedImageCount = trace.ImageCount
+	return nil
 }

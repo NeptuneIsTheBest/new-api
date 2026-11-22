@@ -243,7 +243,7 @@ func PrepareTieredBillingForSelectedGroup(c *gin.Context, relayInfo *relaycommon
 //   - ok=false, 0, nil        when it doesn't (caller should fall through to existing logic)
 func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenParams) (ok bool, quota int, result *billingexpr.TieredResult) {
 	snap := relayInfo.TieredBillingSnapshot
-	if snap == nil || snap.BillingMode != "tiered_expr" {
+	if snap == nil || snap.BillingMode != "tiered_expr" || relayInfo.IsZeroUsageWarmup() {
 		return false, 0, nil
 	}
 

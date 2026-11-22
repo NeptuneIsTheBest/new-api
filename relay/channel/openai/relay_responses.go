@@ -62,29 +62,8 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
-	// compute usage
-	usage := &dto.Usage{}
-	service.ApplyResponsesUsage(usage, responsesResponse.Usage)
-	// Count actual tool invocations from Output (not tool declarations).
-	for _, output := range responsesResponse.Output {
-		switch output.Type {
-		case dto.BuildInCallWebSearchCall:
-			info.CountBillableToolCall(dto.BuildInCallWebSearchCall, "")
-		case dto.BuildInCallFileSearchCall:
-			info.CountBillableToolCall(dto.BuildInCallFileSearchCall, "")
-		case dto.BuildInCallFunctionCall, dto.BuildInCallCustomToolCall:
-			info.CountBillableToolCall(output.Type, output.Name)
-		}
-	}
-	info.ApplyVendorToolUsage(responseBody)
-
-	imageCounter := &relaycommon.ImageGenerationCallCounter{}
-	for i := range responsesResponse.Output {
-		imageCounter.Observe(&responsesResponse.Output[i], &i)
-	}
-	imageCounter.Commit(info)
-
-	return usage, nil
+	accumulator := service.NewResponsesUsageAccumulator(info)
+	return accumulator.BufferedResponse(&dto.OpenAIResponsesResponse{Output: responsesResponse.Output, Usage: responsesResponse.Usage, Status: responsesResponse.Status}, responseBody), nil
 }
 
 func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {

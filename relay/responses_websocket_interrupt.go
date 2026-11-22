@@ -12,12 +12,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Interrupt acknowledgements can follow the response's terminal. Retain only
-// routing metadata, not the finished worker or its request and billing state.
-// All entries and their byte count are protected by stateMu.
+// An interrupt can outlive completion history. Keep its response record
+// until acknowledgement so late control replies share its client sequence.
 type responsesWSInterrupt struct {
-	eventID, streamID string
-	size              int64
+	response *responsesWSResponse
+	eventID  string
+	size     int64
 }
 
 func (s *responsesWSSession) submitInterrupt(body []byte, event responsesWSCreateEvent, streamID string) (string, *types.NewAPIError) {
@@ -25,24 +25,15 @@ func (s *responsesWSSession) submitInterrupt(body []byte, event responsesWSCreat
 		return streamID, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSInvalidInterrupt)))
 	}
 	s.stateMu.Lock()
-	lane, known := s.completedResponses[event.ResponseID]
-	var owner *responsesWSCallState
-	for id, stream := range s.streams {
-		if state := stream.current; state != nil && state.responseID == event.ResponseID {
-			lane, known, owner = id, true, state
-			break
-		}
-		if stream.lastResponseID == event.ResponseID {
-			lane, known = id, true
-		}
-	}
-	if !known || streamID != "" && streamID != lane || s.closing {
+	response, owner := s.responseByIDLocked(event.ResponseID)
+	if response == nil || streamID != "" && streamID != response.streamID || s.closing {
 		s.stateMu.Unlock()
 		return streamID, types.WithOpenAIError(types.OpenAIError{
 			Type: "invalid_request_error", Code: "response_not_found", Param: "response_id",
 			Message: i18n.Translate(s.lang, i18n.MsgResponsesWSResponseNotFound),
 		}, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
+	lane := response.streamID
 	if s.interrupts[event.ResponseID] != nil || owner != nil && owner.cancelPending {
 		s.stateMu.Unlock()
 		return lane, newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSControlPending)))
@@ -52,7 +43,7 @@ func (s *responsesWSSession) submitInterrupt(body []byte, event responsesWSCreat
 		s.stateMu.Unlock()
 		return lane, types.NewErrorWithStatusCode(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSInterruptLimit)), types.ErrorCodeInvalidRequest, http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
 	}
-	pending := &responsesWSInterrupt{eventID: event.EventID, streamID: lane, size: size}
+	pending := &responsesWSInterrupt{response: response, eventID: event.EventID, size: size}
 	if s.interrupts == nil {
 		s.interrupts = make(map[string]*responsesWSInterrupt)
 	}
@@ -87,7 +78,7 @@ func (s *responsesWSSession) handleInterruptEvent(incoming responsesWSMessage) b
 	}
 	responseID := event.ResponseID
 	pending := s.interrupts[responseID]
-	if pending != nil && event.StreamID != "" && event.StreamID != pending.streamID {
+	if pending != nil && event.StreamID != "" && event.StreamID != pending.response.streamID {
 		pending = nil
 	}
 	if !ack {
@@ -98,7 +89,7 @@ func (s *responsesWSSession) handleInterruptEvent(incoming responsesWSMessage) b
 		ambiguous := false
 		possibleInterrupt := false
 		for id, candidate := range s.interrupts {
-			if event.ResponseID != "" && event.ResponseID != id || event.StreamID != "" && event.StreamID != candidate.streamID {
+			if event.ResponseID != "" && event.ResponseID != id || event.StreamID != "" && event.StreamID != candidate.response.streamID {
 				continue
 			}
 			possibleInterrupt = true
@@ -112,7 +103,7 @@ func (s *responsesWSSession) handleInterruptEvent(incoming responsesWSMessage) b
 			if !matches && event.ResponseID == id && (event.EventID == "" || candidate.eventID == "") {
 				// A finished response cannot have another generation failure.
 				// Its interrupt can outlive the bounded completion history.
-				stream := s.streams[candidate.streamID]
+				stream := s.streams[candidate.response.streamID]
 				matches = stream == nil || stream.current == nil || stream.current.responseID != id || stream.current.upstreamDone
 			}
 			if !matches {
@@ -123,7 +114,8 @@ func (s *responsesWSSession) handleInterruptEvent(incoming responsesWSMessage) b
 			}
 			responseID, pending = id, candidate
 		}
-		if pending == nil && (!possibleInterrupt || event.ResponseID != "") {
+		if pending == nil && (!possibleInterrupt || event.ResponseID != "" ||
+			event.StreamID == "" && s.defaultCreateErrorOwnerLocked(event.Error) != nil) {
 			s.stateMu.Unlock()
 			return false
 		}
@@ -153,52 +145,17 @@ func (s *responsesWSSession) handleInterruptEvent(incoming responsesWSMessage) b
 		}
 		if ambiguous {
 			s.stateMu.Unlock()
-			_ = s.writeClient(incoming.kind, incoming.body)
+			_ = s.writeClient(nil, incoming)
 			s.shutdown(websocket.CloseInternalServerErr, "")
 			return true
 		}
 	}
+	response := s.controlReplyResponseLocked(responseID, event.StreamID)
 	if pending != nil {
 		delete(s.interrupts, responseID)
 		s.interruptBytes -= pending.size
 	}
-	var owner *responsesWSCallState
-	for _, stream := range s.streams {
-		state := stream.current
-		if state == nil || responseID == "" || state.responseID != responseID || event.StreamID != "" && event.StreamID != state.streamID {
-			continue
-		}
-		if state.upstreamDone {
-			// The request worker publishes these after its terminal. Waiting
-			// here would stop the sole upstream reader from serving other lanes.
-			size := int64(len(incoming.body))
-			if s.interruptReplyCount >= responsesWSMaxQueued || size > s.maxQueuedBytes-s.interruptReplyBytes {
-				s.stateMu.Unlock()
-				s.shutdown(websocket.CloseInternalServerErr, "")
-				return true
-			}
-			state.interruptReplies = append(state.interruptReplies, incoming)
-			s.interruptReplyCount++
-			s.interruptReplyBytes += size
-			s.stateMu.Unlock()
-			return true
-		}
-		owner = state
-		break
-	}
 	s.stateMu.Unlock()
-	if owner != nil {
-		incoming.control = true
-		select {
-		case owner.inbox <- incoming:
-			return true
-		case <-owner.done:
-		case <-s.ctx.Done():
-			return true
-		}
-	}
-	if err := s.writeClient(incoming.kind, incoming.body); err != nil {
-		s.shutdown(websocket.CloseInternalServerErr, "")
-	}
+	s.deliverControlReply(response, responsesWSControlReply{kind: incoming.kind, body: incoming.body})
 	return true
 }

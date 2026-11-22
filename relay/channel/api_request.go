@@ -548,6 +548,9 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
 	}
 	targetHeader := http.Header{}
+	if info.RelayMode == constant.RelayModeResponses && info.ChannelType == appconstant.ChannelTypeCodex {
+		targetHeader.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
+	}
 	err = a.SetupRequestHeader(c, &targetHeader, info)
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)

@@ -125,8 +125,13 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			Name:       "codex cli trace",
 			ModelRegex: []string{"^gpt-.*$"},
 			PathRegex:  []string{"/v1/responses"},
+			// Codex can change or omit prompt_cache_key within a session.
 			KeySources: []ChannelAffinityKeySource{
+				{Type: "request_header", Key: "Session-Id"},
+				{Type: "request_header", Key: "Session_id"},
 				{Type: "gjson", Path: "prompt_cache_key"},
+				{Type: "request_header", Key: "Thread-Id"},
+				{Type: "request_header", Key: "Thread_id"},
 			},
 			ValueRegex:            "",
 			TTLSeconds:            0,

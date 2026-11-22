@@ -133,4 +133,8 @@ const (
 	MsgResponsesWSResponseNotFound          = "responses_ws.response_not_found"
 	MsgResponsesWSControlPending            = "responses_ws.control_pending"
 	MsgResponsesWSInterruptLimit            = "responses_ws.interrupt_limit_reached"
+
+	MsgResponsesWSInvalidStreamOptions            = "responses_ws.invalid_stream_options"
+	MsgResponsesWSInvalidIncludeObfuscation       = "responses_ws.invalid_include_obfuscation"
+	MsgResponsesWSInvalidReasoningSummaryDelivery = "responses_ws.invalid_reasoning_summary_delivery"
 )

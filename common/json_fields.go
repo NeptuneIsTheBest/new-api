@@ -31,30 +31,51 @@ func ReadJSONTopLevelStrings(reader io.Reader, names ...string) (map[string]JSON
 	}
 	for _, name := range names {
 		scanner.fields[name] = JSONStringField{}
-		// Each byte of a matching key can use at most one six-byte \u escape.
-		scanner.keyLimit = max(scanner.keyLimit, len(name)*6+2)
+		scanner.maxKeyLen = max(scanner.maxKeyLen, len(name))
 	}
-	if _, _, err := scanner.value(true, false, 0); err != nil {
+	if err := scanner.document(nil); err != nil {
 		return nil, err
 	}
-	for {
-		b, err := scanner.reader.ReadByte()
-		if err == io.EOF {
-			return scanner.fields, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
-			return nil, ErrInvalidJSON
-		}
+	return scanner.fields, nil
+}
+
+// ReadJSONLastObjectBool reports whether the last memberKey in the last
+// top-level objectKey is the literal true. Both names are case-sensitive
+// after unescaping. Values outside the lookup are streamed past.
+func ReadJSONLastObjectBool(reader io.Reader, objectKey, memberKey string) (bool, error) {
+	scanner := jsonFieldScanner{
+		reader:    bufio.NewReader(reader),
+		maxKeyLen: max(len(objectKey), len(memberKey)),
 	}
+	if err := scanner.document([]string{objectKey, memberKey}); err != nil {
+		return false, err
+	}
+	return scanner.lastBool, nil
 }
 
 type jsonFieldScanner struct {
-	reader   *bufio.Reader
-	fields   map[string]JSONStringField
-	keyLimit int
+	reader    *bufio.Reader
+	fields    map[string]JSONStringField
+	maxKeyLen int
+	lastBool  bool
+}
+
+func (s *jsonFieldScanner) document(boolPath []string) error {
+	if _, _, err := s.value(boolPath, false, 0); err != nil {
+		return err
+	}
+	for {
+		b, err := s.reader.ReadByte()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+			return ErrInvalidJSON
+		}
+	}
 }
 
 func (s *jsonFieldScanner) next() (byte, error) {
@@ -72,7 +93,7 @@ func (s *jsonFieldScanner) next() (byte, error) {
 	}
 }
 
-func (s *jsonFieldScanner) value(top, capture bool, depth int) (string, byte, error) {
+func (s *jsonFieldScanner) value(boolPath []string, capture bool, depth int) (string, byte, error) {
 	first, err := s.next()
 	if err != nil {
 		return "", 0, err
@@ -99,7 +120,7 @@ func (s *jsonFieldScanner) value(top, capture bool, depth int) (string, byte, er
 			return "", first, ErrInvalidJSON
 		}
 		if first == '{' {
-			return "", first, s.object(top, depth+1)
+			return "", first, s.object(boolPath, depth+1)
 		}
 		return "", first, s.array(depth + 1)
 	case 'n', 't', 'f':
@@ -127,20 +148,25 @@ func (s *jsonFieldScanner) value(top, capture bool, depth int) (string, byte, er
 	}
 }
 
-func (s *jsonFieldScanner) object(top bool, depth int) error {
+func (s *jsonFieldScanner) object(boolPath []string, depth int) error {
 	b, err := s.next()
 	if err != nil || b == '}' {
 		return err
+	}
+	var stringFields map[string]JSONStringField
+	if depth == 1 {
+		stringFields = s.fields
+	}
+	keyLimit := 0
+	if len(stringFields) > 0 || len(boolPath) > 0 {
+		// Each byte of a matching key can use at most one six-byte \u escape.
+		keyLimit = s.maxKeyLen*6 + 2
 	}
 	for {
 		if b != '"' {
 			return ErrInvalidJSON
 		}
-		limit := 0
-		if top {
-			limit = s.keyLimit
-		}
-		rawKey, err := s.stringValue(limit)
+		rawKey, err := s.stringValue(keyLimit)
 		if err != nil {
 			return err
 		}
@@ -150,23 +176,33 @@ func (s *jsonFieldScanner) object(top bool, depth int) error {
 				return ErrInvalidJSON
 			}
 		}
-		field, selected := s.fields[key]
-		selected = selected && top && rawKey != ""
 		if b, err = s.next(); err != nil {
 			return err
 		} else if b != ':' {
 			return ErrInvalidJSON
 		}
-		value, kind, err := s.value(false, selected && field.Count == 0, depth)
+		field, selected := stringFields[key]
+		selected = selected && rawKey != ""
+		matchBool := len(boolPath) > 0 && rawKey != "" && key == boolPath[0]
+		var childPath []string
+		if matchBool {
+			// A later parent replaces the previous one even if empty or null.
+			s.lastBool = false
+			childPath = boolPath[1:]
+		}
+		value, kind, err := s.value(childPath, selected && field.Count == 0, depth)
 		if err != nil {
 			return err
+		}
+		if matchBool && len(childPath) == 0 {
+			s.lastBool = kind == 't'
 		}
 		if selected {
 			if field.Count == 0 {
 				field.Value, field.IsString, field.IsNull = value, kind == '"', kind == 'n'
 			}
 			field.Count++
-			s.fields[key] = field
+			stringFields[key] = field
 		}
 		b, err = s.next()
 		if err != nil || b == '}' {
@@ -189,7 +225,7 @@ func (s *jsonFieldScanner) array(depth int) error {
 	}
 	_ = s.reader.UnreadByte()
 	for {
-		if _, _, err := s.value(false, false, depth); err != nil {
+		if _, _, err := s.value(nil, false, depth); err != nil {
 			return err
 		}
 		b, err = s.next()

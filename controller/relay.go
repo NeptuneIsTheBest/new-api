@@ -183,7 +183,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		defer stopKeepAlive()
 	}
 
-	if newAPIError = relay.PrepareRequestBilling(c, relayInfo); newAPIError != nil {
+	if relayFormat == types.RelayFormatOpenAIResponses {
+		// Channel conversion and overrides can turn a warmup into a generation
+		// or vice versa. Reserve immediately before sending the prepared body.
+		relayInfo.ResponsesBilling = &relaycommon.ResponsesBilling{}
+	} else if newAPIError = relay.PrepareRequestBilling(c, relayInfo); newAPIError != nil {
 		return
 	}
 	defer func() {
@@ -212,9 +216,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
-		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
-			newAPIError = billingErr
-			break
+		if relayInfo.ResponsesBilling == nil {
+			if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+				newAPIError = billingErr
+				break
+			}
 		}
 
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -244,6 +250,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		finishReply()
 
+		if relayInfo.ResponsesBilling != nil && relayInfo.ResponsesBilling.ReservationFailed {
+			// A local funding or pricing error follows the pre-consume error
+			// path, without attributing a failure to the selected upstream.
+			break
+		}
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
 			relayInfo.LastError = nil

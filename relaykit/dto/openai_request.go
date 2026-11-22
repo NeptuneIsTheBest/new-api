@@ -456,12 +456,17 @@ func (f *FunctionRequest) UnmarshalJSON(data []byte) error {
 
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
-	// IncludeObfuscation is only for /v1/responses stream payload.
-	// This field is filtered by default and can be enabled via channel setting allow_include_obfuscation.
-	IncludeObfuscation bool `json:"include_obfuscation,omitempty"`
+	// Forwarded when the channel allows include_obfuscation.
+	IncludeObfuscation *bool `json:"include_obfuscation,omitempty"`
 	// ContinuousUsageStats is a vLLM stream_options extension that emits
 	// usage on intermediate chunks. Optional so an explicit false is kept.
 	// ContinuousUsageStats *bool `json:"continuous_usage_stats,omitempty"`
+}
+
+// ResponsesStreamOptions adds Codex reasoning summary delivery to the shared stream options.
+type ResponsesStreamOptions struct {
+	StreamOptions
+	ReasoningSummaryDelivery *string `json:"reasoning_summary_delivery,omitempty"`
 }
 
 func (r *GeneralOpenAIRequest) GetMaxTokens() uint {
@@ -1058,10 +1063,11 @@ type WebSearchOptions struct {
 
 // https://platform.openai.com/docs/api-reference/responses/create
 type OpenAIResponsesRequest struct {
-	Model   string          `json:"model"`
-	Input   json.RawMessage `json:"input,omitempty"`
-	Include json.RawMessage `json:"include,omitempty"`
-	Image   json.RawMessage `json:"image,omitempty"`
+	Model          string          `json:"model"`
+	Input          json.RawMessage `json:"input,omitempty"`
+	Include        json.RawMessage `json:"include,omitempty"`
+	Image          json.RawMessage `json:"image,omitempty"`
+	AccessPrograms json.RawMessage `json:"access_programs,omitempty"`
 	// 在后台运行推理，暂时还不支持依赖的接口
 	// Background         json.RawMessage `json:"background,omitempty"`
 	Conversation      json.RawMessage `json:"conversation,omitempty"`
@@ -1090,18 +1096,18 @@ type OpenAIResponsesRequest struct {
 	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
 	// SafetyIdentifier carries client identity for policy abuse detection.
 	// This field is filtered by default and can be enabled via channel setting allow_safety_identifier.
-	SafetyIdentifier json.RawMessage `json:"safety_identifier,omitempty"`
-	Stream           *bool           `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions  `json:"stream_options,omitempty"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	Text             json.RawMessage `json:"text,omitempty"`
-	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
-	Tools            json.RawMessage `json:"tools,omitempty"` // 需要处理的参数很少，MCP 参数太多不确定，所以用 map
-	TopP             *float64        `json:"top_p,omitempty"`
-	Truncation       json.RawMessage `json:"truncation,omitempty"`
-	User             json.RawMessage `json:"user,omitempty"`
-	MaxToolCalls     *uint           `json:"max_tool_calls,omitempty"`
-	Prompt           json.RawMessage `json:"prompt,omitempty"`
+	SafetyIdentifier json.RawMessage         `json:"safety_identifier,omitempty"`
+	Stream           *bool                   `json:"stream,omitempty"`
+	StreamOptions    *ResponsesStreamOptions `json:"stream_options,omitempty"`
+	Temperature      *float64                `json:"temperature,omitempty"`
+	Text             json.RawMessage         `json:"text,omitempty"`
+	ToolChoice       json.RawMessage         `json:"tool_choice,omitempty"`
+	Tools            json.RawMessage         `json:"tools,omitempty"` // 需要处理的参数很少，MCP 参数太多不确定，所以用 map
+	TopP             *float64                `json:"top_p,omitempty"`
+	Truncation       json.RawMessage         `json:"truncation,omitempty"`
+	User             json.RawMessage         `json:"user,omitempty"`
+	MaxToolCalls     *uint                   `json:"max_tool_calls,omitempty"`
+	Prompt           json.RawMessage         `json:"prompt,omitempty"`
 	// Codex Responses metadata/client_metadata:
 	// https://github.com/openai/codex/commit/14df0e8833aad0d6d78287954b61ffac67af936c
 	ClientMetadata json.RawMessage `json:"client_metadata,omitempty"`

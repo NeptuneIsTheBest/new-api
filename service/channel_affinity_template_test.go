@@ -304,7 +304,7 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	}
 	require.NotNil(t, codexRule)
 
-	affinityValue := fmt.Sprintf("pc-hit-%d", time.Now().UnixNano())
+	affinityValue := t.Name()
 	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(*codexRule, "gpt-5", "default", affinityValue)
 
 	cache := getChannelAffinityCache()
@@ -313,10 +313,19 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 		_, _ = cache.DeleteMany([]string{cacheKeySuffix})
 	})
 
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"prompt_cache_key":"%s"}`, affinityValue)))
+	requestHeaders := map[string]string{
+		"Originator": "Codex CLI",
+		"Session-Id": affinityValue,
+		"Session_id": affinityValue,
+		"Thread-Id":  "thread-123",
+		"User-Agent": "codex-cli-test",
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5"}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
+	for name, value := range requestHeaders {
+		ctx.Request.Header.Set(name, value)
+	}
 
 	channelID, found := GetPreferredChannelByAffinity(ctx, "gpt-5", "default")
 	require.True(t, found)
@@ -330,11 +339,7 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.Equal(t, 0.2, mergedOverride["temperature"])
 
 	info := &relaycommon.RelayInfo{
-		RequestHeaders: map[string]string{
-			"Originator": "Codex CLI",
-			"Session_id": "sess-123",
-			"User-Agent": "codex-cli-test",
-		},
+		RequestHeaders: requestHeaders,
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ParamOverride: mergedOverride,
 			HeadersOverride: map[string]any{
@@ -349,13 +354,55 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 
 	require.Equal(t, "legacy-static", info.RuntimeHeadersOverride["x-static"])
 	require.Equal(t, "Codex CLI", info.RuntimeHeadersOverride["originator"])
-	require.Equal(t, "sess-123", info.RuntimeHeadersOverride["session_id"])
+	assert.Equal(t, affinityValue, info.RuntimeHeadersOverride["session-id"])
+	assert.Equal(t, affinityValue, info.RuntimeHeadersOverride["session_id"])
+	assert.Equal(t, "thread-123", info.RuntimeHeadersOverride["thread-id"])
 	require.Equal(t, "codex-cli-test", info.RuntimeHeadersOverride["user-agent"])
 
 	_, exists := info.RuntimeHeadersOverride["x-codex-beta-features"]
 	require.False(t, exists)
 	_, exists = info.RuntimeHeadersOverride["x-codex-turn-metadata"]
 	require.False(t, exists)
+}
+
+func TestCodexChannelAffinityKeyPrecedence(t *testing.T) {
+	const channelID = 42
+	key := t.Name()
+	promptBody := fmt.Sprintf(`{"prompt_cache_key":%q}`, key)
+
+	// A binding established by a body-only client is also usable by a reconnecting client.
+	seed, _ := gin.CreateTestContext(httptest.NewRecorder())
+	seed.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(promptBody))
+	t.Cleanup(func() { common.CleanupBodyStorage(seed) })
+	_, found := GetPreferredChannelByAffinity(seed, "gpt-5", "default")
+	require.False(t, found)
+	RecordChannelAffinity(seed, channelID)
+	t.Cleanup(func() { ClearCurrentChannelAffinityCache(seed) })
+
+	for _, tc := range []struct {
+		name    string
+		body    string
+		headers map[string]string
+	}{
+		{"session before legacy session and prompt", `{"prompt_cache_key":"other-prompt"}`, map[string]string{"Session-Id": key, "Session_id": "other-session"}},
+		{"session without prompt", `{}`, map[string]string{"Session-Id": key, "Thread-Id": "other-thread"}},
+		{"legacy session before prompt", `{"prompt_cache_key":"other-prompt"}`, map[string]string{"Session_id": key}},
+		{"prompt before thread", promptBody, map[string]string{"Thread-Id": "other-thread"}},
+		{"thread before legacy thread", `{}`, map[string]string{"Thread-Id": key, "Thread_id": "other-thread"}},
+		{"legacy thread only", `{}`, map[string]string{"Thread_id": key}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
+			t.Cleanup(func() { common.CleanupBodyStorage(ctx) })
+			for name, value := range tc.headers {
+				ctx.Request.Header.Set(name, value)
+			}
+			got, found := GetPreferredChannelByAffinity(ctx, "gpt-5", "default")
+			require.True(t, found)
+			assert.Equal(t, channelID, got)
+		})
+	}
 }
 
 func TestMidjourneyPolicyAcceptance(t *testing.T) {

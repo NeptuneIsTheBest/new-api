@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,11 +65,12 @@ type responsesWSCreateEvent struct {
 }
 
 type responsesWSCreateRequest struct {
-	Request  dto.OpenAIResponsesRequest
-	Body     []byte
-	Generate common.RawMessage
-	StreamID string
-	EventID  string
+	Request          dto.OpenAIResponsesRequest
+	Body             []byte
+	rawStreamOptions common.RawMessage
+	Generate         common.RawMessage
+	StreamID         string
+	EventID          string
 }
 
 type responsesWSErrorEvent struct {
@@ -95,9 +97,28 @@ type responsesWSControl struct {
 	eventID, streamID string
 }
 
+// This routing record is shared with the bounded history after the worker exits.
+// It must not retain the request or its billing state.
+type responsesWSResponse struct {
+	responseID string
+	streamID   string
+	completed  bool
+	// The next client-visible sequence is guarded by clientWriteMu.
+	nextSequence uint64
+}
+
+type responsesWSControlReply struct {
+	kind int
+	body []byte
+	// For a local rejection, body holds the original steer input until the
+	// worker publishes the terminal the client actually receives.
+	localSteer bool
+}
+
 // Only the request worker reads or changes billing state. Socket readers pass
 // bounded messages to it; cancellation never performs an independent refund.
 type responsesWSCallState struct {
+	*responsesWSResponse
 	inbox    chan responsesWSMessage
 	controls chan responsesWSControl
 	done     chan struct{}
@@ -108,22 +129,20 @@ type responsesWSCallState struct {
 	upstreamRejected      bool
 	rejectionHeaders      common.RawMessage
 	rejectionErrorHeaders common.RawMessage
-	streamID              string
 	previousResponseID    string
 	// Routing metadata is protected by the session's stateMu. Billing remains
 	// exclusively owned by this request's worker.
-	responseID    string
 	sentControl   []byte
 	cancelPending bool
 	submitted     bool
 	upstreamDone  bool
-	// Late interrupt replies follow settlement and the terminal, before done.
-	interruptReplies []responsesWSMessage
-	create           responsesWSCreateRequest
-	channelMeta      relaycommon.ChannelMeta
-	inputPlugins     *requestplugin.SocketInput
-	inputSteps       []relaycommon.RequestPluginStep
-	inputRecord      []relaycommon.RequestPluginRecord
+	// Late control replies follow settlement and the terminal, before done.
+	controlReplies []responsesWSControlReply
+	create         responsesWSCreateRequest
+	channelMeta    relaycommon.ChannelMeta
+	inputPlugins   *requestplugin.SocketInput
+	inputSteps     []relaycommon.RequestPluginStep
+	inputRecord    []relaycommon.RequestPluginRecord
 	// Automatic continuations prepare a separate request before the steer is
 	// sent, but own no generation until their response.created arrives.
 	automatic           bool
@@ -144,10 +163,10 @@ type responsesWSPendingRequest struct {
 }
 
 type responsesWSStream struct {
-	current        *responsesWSCallState
-	queue          []responsesWSPendingRequest
-	lastResponseID string
-	steering       *responsesWSSteering
+	current      *responsesWSCallState
+	queue        []responsesWSPendingRequest
+	lastResponse *responsesWSResponse
+	steering     *responsesWSSteering
 }
 
 type responsesWSSession struct {
@@ -181,13 +200,13 @@ type responsesWSSession struct {
 	lang               string
 	steerCount         int
 	steerBytes         int64
-	completedResponses map[string]string
+	completedResponses map[string]*responsesWSResponse
 	completedOrder     []string
 	interrupts         map[string]*responsesWSInterrupt
 	interruptBytes     int64
 	// Deferred replies across all lanes, including in-flight writes, use stateMu.
-	interruptReplyCount int
-	interruptReplyBytes int64
+	controlReplyCount int
+	controlReplyBytes int64
 
 	// clientWriteBudget is guarded by clientWriteMu.
 	clientWriteBudget helper.StreamWriteBudget
@@ -334,8 +353,10 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 				outgoing = &responsesWSMessage{kind: websocket.TextMessage, body: body}
 			}
 		}
+		var terminalType string
 		if outgoing != nil {
-			if err := s.writeClient(outgoing.kind, outgoing.body); err != nil {
+			terminalType = gjson.GetBytes(outgoing.body, "type").Str
+			if err := s.writeClient(state.responsesWSResponse, *outgoing); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
 			}
 		}
@@ -343,31 +364,34 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 			s.shutdown(state.closeCode, state.closeReason)
 		}
 		s.stateMu.Lock()
-		for len(state.interruptReplies) > 0 {
-			reply := state.interruptReplies[0]
-			state.interruptReplies[0] = responsesWSMessage{}
-			state.interruptReplies = state.interruptReplies[1:]
+		// A reply plugin or the request middleware can replace an upstream
+		// completion with an error before the terminal reaches the client.
+		state.completed = state.completed && (terminalType == "response.completed" || terminalType == "response.done")
+		for len(state.controlReplies) > 0 {
+			reply := state.controlReplies[0]
+			state.controlReplies[0] = responsesWSControlReply{}
+			state.controlReplies = state.controlReplies[1:]
 			if s.ctx.Err() == nil {
 				s.stateMu.Unlock()
-				if err := s.writeClient(reply.kind, reply.body); err != nil {
+				if err := s.writeControlReply(state.responsesWSResponse, reply); err != nil {
 					s.shutdown(websocket.CloseInternalServerErr, "")
 				}
 				s.stateMu.Lock()
 			}
 			// Keep the in-flight reply in the budget until its write finishes.
-			s.interruptReplyCount--
-			s.interruptReplyBytes -= int64(len(reply.body))
+			s.controlReplyCount--
+			s.controlReplyBytes -= int64(len(reply.body))
 		}
-		state.interruptReplies = nil
+		state.controlReplies = nil
 		// Queue draining and lane release are atomic to the upstream reader.
 		stream := s.streams[state.streamID]
 		if state.responseID != "" && state.started {
-			stream.lastResponseID = state.responseID
+			stream.lastResponse = state.responsesWSResponse
 			if s.completedResponses == nil {
-				s.completedResponses = make(map[string]string)
+				s.completedResponses = make(map[string]*responsesWSResponse)
 			}
 			if _, completed := s.completedResponses[state.responseID]; !completed {
-				s.completedResponses[state.responseID] = state.streamID
+				s.completedResponses[state.responseID] = state.responsesWSResponse
 				s.completedOrder = append(s.completedOrder, state.responseID)
 				if len(s.completedOrder) > responsesWSMaxQueued {
 					delete(s.completedResponses, s.completedOrder[0])
@@ -540,22 +564,25 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		info.IsStream = true
 		info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
-		if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
-			return apiErr
-		}
-		billingPrepared = true
 		if state.automatic {
+			// A steer creates a new generation, independent of its parent's warmup.
+			if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
+				return apiErr
+			}
+			billingPrepared = true
 			meta := state.channelMeta
 			info.ChannelMeta = &meta
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
 		} else {
+			info.ResponsesBilling = &relaycommon.ResponsesBilling{}
 			var payload []byte
-			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			payload, apiErr = buildResponsesWSCreatePayload(c, info, &create)
 			if apiErr != nil {
 				recordResponsesWSPluginError(c, info, apiErr)
 				return apiErr
 			}
+			billingPrepared = true
 			// The same route template can resolve to a different endpoint after
 			// model mapping and suffix normalization. Check before any frame is
 			// sent on the connection established by the first request.
@@ -589,24 +616,19 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				info.IsStream = true
 				info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
-				if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
-					return apiErr
-				}
-				billingPrepared = true
+				info.ResponsesBilling = &relaycommon.ResponsesBilling{}
 			} else {
 				info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
-				if apiErr = service.PrepareTieredBillingForSelectedGroup(c, info); apiErr != nil {
-					return apiErr
-				}
 			}
 			info.RetryIndex = retry.GetRetry()
 			policy.BeginAttempt(channel, info.UsingGroup)
 			var payload []byte
-			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			payload, apiErr = buildResponsesWSCreatePayload(c, info, &create)
 			if apiErr != nil {
 				recordResponsesWSPluginError(c, info, apiErr)
 				return apiErr
 			}
+			billingPrepared = true
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
@@ -672,7 +694,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	// the client gets it; without a reply or report instance the events go
 	// out untouched.
 	socket := requestplugin.ResponsesSocket(c, info, func(message []byte) {
-		if err := s.writeClient(websocket.TextMessage, message); err != nil {
+		if err := s.writeClient(state.responsesWSResponse, responsesWSMessage{kind: websocket.TextMessage, body: message}); err != nil {
 			s.shutdown(websocket.CloseInternalServerErr, "")
 		}
 	})
@@ -796,7 +818,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return nil
 		}
 		if incoming.control {
-			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+			if err := s.writeClient(state.responsesWSResponse, incoming); err != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
 			}
 			continue
@@ -810,7 +832,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			info.StreamStatus.RecordError("invalid upstream websocket event")
 		} else {
 			if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
-				if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+				if err := s.writeClient(nil, incoming); err != nil {
 					s.shutdown(websocket.CloseInternalServerErr, "")
 				}
 				continue
@@ -840,17 +862,21 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				terminal, ambiguous, controlError := responsesWSErrorEndsRequest(rejection, create.StreamID, responseID, sentControl)
 				if !terminal {
 					// Only a control error in this stream resolves its pending control.
+					var response *responsesWSResponse
 					if controlError {
+						targetID := cmp.Or(rejection.ResponseID, gjson.GetBytes(sentControl, "response_id").Str, responseID)
 						sentControl = nil
 						s.stateMu.Lock()
+						response = s.controlReplyResponseLocked(targetID, rejection.StreamID)
 						state.sentControl = nil
 						state.cancelPending = false
 						s.stateMu.Unlock()
+						incoming.control = true
 					}
 					if stopErr != nil {
 						continue
 					}
-					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+					if err := s.writeClient(response, incoming); err != nil {
 						s.shutdown(websocket.CloseInternalServerErr, "")
 					}
 					continue
@@ -910,7 +936,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			if socket != nil && incoming.kind == websocket.TextMessage {
 				socket.Event(incoming.body)
 				stopErr = socket.Stopped()
-			} else if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+			} else if err := s.writeClient(state.responsesWSResponse, incoming); err != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
 			}
 		}
@@ -1060,24 +1086,16 @@ func connectionOtherSettings(c *gin.Context, channel *appmodel.Channel) dto.Chan
 // changed, with the checks the first decode applied.
 func reloadResponsesWSCreate(c *gin.Context, create *responsesWSCreateRequest) *types.NewAPIError {
 	storage, err := common.GetBodyStorage(c)
-	var body []byte
-	if err == nil {
-		body, err = storage.Bytes()
+	if err != nil {
+		return newResponsesWSInvalidRequestError(err)
 	}
-	var request dto.OpenAIResponsesRequest
+	body, err := storage.Bytes()
 	if err == nil {
-		err = common.Unmarshal(body, &request)
-	}
-	if err == nil && helper.ExceedsMaxTokensLimit(request.MaxOutputTokens) {
-		err = errors.New("max_output_tokens is invalid")
+		err = create.decodeBody(body)
 	}
 	if err != nil {
 		return newResponsesWSInvalidRequestError(err)
 	}
-	request.Stream = nil
-	request.StreamOptions = nil
-	create.Request = request
-	create.Body = body
 	return nil
 }
 
@@ -1090,8 +1108,8 @@ func recordResponsesWSPluginError(c *gin.Context, info *relaycommon.RelayInfo, a
 	}
 }
 
-func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) ([]byte, *types.NewAPIError) {
-	_, jsonData, storage, apiErr := prepareResponsesRequest(c, info, &req)
+func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, create *responsesWSCreateRequest) ([]byte, *types.NewAPIError) {
+	_, jsonData, storage, apiErr := prepareResponsesRequest(c, info, &create.Request, create.rawStreamOptions)
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -1102,9 +1120,16 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 			return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
 	}
-	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
+	event, err := buildResponsesWSCreateEvent(jsonData, create.Generate, create.StreamID, storage != nil)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	if info.ResponsesBilling != nil {
+		warmup := ojson.GetBytesNoCopy(event, "generate").Type == ojson.False ||
+			responsesCachePrewarm(ojson.GetBytesNoCopy(event, "prompt_cache_options"))
+		if apiErr := prepareResponsesAttemptBilling(c, info, warmup); apiErr != nil {
+			return nil, apiErr
+		}
 	}
 	return event, nil
 }
@@ -1170,13 +1195,46 @@ func (s *responsesWSSession) scheduleLocked() {
 		s.queuedBytes -= int64(len(pending.body))
 		close(s.changed)
 		s.changed = make(chan struct{})
-		state := &responsesWSCallState{streamID: streamID, previousResponseID: next.lastResponseID,
+		state := &responsesWSCallState{responsesWSResponse: &responsesWSResponse{streamID: streamID},
 			inbox: make(chan responsesWSMessage, 1), controls: make(chan responsesWSControl, 1), done: make(chan struct{})}
+		if next.lastResponse != nil {
+			state.previousResponseID = next.lastResponse.responseID
+		}
 		next.current = state
 		s.active++
 		requestID := fmt.Sprintf("%s-ws-%d", s.requestID, pending.index)
 		s.workers.Go(func() { s.runRequest(state, pending.body, requestID) })
 	}
+}
+
+// The latest response on a quiet lane can outlive the shared history window.
+func (s *responsesWSSession) responseByIDLocked(id string) (*responsesWSResponse, *responsesWSCallState) {
+	if id == "" {
+		return nil, nil
+	}
+	response := s.completedResponses[id]
+	for _, stream := range s.streams {
+		if state := stream.current; state != nil && state.responseID == id {
+			return state.responsesWSResponse, state
+		}
+		if last := stream.lastResponse; last != nil && last.responseID == id {
+			response = last
+		}
+	}
+	return response, nil
+}
+
+func (s *responsesWSSession) controlReplyResponseLocked(responseID, streamID string) *responsesWSResponse {
+	var response *responsesWSResponse
+	if pending := s.interrupts[responseID]; pending != nil {
+		response = pending.response
+	} else {
+		response, _ = s.responseByIDLocked(responseID)
+	}
+	if response != nil && streamID != "" && streamID != response.streamID {
+		return nil
+	}
+	return response
 }
 
 func (s *responsesWSSession) controlOwner(streamID, responseID string) *responsesWSCallState {
@@ -1208,6 +1266,23 @@ func (s *responsesWSSession) controlOwner(streamID, responseID string) *response
 	return nil
 }
 
+// A missing previous response rejects response.create before upstream assigns
+// a response ID. Callers check explicit stream, response and control IDs first.
+func (s *responsesWSSession) defaultCreateErrorOwnerLocked(upstreamErr *types.OpenAIError) *responsesWSCallState {
+	if upstreamErr == nil || upstreamErr.Code != "previous_response_not_found" {
+		return nil
+	}
+	stream := s.streams[""]
+	if stream == nil || stream.current == nil {
+		return nil
+	}
+	state := stream.current
+	if state.submitted && state.responseID == "" && !state.upstreamDone {
+		return state
+	}
+	return nil
+}
+
 // routeTargetEvent assigns a frame before it can reach any usage accumulator.
 // It also marks terminal frames before delivery, so repeated frames or an EOF
 // cannot overtake the worker's settlement and client-facing terminal write.
@@ -1234,7 +1309,7 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 	active := 0
 	_, completed := s.completedResponses[responseID]
 	for _, stream := range s.streams {
-		if responseID != "" && responseID == stream.lastResponseID {
+		if last := stream.lastResponse; last != nil && responseID == last.responseID {
 			completed = true
 		}
 		state := stream.current
@@ -1275,12 +1350,12 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 		}
 	}
 	if owner == nil && event.StreamID == "" {
-		// An unscoped error with concurrent lanes may be connection-wide;
-		// the existence of a default lane is not enough to assign it there.
 		if stream := s.streams[""]; event.Type != "error" && stream != nil && stream.current != nil && stream.current.submitted {
 			owner = stream.current
 		} else if active == 1 {
 			owner = sole
+		} else if event.Type == "error" && responseID == "" {
+			owner = s.defaultCreateErrorOwnerLocked(event.Error)
 		}
 	}
 	if owner == nil {
@@ -1297,7 +1372,11 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 			return nil, false, false
 		}
 		switch event.Type {
-		case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
+		case "response.completed", "response.done":
+			status := gjson.GetBytes(body, "response.status")
+			owner.completed = status.Str == "completed" || event.Type == "response.completed" && !status.Exists()
+			terminal = true
+		case "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
 			terminal = true
 		}
 	}
@@ -1357,7 +1436,10 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 					}
 				}
 				code := websocket.CloseInternalServerErr
-				if !interrupted && websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+					// Codex uses this code to retry over HTTP if it has received no text for the request.
+					code = websocket.CloseMessageTooBig
+				} else if !interrupted && websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					code = err.(*websocket.CloseError).Code
 				}
 				s.shutdown(code, "upstream connection closed")
@@ -1383,7 +1465,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 				}
 				continue
 			}
-			if writeErr := s.writeClient(kind, body); writeErr != nil || fatal {
+			if writeErr := s.writeClient(nil, incoming); writeErr != nil || fatal {
 				s.shutdown(websocket.CloseInternalServerErr, "")
 				return
 			}
@@ -1440,13 +1522,84 @@ func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
 	return target.WriteMessage(kind, message)
 }
 
-func (s *responsesWSSession) writeClient(kind int, message []byte) error {
+func (s *responsesWSSession) writeClient(response *responsesWSResponse, frame responsesWSMessage) error {
+	var sequence uint64
+	var numbered bool
+	if response != nil {
+		if field := ojson.GetBytesNoCopy(frame.body, "sequence_number"); field.Type == ojson.Number {
+			var err error
+			sequence, err = strconv.ParseUint(field.Raw, 10, 63)
+			numbered = err == nil
+		}
+	}
 	s.clientWriteMu.Lock()
 	defer s.clientWriteMu.Unlock()
-	if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(message))); err != nil {
+	if numbered && frame.control && sequence < response.nextSequence {
+		sequence = response.nextSequence
+		var err error
+		frame.body, err = ojson.SetBytes(frame.body, "sequence_number", sequence)
+		if err != nil {
+			return err
+		}
+	}
+	if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(frame.body))); err != nil {
 		return err
 	}
-	return s.client.WriteMessage(kind, message)
+	if err := s.client.WriteMessage(frame.kind, frame.body); err != nil {
+		return err
+	}
+	if numbered {
+		response.nextSequence = max(response.nextSequence, sequence+1)
+	}
+	return nil
+}
+
+func (s *responsesWSSession) queueControlReplyLocked(state *responsesWSCallState, reply responsesWSControlReply) bool {
+	size := int64(len(reply.body))
+	if s.controlReplyCount >= responsesWSMaxQueued || size > s.maxQueuedBytes-s.controlReplyBytes {
+		return false
+	}
+	state.controlReplies = append(state.controlReplies, reply)
+	s.controlReplyCount++
+	s.controlReplyBytes += size
+	return true
+}
+
+// A control reply follows earlier frames on its response's lane. During
+// settlement the worker drains its bounded queue after writing the terminal.
+func (s *responsesWSSession) deliverControlReply(response *responsesWSResponse, reply responsesWSControlReply) {
+	s.stateMu.Lock()
+	if s.ctx.Err() != nil {
+		s.stateMu.Unlock()
+		return
+	}
+	var owner *responsesWSCallState
+	if response != nil {
+		if current := s.streams[response.streamID].current; current != nil && current.responsesWSResponse == response {
+			owner = current
+		}
+	}
+	if owner != nil && owner.upstreamDone {
+		queued := s.queueControlReplyLocked(owner, reply)
+		s.stateMu.Unlock()
+		if !queued {
+			s.shutdown(websocket.CloseInternalServerErr, "")
+		}
+		return
+	}
+	s.stateMu.Unlock()
+	if owner != nil {
+		select {
+		case owner.inbox <- responsesWSMessage{kind: reply.kind, body: reply.body, control: true}:
+			return
+		case <-owner.done:
+		case <-s.ctx.Done():
+			return
+		}
+	}
+	if err := s.writeControlReply(response, reply); err != nil {
+		s.shutdown(websocket.CloseInternalServerErr, "")
+	}
 }
 
 func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.NewAPIError) {
@@ -1455,19 +1608,20 @@ func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.N
 	}
 	payload, err := buildResponsesWSErrorPayload(eventID, streamID, apiErr)
 	if err == nil {
-		_ = s.writeClient(websocket.TextMessage, payload)
+		_ = s.writeClient(nil, responsesWSMessage{kind: websocket.TextMessage, body: payload})
 	}
 }
 
-func (s *responsesWSSession) sendControlError(eventID, streamID, responseID string, apiErr *types.NewAPIError) {
+func (s *responsesWSSession) sendControlError(eventID, streamID, responseID string, apiErr *types.NewAPIError) error {
 	openaiErr := apiErr.ToOpenAIError()
 	payload, err := common.Marshal(responsesWSErrorEvent{
 		Type: "error", Status: apiErr.StatusCode, EventID: eventID,
 		StreamID: streamID, ResponseID: responseID, Error: &openaiErr,
 	})
-	if err == nil {
-		_ = s.writeClient(websocket.TextMessage, payload)
+	if err != nil {
+		return err
 	}
+	return s.writeClient(nil, responsesWSMessage{kind: websocket.TextMessage, body: payload})
 }
 
 // shutdown ends the connection once. Each peer gets a close frame that says
@@ -1482,11 +1636,11 @@ func (s *responsesWSSession) shutdown(code int, reason string) {
 		for _, stream := range s.streams {
 			stream.queue = nil
 			if state := stream.current; state != nil {
-				for _, reply := range state.interruptReplies {
-					s.interruptReplyCount--
-					s.interruptReplyBytes -= int64(len(reply.body))
+				for _, reply := range state.controlReplies {
+					s.controlReplyCount--
+					s.controlReplyBytes -= int64(len(reply.body))
 				}
-				state.interruptReplies = nil
+				state.controlReplies = nil
 			}
 		}
 		s.queued, s.queuedBytes = 0, 0
@@ -1588,7 +1742,7 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 			create.Generate = common.RawMessage(generate.Raw)
 		}
 	} else {
-		for _, key := range []string{"type", "event_id", "background", "stream", "stream_options"} {
+		for _, key := range []string{"type", "event_id", "background", "stream"} {
 			if err := relaycommon.DeleteJSONMember(doc, key); err != nil {
 				return create, err
 			}
@@ -1599,20 +1753,31 @@ func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEven
 			return create, err
 		}
 	}
-	payload := doc.Bytes()
-	if err := common.Unmarshal(payload, &create.Request); err != nil {
-		return create, err
-	}
-	if helper.ExceedsMaxTokensLimit(create.Request.MaxOutputTokens) {
-		return create, errors.New("max_output_tokens is invalid")
-	}
-	create.Request.Stream = nil
-	create.Request.StreamOptions = nil
-	create.Body = payload
-	return create, nil
+	err := create.decodeBody(doc.Bytes())
+	return create, err
 }
 
-func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, streamID string) ([]byte, error) {
+func (create *responsesWSCreateRequest) decodeBody(body []byte) error {
+	// Channel selection comes later. Keep stream_options raw so passthrough
+	// can carry provider-specific values even for names the gateway recognizes.
+	var request struct {
+		dto.OpenAIResponsesRequest
+		StreamOptions common.RawMessage `json:"stream_options"`
+	}
+	if err := common.Unmarshal(body, &request); err != nil {
+		return err
+	}
+	if helper.ExceedsMaxTokensLimit(request.MaxOutputTokens) {
+		return errors.New("max_output_tokens is invalid")
+	}
+	request.Stream = nil
+	create.Request = request.OpenAIResponsesRequest
+	create.Body = body
+	create.rawStreamOptions = request.StreamOptions
+	return nil
+}
+
+func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, streamID string, preserveStreamOptions bool) ([]byte, error) {
 	if !gjson.ValidBytes(jsonData) {
 		return nil, errors.New("invalid responses request JSON")
 	}
@@ -1623,24 +1788,21 @@ func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, st
 	if !data.IsObject() {
 		return nil, errors.New("responses request must be a JSON object")
 	}
-	envelope, err := common.Marshal(struct {
-		Type     string            `json:"type"`
-		StreamID string            `json:"stream_id,omitempty"`
-		Generate common.RawMessage `json:"generate,omitempty"`
-	}{Type: responsesWSEventTypeResponseCreate, StreamID: streamID, Generate: generate})
-	if err != nil {
-		return nil, err
-	}
-
 	type memberSpan struct{ start, end int }
 	var localMembers [16]memberSpan
 	members := localMembers[:0]
 	positions := make(map[string]int)
+	var streamOptions gjson.Result
 	data.ForEach(func(key, value gjson.Result) bool {
 		switch key.Str {
-		case "type", "stream_id", "event_id", "background", "stream", "stream_options":
+		case "type", "stream_id", "event_id", "background", "stream":
 			// Channel overrides must not shadow the WebSocket envelope.
 			return true
+		case "stream_options":
+			if !preserveStreamOptions {
+				streamOptions = value
+				return true
+			}
 		case "generate":
 			if len(generate) > 0 {
 				return true
@@ -1657,6 +1819,29 @@ func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, st
 		}
 		return true
 	})
+
+	// The prepared body includes channel overrides. Keep only Responses options
+	// on a normal create. Passthrough already has the original member in spans.
+	var supportedOptions map[string]common.RawMessage
+	if streamOptions.IsObject() {
+		supportedOptions = make(map[string]common.RawMessage, 2)
+		streamOptions.ForEach(func(key, value gjson.Result) bool {
+			switch key.Str {
+			case "include_obfuscation", "reasoning_summary_delivery":
+				supportedOptions[key.Str] = jsonData[value.Index : value.Index+len(value.Raw)]
+			}
+			return true
+		})
+	}
+	envelope, err := common.Marshal(struct {
+		Type          string                       `json:"type"`
+		StreamID      string                       `json:"stream_id,omitempty"`
+		Generate      common.RawMessage            `json:"generate,omitempty"`
+		StreamOptions map[string]common.RawMessage `json:"stream_options,omitempty"`
+	}{Type: responsesWSEventTypeResponseCreate, StreamID: streamID, Generate: generate, StreamOptions: supportedOptions})
+	if err != nil {
+		return nil, err
+	}
 	outputSize := len(envelope)
 	for _, span := range members {
 		outputSize += 1 + span.end - span.start

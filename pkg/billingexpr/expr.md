@@ -233,6 +233,12 @@ branch can charge even with zero tokens. Failures retain the normal refund
 policy. Settlement evaluation errors retain the reservation and its estimated
 billing unit.
 
+Responses warmups reserve zero for generation and keep the pricing snapshot.
+WebSocket creates can request a warmup with `generate: false`, and HTTP and
+WebSocket creates accept `prompt_cache_options.prewarm: true`. A final response
+with no output or billable tool calls and explicitly reported zero tokens
+incurs no generation fee. Measured usage uses the configured pricing.
+
 Evaluation results expose `billing_unit` (`token` or `request`) and, for a
 request-priced leaf, `fixed_price` in USD before multipliers. Pre-consume snapshots
 carry `estimated_billing_unit` and `estimated_fixed_price`; consume logs append

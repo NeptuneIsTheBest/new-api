@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -104,6 +107,19 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 // ConsumeResponsesQuota applies the same settlement dispatch to HTTP and
 // WebSocket Responses usage. Compact requests keep their separate repricing.
 func ConsumeResponsesQuota(c *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage) {
+	if info.IsResponsesWarmup() && info.ResponsesBilling.NeedsPromptEstimate && constant.CountToken && info.Request != nil && usage != nil {
+		// Only an accepted warmup with missing or contradicted usage reaches
+		// this fallback. Its response may already have been delivered.
+		tokens, err := service.EstimateRequestToken(c, info.Request.GetTokenCountMeta(), info)
+		if err != nil {
+			logger.LogWarn(c, common.LogText("failed to estimate Responses warmup input at settlement: %s", err.Error()))
+		} else {
+			info.SetEstimatePromptTokens(tokens)
+			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
+			usage.PromptTokens = tokens
+			usage.TotalTokens = max(usage.TotalTokens, tokens+usage.CompletionTokens)
+		}
+	}
 	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
 		service.PostAudioConsumeQuota(c, info, usage, nil)
 		return

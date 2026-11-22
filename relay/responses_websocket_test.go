@@ -23,12 +23,14 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // normalizeResponsesWSTestMessage runs the read-loop envelope parse followed by
@@ -400,76 +402,104 @@ func TestSelectResponsesWSChannelHonorsStrictSessionBinding(t *testing.T) {
 	assert.Equal(t, fallback.Id, channel.Id)
 }
 
-func TestNormalizeResponsesWSCreateEventWrapper(t *testing.T) {
-	message := []byte(`{
-		"type": "response.create",
-		"event_id": "evt_1",
-		"generate": false,
-		"response": {
-			"model": "gpt-5.3-codex-spark",
-			"input": "hi",
-			"store": false,
-			"stream": true,
-			"stream_options": {"include_usage": true}
+func TestResponsesWSCreateRequestFields(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	const summary = `{"reasoning_summary_delivery":"sequential_cutoff"}`
+	const supported = `{"include_obfuscation":false,"reasoning_summary_delivery":"sequential_cutoff"}`
+	const mixed = `{"vendor": {"id":9007199254740993}, "reasoning_summary_delivery":"sequential_cutoff","include_usage":true,"include_obfuscation":false}`
+	const vendorOptions = `{"reasoning_summary_delivery":{"strategy":"custom"},"include_usage":"verbose"}`
+	const invalidObfuscation = `{"include_obfuscation":"false"}`
+	const programs = `{"cyber":"standard"}`
+	settings := model_setting.GetGlobalSettings()
+	previous := settings.PassThroughRequestEnabled
+	t.Cleanup(func() { settings.PassThroughRequestEnabled = previous })
+
+	for _, tc := range []struct {
+		name, options, want, accessPrograms, ingressOptions     string
+		allowObfuscation, channelPassthrough, globalPassthrough bool
+		language, wantError                                     string
+	}{
+		{name: "allowed", options: mixed, want: supported, allowObfuscation: true, accessPrograms: programs},
+		{name: "explicit true", options: `{"include_obfuscation":true}`, want: `{"include_obfuscation":true}`, allowObfuscation: true},
+		{name: "default", options: mixed, want: summary, accessPrograms: programs},
+		{name: "only disabled option", options: `{"include_obfuscation":false}`},
+		{name: "ignored Chat option", options: `{"include_usage":"verbose","reasoning_summary_delivery":"sequential_cutoff"}`, want: summary},
+		{name: "invalid options/en", options: `[]`, language: "en", wantError: "stream_options must be a JSON object."},
+		{name: "invalid options/zh-CN", options: `[]`, language: "zh-CN", wantError: "stream_options 必须是 JSON 对象。"},
+		{name: "invalid options/zh-TW", options: `[]`, language: "zh-TW", wantError: "stream_options 必須是 JSON 物件。"},
+		{name: "invalid obfuscation/en", options: invalidObfuscation, language: "en", wantError: "stream_options.include_obfuscation must be a boolean."},
+		{name: "invalid obfuscation/zh-CN", options: invalidObfuscation, language: "zh-CN", wantError: "stream_options.include_obfuscation 必须是布尔值。"},
+		{name: "invalid obfuscation/zh-TW", options: invalidObfuscation, language: "zh-TW", wantError: "stream_options.include_obfuscation 必須是布林值。"},
+		{name: "invalid delivery/en", options: vendorOptions, language: "en", wantError: "stream_options.reasoning_summary_delivery must be a string."},
+		{name: "invalid delivery/zh-CN", options: vendorOptions, language: "zh-CN", wantError: "stream_options.reasoning_summary_delivery 必须是字符串。"},
+		{name: "invalid delivery/zh-TW", options: vendorOptions, language: "zh-TW", wantError: "stream_options.reasoning_summary_delivery 必須是字串。"},
+		{name: "omitted options", accessPrograms: programs, allowObfuscation: true},
+		{name: "ingress rewrite", options: `{"include_obfuscation":true}`, ingressOptions: mixed, want: supported, allowObfuscation: true},
+		{name: "channel passthrough", options: mixed, want: mixed, channelPassthrough: true, accessPrograms: programs},
+		{name: "global passthrough", options: mixed, want: mixed, globalPassthrough: true},
+		{name: "passthrough vendor types", options: vendorOptions, want: vendorOptions, channelPassthrough: true},
+		{name: "passthrough empty object", options: `{}`, want: `{}`, channelPassthrough: true},
+	} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/wrapped=%t", tc.name, wrapped), func(t *testing.T) {
+				settings.PassThroughRequestEnabled = tc.globalPassthrough
+				request := `"model":"gpt-test","input":"hi","store":false`
+				if tc.accessPrograms != "" {
+					request += `,"access_programs":` + tc.accessPrograms
+				}
+				want := `{"type":"response.create","generate":false,` + request
+				request += `,"stream":true,"background":true`
+				if tc.options != "" {
+					request += `,"stream_options":` + tc.options
+				}
+				if wrapped {
+					request = `"stream_options":{"include_usage":true},"access_programs":{},"response":{` + request + `}`
+				}
+				create, eventID, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","event_id":"evt_1","generate":false,` + request + `}`))
+				require.NoError(t, err)
+				assert.Equal(t, "evt_1", eventID)
+				assert.Nil(t, create.Request.Stream)
+				assert.Equal(t, tc.options, gjson.GetBytes(create.Body, "stream_options").Raw)
+
+				body := create.Body
+				if tc.ingressOptions != "" {
+					body = bytes.Replace(body, []byte(tc.options), []byte(tc.ingressOptions), 1)
+				}
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+				c.Request.Header.Set("Accept-Language", tc.language)
+				t.Cleanup(func() { common.CleanupBodyStorage(c) })
+				if tc.ingressOptions != "" {
+					require.Nil(t, reloadResponsesWSCreate(c, &create))
+				}
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
+				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: tc.channelPassthrough})
+				common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{AllowIncludeObfuscation: tc.allowObfuscation})
+				info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+				info.IsStream = true
+				frame, apiErr := buildResponsesWSCreatePayload(c, info, &create)
+				if tc.wantError != "" {
+					require.NotNil(t, apiErr)
+					assert.True(t, types.IsSkipRetryError(apiErr))
+					payload, err := buildResponsesWSErrorPayload(eventID, create.StreamID, apiErr)
+					require.NoError(t, err)
+					event := gjson.ParseBytes(payload)
+					assert.Equal(t, int64(http.StatusBadRequest), event.Get("status").Int())
+					assert.Equal(t, string(types.ErrorCodeInvalidRequest), event.Get("error.code").String())
+					assert.Equal(t, tc.wantError, event.Get("error.message").String())
+					return
+				}
+				require.Nil(t, apiErr)
+				if tc.want != "" {
+					want += `,"stream_options":` + tc.want
+				}
+				assert.JSONEq(t, want+`}`, string(frame))
+				if tc.channelPassthrough || tc.globalPassthrough {
+					assert.Equal(t, tc.options, gjson.GetBytes(frame, "stream_options").Raw)
+				}
+			})
 		}
-	}`)
-
-	create, eventID, err := normalizeResponsesWSTestMessage(message)
-	if err != nil {
-		t.Fatalf("normalizeResponsesWSTestMessage() error = %v", err)
-	}
-	req := create.Request
-	if eventID != "evt_1" {
-		t.Fatalf("eventID = %q, want evt_1", eventID)
-	}
-	if req.Model != "gpt-5.3-codex-spark" {
-		t.Fatalf("model = %q", req.Model)
-	}
-	if strings.TrimSpace(string(create.Generate)) != "false" {
-		t.Fatalf("generate = %s, want false", create.Generate)
-	}
-	if req.Stream != nil {
-		t.Fatalf("stream = %v, want nil", req.Stream)
-	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
-	}
-	if strings.TrimSpace(string(req.Store)) != "false" {
-		t.Fatalf("store = %s, want false", req.Store)
-	}
-}
-
-func TestNormalizeResponsesWSCreateEventFlat(t *testing.T) {
-	message := []byte(`{
-		"type": "response.create",
-		"event_id": "evt_2",
-		"model": "gpt-5.3-codex-spark",
-		"input": "hi",
-		"generate": false,
-		"stream": true,
-		"background": true,
-		"stream_options": {"include_usage": true}
-	}`)
-
-	create, eventID, err := normalizeResponsesWSTestMessage(message)
-	if err != nil {
-		t.Fatalf("normalizeResponsesWSTestMessage() error = %v", err)
-	}
-	req := create.Request
-	if eventID != "evt_2" {
-		t.Fatalf("eventID = %q, want evt_2", eventID)
-	}
-	if req.Model != "gpt-5.3-codex-spark" {
-		t.Fatalf("model = %q", req.Model)
-	}
-	if strings.TrimSpace(string(create.Generate)) != "false" {
-		t.Fatalf("generate = %s, want false", create.Generate)
-	}
-	if req.Stream != nil {
-		t.Fatalf("stream = %v, want nil", req.Stream)
-	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
 	}
 }
 
@@ -482,7 +512,7 @@ func TestResponsesWSCreateEventKeepsClientBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, `{"model":"m","text":{"format":{"type":"json_schema","name":"r","schema":{"properties":{"b":{},"a":{}}}}},"temperature":1.0}`, string(create.Body))
 
-	event, err := buildResponsesWSCreateEvent(create.Body, create.Generate, "s1")
+	event, err := buildResponsesWSCreateEvent(create.Body, create.Generate, "s1", true)
 	require.NoError(t, err)
 	assert.Equal(t, `{"model":"m","text":{"format":{"type":"json_schema","name":"r","schema":{"properties":{"b":{},"a":{}}}}},"temperature":1.0,"type":"response.create","stream_id":"s1","generate":false}`, string(event))
 
@@ -519,7 +549,7 @@ func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := []byte(tc.body)
-			got, err := buildResponsesWSCreateEvent(payload, common.RawMessage(tc.generate), tc.streamID)
+			got, err := buildResponsesWSCreateEvent(payload, common.RawMessage(tc.generate), tc.streamID, false)
 			require.NoError(t, err)
 			assert.JSONEq(t, tc.want, string(got))
 			assert.Equal(t, tc.body, string(payload))
@@ -527,11 +557,11 @@ func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
 	}
 	for _, invalid := range []string{"", "{", "[]", "null", `"text"`, "{} trailing", `{"input":1,}`} {
 		t.Run("invalid_"+invalid, func(t *testing.T) {
-			_, err := buildResponsesWSCreateEvent([]byte(invalid), nil, "")
+			_, err := buildResponsesWSCreateEvent([]byte(invalid), nil, "", false)
 			require.Error(t, err)
 		})
 	}
-	_, err := buildResponsesWSCreateEvent([]byte(`{}`), common.RawMessage(`{`), "")
+	_, err := buildResponsesWSCreateEvent([]byte(`{}`), common.RawMessage(`{`), "", false)
 	require.Error(t, err)
 }
 
@@ -539,7 +569,7 @@ func TestBuildResponsesWSCreateEventPreservesLargeRawInput(t *testing.T) {
 	input := `[{"type":"input_image","image_url":"data:image/png;base64,` + strings.Repeat("a", 1<<20) + `"}]`
 	payload := []byte(`{"input":` + input + `,"vendor":{"id":9007199254740993,"price":1.2300e+4,"nested":{"stream":true}}}`)
 	original := bytes.Clone(payload)
-	got, err := buildResponsesWSCreateEvent(payload, nil, "")
+	got, err := buildResponsesWSCreateEvent(payload, nil, "", true)
 	require.NoError(t, err)
 	var event map[string]common.RawMessage
 	require.NoError(t, common.Unmarshal(got, &event))
@@ -566,7 +596,7 @@ func TestResponsesWSCreatePayloadStorageAndOverrides(t *testing.T) {
 				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: passthrough})
 				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{
 					"type": "wrong", "event_id": "override", "background": true, "stream": true,
-					"stream_id": "override", "stream_options": map[string]any{"include_usage": true},
+					"stream_id": "override", "stream_options": map[string]any{"include_usage": true, "include_obfuscation": false, "vendor": "ignored"},
 					"generate": true, "input": "updated", "service_tier": "auto",
 				})
 				info := relaycommon.GenRelayInfoResponses(c, &request)
@@ -575,13 +605,13 @@ func TestResponsesWSCreatePayloadStorageAndOverrides(t *testing.T) {
 				defer storage.Close()
 				assert.Equal(t, disk, storage.IsDisk())
 				before := common.GetDiskCacheStats()
-				payload, apiErr := buildResponsesWSCreatePayload(c, info, request, common.RawMessage(`false`), "planner")
+				payload, apiErr := buildResponsesWSCreatePayload(c, info, &responsesWSCreateRequest{Request: request, Generate: common.RawMessage(`false`), StreamID: "planner"})
 				require.Nil(t, apiErr)
 				assert.Equal(t, before, common.GetDiskCacheStats(), "event construction must not create outbound storage")
 				if passthrough {
 					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"hello","service_tier":"priority","vendor":9007199254740993}`, string(payload))
 				} else {
-					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"updated","service_tier":"auto"}`, string(payload))
+					assert.JSONEq(t, `{"type":"response.create","stream_id":"planner","generate":false,"model":"gpt-4.1","input":"updated","service_tier":"auto","stream_options":{"include_obfuscation":false}}`, string(payload))
 				}
 				stored, err := storage.Bytes()
 				require.NoError(t, err)
@@ -594,13 +624,10 @@ func TestResponsesWSCreatePayloadStorageAndOverrides(t *testing.T) {
 
 func TestHTTPResponsesRequestOmitsWebSocketMetadata(t *testing.T) {
 	var req dto.OpenAIResponsesRequest
-	require.NoError(t, common.Unmarshal([]byte(`{"model":"gpt-5.3-codex-spark","input":"hi","generate":false,"stream_id":"planner"}`), &req))
+	require.NoError(t, common.Unmarshal([]byte(`{"model":"gpt-5.3-codex-spark","input":"hi","stream":true,"generate":false,"stream_id":"planner","stream_options":{"include_obfuscation":false,"reasoning_summary_delivery":"sequential_cutoff"},"access_programs":{"cyber":"standard"}}`), &req))
 	got, err := common.Marshal(req)
 	require.NoError(t, err)
-	var data map[string]any
-	require.NoError(t, common.Unmarshal(got, &data))
-	assert.NotContains(t, data, "stream_id")
-	assert.NotContains(t, data, "generate")
+	assert.JSONEq(t, `{"model":"gpt-5.3-codex-spark","input":"hi","stream":true,"stream_options":{"include_obfuscation":false,"reasoning_summary_delivery":"sequential_cutoff"},"access_programs":{"cyber":"standard"}}`, string(got))
 }
 
 func TestBuildResponsesWSErrorPayloadIncludesStatus(t *testing.T) {
@@ -757,7 +784,7 @@ func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
 	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
 	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
-	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+	payload, apiErr := buildResponsesWSCreatePayload(c, info, &create)
 	require.Nil(t, apiErr)
 	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
 	storage, err := common.GetBodyStorage(c)
@@ -800,7 +827,7 @@ func TestResponsesWSStreamIdentity(t *testing.T) {
 				common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
 				common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: passthrough})
 				info := relaycommon.GenRelayInfoResponses(c, &create.Request)
-				payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+				payload, apiErr := buildResponsesWSCreatePayload(c, info, &create)
 				require.Nil(t, apiErr)
 				var event map[string]any
 				require.NoError(t, common.Unmarshal(payload, &event))

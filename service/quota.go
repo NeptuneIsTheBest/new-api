@@ -340,10 +340,19 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		GroupRatio: groupRatio,
 	}
 
-	quota, clamp := calculateAudioQuota(quotaInfo)
-	noteQuotaClamp(relayInfo, clamp)
-	if tieredOk {
-		quota = tieredQuota
+	if relayInfo.IsResponsesWarmup() {
+		// A measured warmup can owe the frozen legacy per-call price even
+		// when the provider generated no audio.
+		quotaInfo.ModelPrice = modelPrice
+	}
+	var quota int
+	if !relayInfo.IsZeroUsageWarmup() {
+		var clamp *common.QuotaClamp
+		quota, clamp = calculateAudioQuota(quotaInfo)
+		noteQuotaClamp(relayInfo, clamp)
+		if tieredOk {
+			quota = tieredQuota
+		}
 	}
 
 	totalTokens := usage.TotalTokens
@@ -364,7 +373,8 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 	}
 
 	// record all the consume log even if quota is 0
-	if totalTokens == 0 && !fixedPriceBilling {
+	warmupAccounted := relayInfo.IsResponsesWarmup() && relayInfo.ResponsesBilling.Usage != relaycommon.WarmupUsageUnknown
+	if totalTokens == 0 && !fixedPriceBilling && !warmupAccounted {
 		// in this case, must be some error happened
 		// we cannot just return, because we may have to return the pre-consumed quota
 		quota = 0

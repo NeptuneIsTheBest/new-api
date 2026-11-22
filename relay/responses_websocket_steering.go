@@ -15,11 +15,13 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
@@ -68,11 +70,49 @@ func (s *responsesWSSession) sendSteerError(body []byte, apiErr *types.NewAPIErr
 		}
 	}
 	s.stateMu.Unlock()
-	openaiErr := apiErr.ToOpenAIError()
-	payload, err := common.Marshal(responsesWSErrorEvent{Type: "error", Status: apiErr.StatusCode, StreamID: streamID, ResponseID: parentID, Error: &openaiErr})
-	if err == nil {
-		_ = s.writeClient(websocket.TextMessage, payload)
+	s.sendControlError("", streamID, parentID, apiErr)
+}
+
+func (s *responsesWSSession) rejectUnavailableSteer(response *responsesWSResponse, input common.RawMessage) *types.NewAPIError {
+	s.stateMu.Lock()
+	completed := response != nil && response.completed && !s.closing
+	s.stateMu.Unlock()
+	if !completed {
+		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)))
 	}
+	s.deliverControlReply(response, responsesWSControlReply{kind: websocket.TextMessage, body: input, localSteer: true})
+	return nil
+}
+
+func (s *responsesWSSession) writeControlReply(response *responsesWSResponse, reply responsesWSControlReply) error {
+	if !reply.localSteer {
+		return s.writeClient(response, responsesWSMessage{kind: reply.kind, body: reply.body, control: true})
+	}
+	message := i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)
+	if !response.completed {
+		return s.sendControlError("", response.streamID, response.responseID, newResponsesWSInvalidRequestError(errors.New(message)))
+	}
+	event := map[string]any{
+		"type":            "response.steer.failed",
+		"sequence_number": 0, // The client writer advances this to the next available sequence.
+		"steer": map[string]any{
+			"previous_response_id": response.responseID,
+			"input":                common.RawMessage(reply.body),
+		},
+		"error": map[string]string{
+			"type":    "invalid_request_error",
+			"code":    "response_already_completed",
+			"message": message,
+		},
+	}
+	if response.streamID != "" {
+		event["stream_id"] = response.streamID
+	}
+	body, err := common.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return s.writeClient(response, responsesWSMessage{kind: websocket.TextMessage, body: body, control: true})
 }
 
 func responsesWSInputItems(input common.RawMessage) []common.RawMessage {
@@ -156,6 +196,18 @@ func responsesWSContinuationRequest(base responsesWSCreateRequest, items []commo
 	}
 	if explicit {
 		items = append(items, responsesWSInputItems(base.Request.Input)...)
+	} else {
+		// A steer starts a generation. Its logical pricing input inherits the
+		// parent's cache configuration, except for the one-shot warmup flag.
+		base.Generate = nil
+		delete(fields, "generate")
+		if options := fields["prompt_cache_options"]; responsesCachePrewarm(ojson.GetBytesNoCopy(options, "@this")) {
+			doc := ojson.NewDoc(options)
+			if err := relaycommon.DeleteJSONMember(doc, "prewarm"); err != nil {
+				return base, newResponsesWSInvalidRequestError(err)
+			}
+			fields["prompt_cache_options"] = doc.Bytes()
+		}
 	}
 	input, err := common.Marshal(items)
 	if err != nil {
@@ -167,8 +219,8 @@ func responsesWSContinuationRequest(base responsesWSCreateRequest, items []commo
 	if err != nil {
 		return base, newResponsesWSInvalidRequestError(err)
 	}
-	create := responsesWSCreateRequest{Body: body, StreamID: base.StreamID, Generate: base.Generate}
-	if err := common.Unmarshal(body, &create.Request); err != nil {
+	create := responsesWSCreateRequest{StreamID: base.StreamID, Generate: base.Generate}
+	if err := create.decodeBody(body); err != nil {
 		return base, newResponsesWSInvalidRequestError(err)
 	}
 	return create, nil
@@ -184,30 +236,25 @@ func (s *responsesWSSession) rememberResponsesRequest(c *gin.Context, state *res
 }
 
 func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
-	parentID, input, valid := parseResponsesWSSteer(body)
+	parentID, originalInput, valid := parseResponsesWSSteer(body)
 	if !valid {
 		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSInvalidSteer)))
 	}
 	s.steerMu.Lock()
 	defer s.steerMu.Unlock()
 	s.stateMu.Lock()
-	var stream *responsesWSStream
-	for _, candidate := range s.streams {
-		if state := candidate.current; state != nil && state.responseID == parentID && !state.upstreamDone {
-			stream = candidate
-			break
-		}
-	}
-	if stream == nil || s.closing {
+	response, parent := s.responseByIDLocked(parentID)
+	if parent == nil || parent.upstreamDone || s.closing {
 		s.stateMu.Unlock()
-		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)))
+		return s.rejectUnavailableSteer(response, originalInput)
 	}
-	parent := stream.current
+	stream := s.streams[parent.streamID]
 	inputPlugins := parent.inputPlugins
 	s.stateMu.Unlock()
 	controlContext := &gin.Context{Request: s.request.Clone(s.ctx)}
 	controlContext.Request.Method = http.MethodPost
 	controlContext.Set(common.RequestIdKey, s.requestID)
+	input := originalInput
 	checked, steps, record, inputErr := inputPlugins.Check(controlContext, input)
 	if inputErr != nil {
 		return inputErr
@@ -226,7 +273,7 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 	s.stateMu.Lock()
 	if stream.current != parent || parent.upstreamDone || s.closing {
 		s.stateMu.Unlock()
-		return newResponsesWSInvalidRequestError(errors.New(i18n.Translate(s.lang, i18n.MsgResponsesWSSteerUnavailable)))
+		return s.rejectUnavailableSteer(response, originalInput)
 	}
 	if s.steerCount >= responsesWSMaxQueued || int64(len(input)) > s.maxQueuedBytes-s.steerBytes {
 		s.stateMu.Unlock()
@@ -254,13 +301,14 @@ func (s *responsesWSSession) submitSteer(body []byte) *types.NewAPIError {
 	var message []byte
 	if apiErr == nil && first {
 		var err error
-		message, err = buildResponsesWSCreateEvent(create.Body, create.Generate, create.StreamID)
+		// The local reservation inherits the parent's request before channel filtering.
+		message, err = buildResponsesWSCreateEvent(create.Body, create.Generate, create.StreamID, true)
 		if err != nil {
 			apiErr = newResponsesWSInvalidRequestError(err)
 		}
 	}
 	if apiErr == nil && first {
-		reservation = &responsesWSCallState{streamID: parent.streamID, previousResponseID: parentID,
+		reservation = &responsesWSCallState{responsesWSResponse: &responsesWSResponse{streamID: parent.streamID}, previousResponseID: parentID,
 			automatic: true, parentID: parentID, parentDone: parent.done, create: create, channelMeta: parent.channelMeta,
 			inputPlugins: inputPlugins, inputSteps: steps, inputRecord: record,
 			reserveMultiplier: parent.reserveMultiplier, inbox: make(chan responsesWSMessage, 1),
@@ -377,18 +425,8 @@ func (s *responsesWSSession) updateResponsesWSSteerReservation(c *gin.Context, i
 	if info.TieredBillingSnapshot != nil {
 		copy := *info.TieredBillingSnapshot
 		snapshot = &copy
-		cost, trace, runErr := billingexpr.RunExprByHashWithRequest(snapshot.ExprString, snapshot.ExprHash, billingexpr.TokenParams{P: float64(tokens), Len: float64(tokens)}, request)
-		if runErr != nil {
-			return types.NewError(runErr, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
-		}
-		beforeGroup := cost / 1_000_000 * snapshot.QuotaPerUnit
-		if trace.BillingUnit != billingexpr.BillingUnitRequest {
-			beforeGroup *= snapshot.PreConsumeMultiplier
-		}
-		quota, err = billingexpr.QuotaRoundStrict(beforeGroup * snapshot.GroupRatio)
-		snapshot.EstimatedPromptTokens = tokens
-		snapshot.EstimatedQuotaBeforeGroup, snapshot.EstimatedQuotaAfterGroup = beforeGroup, quota
-		snapshot.EstimatedTier, snapshot.EstimatedBillingUnit, snapshot.EstimatedFixedPrice = trace.MatchedTier, trace.BillingUnit, trace.FixedPrice
+		err = helper.EstimateTieredReservation(snapshot, request, tokens, snapshot.GroupRatio, false)
+		quota = snapshot.EstimatedQuotaAfterGroup
 	} else if !info.PriceData.UsePrice {
 		quota, err = common.QuotaFromFloatStrict(float64(tokens) * state.reserveMultiplier * info.PriceData.ModelRatio * info.PriceData.GroupRatioInfo.GroupRatio)
 	}
@@ -436,7 +474,9 @@ func (s *responsesWSSession) handleSteeringEvent(incoming responsesWSMessage) bo
 	defer s.steerMu.Unlock()
 	parentID := gjson.GetBytes(incoming.body, "steer.previous_response_id").String()
 	id := gjson.GetBytes(incoming.body, "steer.id").String()
+	streamID := gjson.GetBytes(incoming.body, "stream_id").String()
 	s.stateMu.Lock()
+	response := s.controlReplyResponseLocked(parentID, streamID)
 	var stream *responsesWSStream
 	for _, candidate := range s.streams {
 		if candidate.steering != nil && candidate.steering.parentID == parentID {
@@ -445,14 +485,10 @@ func (s *responsesWSSession) handleSteeringEvent(incoming responsesWSMessage) bo
 		}
 	}
 	var stop *responsesWSCallState
-	var parentDone <-chan struct{}
 	var update *responsesWSCallState
 	var create responsesWSCreateRequest
 	if stream != nil {
 		pending := stream.steering
-		if current := stream.current; current != nil && current.responseID == parentID && current.upstreamDone {
-			parentDone = current.done
-		}
 		var submission *responsesWSSteerSubmission
 		for _, candidate := range pending.submissions {
 			if id != "" && candidate.id == id || candidate.id == "" && (eventType == "response.steer.accepted" || id == "" && eventType == "response.steer.failed") {
@@ -491,16 +527,7 @@ func (s *responsesWSSession) handleSteeringEvent(incoming responsesWSMessage) bo
 		stop.abortOnce.Do(func() { close(stop.abort) })
 		<-stop.done
 	}
-	if parentDone != nil {
-		select {
-		case <-parentDone:
-		case <-s.ctx.Done():
-			return true
-		}
-	}
-	if err := s.writeClient(incoming.kind, incoming.body); err != nil {
-		s.shutdown(websocket.CloseInternalServerErr, "")
-	}
+	s.deliverControlReply(response, responsesWSControlReply{kind: incoming.kind, body: incoming.body})
 	return true
 }
 
@@ -523,27 +550,20 @@ func (s *responsesWSSession) admitAutomaticResponse(body []byte) bool {
 		s.stateMu.Unlock()
 		return true
 	}
-	var stream *responsesWSStream
-	for lane, candidate := range s.streams {
-		if pending := candidate.steering; pending != nil && pending.parentID == parentID && (streamID == "" || lane == streamID) {
-			stream = candidate
-			break
-		}
-	}
+	// Forks can share a parent across lanes. An omitted stream_id selects the default lane.
+	stream := s.streams[streamID]
 	if stream == nil {
-		admitted := false
-		for lane, candidate := range s.streams {
-			state := candidate.current
-			if state != nil && state.submitted && (streamID == "" || lane == streamID) &&
-				(state.responseID == responseID || !state.automatic && state.responseID == "") {
-				admitted = true
-				break
-			}
-		}
+		s.stateMu.Unlock()
+		return false
+	}
+	pending := stream.steering
+	if pending == nil || pending.parentID != parentID {
+		state := stream.current
+		admitted := state != nil && state.submitted &&
+			(state.responseID == responseID || !state.automatic && state.responseID == "")
 		s.stateMu.Unlock()
 		return admitted
 	}
-	pending := stream.steering
 	reservation := pending.reservation
 	if reservation == nil {
 		// An explicit tool-result continuation owns its ordinary request.

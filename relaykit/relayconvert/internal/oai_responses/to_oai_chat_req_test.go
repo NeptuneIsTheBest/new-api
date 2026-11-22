@@ -21,11 +21,14 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 	parallelToolCalls := true
 
 	got, err := ResponsesRequestToChatCompletionsRequest(context.Background(), &dto.OpenAIResponsesRequest{
-		Model:                "gpt-test",
-		Instructions:         mustRawMessage(t, "system rules"),
-		Input:                mustRawMessage(t, "hello"),
-		Stream:               &stream,
-		StreamOptions:        &dto.StreamOptions{IncludeUsage: true},
+		Model:        "gpt-test",
+		Instructions: mustRawMessage(t, "system rules"),
+		Input:        mustRawMessage(t, "hello"),
+		Stream:       &stream,
+		StreamOptions: &dto.ResponsesStreamOptions{
+			StreamOptions:            dto.StreamOptions{IncludeUsage: true, IncludeObfuscation: lo.ToPtr(false)},
+			ReasoningSummaryDelivery: lo.ToPtr("sequential_cutoff"),
+		},
 		MaxOutputTokens:      &maxOutputTokens,
 		Temperature:          &temperature,
 		TopP:                 &topP,
@@ -45,7 +48,9 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 	assert.Equal(t, dto.Message{Role: "user", Content: "hello"}, got.Messages[1])
 	assert.Same(t, &stream, got.Stream)
 	require.NotNil(t, got.StreamOptions)
-	assert.True(t, got.StreamOptions.IncludeUsage)
+	options, err := kitutil.Marshal(got.StreamOptions)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"include_usage":true,"include_obfuscation":false}`, string(options))
 	assert.Equal(t, maxOutputTokens, lo.FromPtr(got.MaxCompletionTokens))
 	assert.Equal(t, 0.0, lo.FromPtr(got.Temperature))
 	assert.Equal(t, 0.9, lo.FromPtr(got.TopP))
