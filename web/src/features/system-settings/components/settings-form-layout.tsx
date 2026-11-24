@@ -42,6 +42,7 @@ type SettingsSwitchFieldProps = SettingsSwitchRowProps & {
   onCheckedChange: (checked: boolean) => void
   label: ReactNode
   description?: ReactNode
+  descriptionSize?: 'xs' | 'sm'
   disabled?: boolean
 }
 
@@ -113,6 +114,7 @@ export function SettingsSwitchField({
   onCheckedChange,
   label,
   description,
+  descriptionSize = 'xs',
   disabled,
   className,
   ...props
@@ -126,7 +128,10 @@ export function SettingsSwitchField({
         {description ? (
           <p
             id={controlId ? `${controlId}-description` : undefined}
-            className='text-muted-foreground text-xs'
+            className={cn(
+              'text-muted-foreground',
+              descriptionSize === 'sm' ? 'text-sm' : 'text-xs'
+            )}
           >
             {description}
           </p>

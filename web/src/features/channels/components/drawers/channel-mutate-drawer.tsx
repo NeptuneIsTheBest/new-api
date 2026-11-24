@@ -2393,6 +2393,7 @@ export function ChannelMutateDrawer({
           description={t(
             'Use Zstd to compress Responses request bodies sent upstream and reduce data transfer. Enable only if the upstream supports Zstd.'
           )}
+          descriptionSize='sm'
           className='px-4 py-3'
         />
       )}
