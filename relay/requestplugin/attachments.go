@@ -780,16 +780,21 @@ func forEachJSONString(body string, fn func(start, end int, isKey bool)) {
 			continue
 		}
 		end := index + 1
-		for end < len(body) && body[end] != '"' {
-			if body[end] == '\\' {
-				end++
+		for {
+			quote := strings.IndexByte(body[end:], '"')
+			if quote < 0 {
+				return
 			}
-			end++
+			end += quote + 1
+			// An odd run of backslashes escapes this quote.
+			slashes := 0
+			for i := end - 2; i > index && body[i] == '\\'; i-- {
+				slashes++
+			}
+			if slashes%2 == 0 {
+				break
+			}
 		}
-		if end >= len(body) {
-			return
-		}
-		end++
 		next := end
 		for next < len(body) && (body[next] == ' ' || body[next] == '\t' || body[next] == '\r' || body[next] == '\n') {
 			next++

@@ -71,7 +71,7 @@ var optionalPlugin = strings.Replace(stagePlugin, `key: "rp-stages", name: "Stag
 const egressPlugin = `export const meta = {apiVersion: 1, key: "rp-egress", name: "Egress", version: "1.0.0", author: {name: "Test"}};
 export function egress() { return {action: "continue"}; }`
 
-func setupPlugins(t *testing.T, instances string) {
+func setupPlugins(t testing.TB, instances string) {
 	t.Helper()
 	require.NoError(t, i18n.Init())
 	for _, source := range []string{stagePlugin, optionalPlugin, egressPlugin} {
@@ -82,7 +82,7 @@ func setupPlugins(t *testing.T, instances string) {
 	setInstances(t, instances)
 }
 
-func setInstances(t *testing.T, instances string) {
+func setInstances(t testing.TB, instances string) {
 	t.Helper()
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: instances}))
 	t.Cleanup(func() {
@@ -618,38 +618,132 @@ func TestPublicRecordCaps(t *testing.T) {
 }
 
 func TestMediaReencodeLosslessWebP(t *testing.T) {
-	source := image.NewNRGBA(image.Rect(0, 0, 192, 128))
-	for y := range 128 {
-		for x := range 192 {
-			source.SetNRGBA(x, y, color.NRGBA{R: uint8(x), G: uint8(y * 2), B: uint8((x + y) % 7 * 30), A: 255})
-		}
-	}
-	var buffer bytes.Buffer
-	require.NoError(t, (&png.Encoder{CompressionLevel: png.NoCompression}).Encode(&buffer, source))
-	original := buffer.Len()
-	body := `{"model":"gpt-up","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(buffer.Bytes()) + `"}}]}]}`
 	setupPlugins(t, `[{"id":"rp","name":"Rp","plugin":"rp-stages","enabled":true,"global":true,"config":{"effects":{"outbound":[
 		{"type":"media.reencode","media":0,"format":"webp"}]}}}]`)
 
-	outcome := NewPlan().Run(context.Background(), Call{Stage: StageOutbound, Body: []byte(body)})
-	require.Nil(t, outcome.Failed)
-	url := gjson.GetBytes(outcome.Body, "messages.0.content.0.image_url.url").Str
-	require.True(t, strings.HasPrefix(url, "data:image/webp;base64,"))
-	encoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(url, "data:image/webp;base64,"))
-	require.NoError(t, err)
-	assert.Less(t, len(encoded), original)
-	decoded, err := webp.Decode(bytes.NewReader(encoded))
-	require.NoError(t, err)
-	require.Equal(t, source.Bounds(), decoded.Bounds())
-	for y := range 128 {
-		for x := range 192 {
-			require.Equal(t, source.NRGBAAt(x, y), color.NRGBAModel.Convert(decoded.At(x, y)), "pixel %d,%d", x, y)
+	mixedAlpha := []uint8{0, 127, 255}
+	for _, tc := range []struct {
+		name  string
+		size  image.Point
+		alpha []uint8
+	}{
+		// An opaque PNG decodes to *image.RGBA and exercises the encoder's color conversion.
+		{name: "opaque", size: image.Pt(192, 128), alpha: []uint8{255}},
+		{name: "alpha", size: image.Pt(192, 128), alpha: mixedAlpha},
+		{name: "alpha_max_width", size: image.Pt(16384, 2), alpha: mixedAlpha},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := image.NewNRGBA(image.Rectangle{Max: tc.size})
+			for y := range tc.size.Y {
+				for x := range tc.size.X {
+					source.SetNRGBA(x, y, color.NRGBA{
+						R: uint8(x),
+						G: uint8(y * 2),
+						B: uint8((x + y) % 7 * 30),
+						A: tc.alpha[x%len(tc.alpha)],
+					})
+				}
+			}
+			var buffer bytes.Buffer
+			require.NoError(t, (&png.Encoder{CompressionLevel: png.NoCompression}).Encode(&buffer, source))
+			body := chatBody(`{"type":"image_url","image_url":{"url":"` + dataURI("image/png", buffer.Bytes()) + `"}}`)
+			outcome := NewPlan().Run(t.Context(), Call{Stage: StageOutbound, Body: []byte(body)})
+			require.Nil(t, outcome.Failed)
+			url := gjson.GetBytes(outcome.Body, "messages.0.content.1.image_url.url").Str
+			payload, ok := strings.CutPrefix(url, "data:image/webp;base64,")
+			require.True(t, ok)
+			encoded, err := base64.StdEncoding.DecodeString(payload)
+			require.NoError(t, err)
+			assert.Less(t, len(encoded), buffer.Len())
+
+			decoded, err := webp.Decode(bytes.NewReader(encoded))
+			require.NoError(t, err)
+			require.Equal(t, source.Bounds(), decoded.Bounds())
+			for y := range tc.size.Y {
+				for x := range tc.size.X {
+					require.Equal(t, source.NRGBAAt(x, y), color.NRGBAModel.Convert(decoded.At(x, y)), "pixel %d,%d", x, y)
+				}
+			}
+			require.Len(t, outcome.Record, 1)
+			assert.Equal(t, []relaycommon.RequestPluginMediaChange{{Index: 0,
+				From: relaycommon.RequestPluginMediaForm{Mime: "image/png", Bytes: buffer.Len()},
+				To:   relaycommon.RequestPluginMediaForm{Mime: "image/webp", Bytes: len(encoded)}, Lossless: true}}, outcome.Record[0].Media)
+		})
+	}
+}
+
+func TestEncodeLosslessWebPGray16SubImage(t *testing.T) {
+	parent := image.NewGray16(image.Rect(0, 0, 6, 4))
+	bounds := image.Rect(2, 1, 5, 3)
+	source := parent.SubImage(bounds).(*image.Gray16)
+	samples := [2][3]uint16{{0x00ff, 0x0100, 0xffff}, {0x8001, 0xabcd, 0x0000}}
+	for y, row := range samples {
+		for x, sample := range row {
+			source.SetGray16(bounds.Min.X+x, bounds.Min.Y+y, color.Gray16{Y: sample})
 		}
 	}
-	require.Len(t, outcome.Record, 1)
-	assert.Equal(t, []relaycommon.RequestPluginMediaChange{{Index: 0,
-		From: relaycommon.RequestPluginMediaForm{Mime: "image/png", Bytes: original},
-		To:   relaycommon.RequestPluginMediaForm{Mime: "image/webp", Bytes: len(encoded)}, Lossless: true}}, outcome.Record[0].Media)
+
+	var encoded bytes.Buffer
+	require.NoError(t, encodeLosslessWebP(t.Context(), &encoded, source))
+	decoded, err := webp.Decode(&encoded)
+	require.NoError(t, err)
+	require.Equal(t, image.Rect(0, 0, 3, 2), decoded.Bounds())
+	for y, row := range samples {
+		for x, sample := range row {
+			gray := uint8(sample >> 8)
+			want := color.NRGBA{R: gray, G: gray, B: gray, A: 255}
+			assert.Equal(t, want, color.NRGBAModel.Convert(decoded.At(x, y)), "pixel %d,%d", x, y)
+		}
+	}
+}
+
+func TestDecodeLossyWebP(t *testing.T) {
+	// Independent 4x3 VP8 fixtures encoded with cwebp, with and without ALPH.
+	for _, tc := range []struct{ name, data string }{
+		{"opaque", "UklGRk4AAABXRUJQVlA4IEIAAACwAQCdASoEAAMAAgA0JZACdAEO9qIgAP7vrC1/tFEPvPs6JrGZwxZGU+48Z1P+ID5//KmvIrGf0ONzXRq+f/yVwAA="},
+		{"alpha", "UklGRnwAAABXRUJQVlA4WAoAAAAQAAAAAwAAAgAAQUxQSA0AAAAAADJklh5QgrQ8bqDSAFZQOCBIAAAAsAEAnQEqBAADAAIANCWQAnQBDvajgAD+6lbuWQgJJG8ZSik3n2dE1zME8R/1fWDJjPf4gPn/8qa8isZ/Q43NdGr5//JXAAAA"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := base64.StdEncoding.DecodeString(tc.data)
+			require.NoError(t, err)
+			want, err := webp.Decode(bytes.NewReader(data))
+			require.NoError(t, err)
+			img, err := decodeWebP(t.Context(), data, image.Config{Width: 4, Height: 3})
+			require.NoError(t, err)
+			require.Equal(t, want.Bounds(), img.Bounds())
+			for y := range 3 {
+				for x := range 4 {
+					assert.Equal(t, want.At(x, y), img.At(x, y), "pixel %d,%d", x, y)
+				}
+			}
+		})
+	}
+}
+
+func TestWebPReencodeWithoutReplacement(t *testing.T) {
+	// A 30-byte, single-pixel VP8L is smaller than its PNG representation.
+	item := inlineMedia{path: "/image", mime: "image/webp", data: "UklGRhYAAABXRUJQVlA4TAkAAAAvAAAAAIiI/gcA"}
+	effect := requestpatch.Effect{Type: requestpatch.EffectMediaReencode, Format: "png"}
+	ops, change, err := reencodeMedia(t.Context(), item, effect)
+	require.NoError(t, err)
+	assert.Empty(t, ops)
+	assert.Nil(t, change)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ops, change, err = reencodeMedia(ctx, item, effect)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, ops)
+	assert.Nil(t, change)
+
+	data, err := base64.StdEncoding.DecodeString(item.data)
+	require.NoError(t, err)
+	_, err = decodeWebP(ctx, data, image.Config{Width: 1, Height: 1})
+	require.ErrorIs(t, err, context.Canceled)
+	var encoded bytes.Buffer
+	err = encodeLosslessWebP(ctx, &encoded, image.NewNRGBA(image.Rect(0, 0, 1, 1)))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, encoded.Len())
 }
 
 // netPlugin posts to its instance's service from ingress and report. The

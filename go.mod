@@ -136,6 +136,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.20.3
+	github.com/kolesa-team/go-webp/v2 v2.0.1
 	github.com/ledongthuc/pdf v0.0.0-20261020125853-5e46805f718e
 	github.com/mewkiz/flac v1.0.14
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
@@ -161,7 +162,7 @@ require (
 	golang.org/x/net v0.61.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sync v0.24.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/clickhouse v0.7.0

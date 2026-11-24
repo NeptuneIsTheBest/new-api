@@ -8,6 +8,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	"image/color"
+	"image/jpeg"
 	"image/png"
 	"mime/multipart"
 	"net/http"
@@ -343,25 +345,105 @@ func TestFetchSendsAttachments(t *testing.T) {
 	assert.Empty(t, received)
 }
 
-// A WebP image re-encodes only when the canvas size its VP8X chunk declares
-// is the size of its frame: the decoder decodes the frame whatever the
-// canvas says, so a forged canvas would pass the pixel bound.
 func TestReencodeWebPCanvasMatchesFrame(t *testing.T) {
-	var encoded bytes.Buffer
-	require.NoError(t, nativewebp.Encode(&encoded, image.NewGray(image.Rect(0, 0, 64, 64)), nil))
-	require.Equal(t, "VP8L", string(encoded.Bytes()[12:16]))
-	withCanvas := func(width, height int) inlineMedia {
-		vp8x := []byte("VP8X\x0a\x00\x00\x00\x00\x00\x00\x00")
-		vp8x = append(vp8x, byte(width-1), byte((width-1)>>8), 0, byte(height-1), byte((height-1)>>8), 0)
-		chunks := append(append([]byte("WEBP"), vp8x...), encoded.Bytes()[12:]...)
-		file := append(binary.LittleEndian.AppendUint32([]byte("RIFF"), uint32(len(chunks))), chunks...)
-		return inlineMedia{path: "/image", mime: "image/webp", data: base64.StdEncoding.EncodeToString(file)}
+	source := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+	for y := range 8 {
+		for x := range 8 {
+			source.SetNRGBA(x, y, color.NRGBA{R: uint8(17 * x), G: uint8(19 * y), B: 67, A: 255})
+		}
 	}
-	effect := requestpatch.Effect{Type: requestpatch.EffectMediaReencode, Format: "png"}
-	_, _, err := reencodeMedia(context.Background(), withCanvas(64, 64), effect)
+	var encoded bytes.Buffer
+	require.NoError(t, nativewebp.Encode(&encoded, source, &nativewebp.Options{UseExtendedFormat: true}))
+	canvas, frame := encoded.Bytes()[12:30], encoded.Bytes()[30:]
+	canvas[8] |= 0x04 // VP8X XMP flag.
+	narrowCanvas := bytes.Clone(canvas)
+	narrowCanvas[12] = 0 // Declare a one-pixel width for the eight-pixel frame.
+
+	packet := fmt.Sprintf("%-257s", `<x:xmpmeta xmlns:x="adobe:ns:meta/">VP8X</x:xmpmeta>`)
+	xmp := binary.LittleEndian.AppendUint32([]byte("XMP "), uint32(len(packet)))
+	xmp = append(xmp, packet...)
+	xmp = append(xmp, 0) // RIFF padding for the odd-length packet.
+
+	for _, tc := range []struct {
+		name    string
+		chunks  [][]byte
+		invalid bool
+	}{
+		{"trailing XMP", [][]byte{canvas, frame, xmp}, false},
+		{"leading XMP", [][]byte{xmp, canvas, frame}, false},
+		{"custom chunk before XMP", [][]byte{[]byte("JUNK\x00\x00\x00\x00"), xmp, canvas, frame}, false},
+		{"frame before canvas", [][]byte{xmp, frame, canvas}, true},
+		{"mismatched canvas", [][]byte{narrowCanvas, frame, xmp}, true},
+		{"mismatched canvas after XMP", [][]byte{xmp, narrowCanvas, frame}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := append([]byte("WEBP"), bytes.Join(tc.chunks, nil)...)
+			file := append(binary.LittleEndian.AppendUint32([]byte("RIFF"), uint32(len(body))), body...)
+			item := inlineMedia{path: "/image", mime: "image/webp", data: base64.StdEncoding.EncodeToString(file)}
+			ops, _, err := reencodeMedia(t.Context(), item, requestpatch.Effect{Type: requestpatch.EffectMediaReencode, Format: "png"})
+			if tc.invalid {
+				require.EqualError(t, err, "media /image cannot be decoded")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, ops, 1)
+			assert.Equal(t, "replace", ops[0].Op)
+			assert.Equal(t, item.path, ops[0].Path)
+			payload, ok := strings.CutPrefix(gjson.ParseBytes(ops[0].Value).Str, "data:image/png;base64,")
+			require.True(t, ok)
+			img, err := png.Decode(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)))
+			require.NoError(t, err)
+			require.Equal(t, source.Bounds(), img.Bounds())
+			for y := range 8 {
+				for x := range 8 {
+					assert.Equal(t, source.NRGBAAt(x, y), color.NRGBAModel.Convert(img.At(x, y)), "pixel %d,%d", x, y)
+				}
+			}
+		})
+	}
+}
+
+func TestScanMediaViewCapacity(t *testing.T) {
+	var parts [8]string
+	for _, side := range []int{1, 512} {
+		var encoded bytes.Buffer
+		require.NoError(t, jpeg.Encode(&encoded, image.NewGray(image.Rect(0, 0, side, side)), nil))
+		part := `{"type":"image_url","image_url":{"url":"` + dataURI("image/jpeg", encoded.Bytes()) + `"}}`
+		for i := range parts {
+			parts[i] = part
+		}
+
+		view, media := scanMedia([]byte(chatBody(parts[:]...)))
+		require.Len(t, media, len(parts))
+		for i, item := range media {
+			assert.Equal(t, fmt.Sprintf("/messages/0/content/%d/image_url/url", i+1), item.path)
+			parts[i] = fmt.Sprintf(`{"type":"image_url","image_url":{"url":"[media:%d]"}}`, i)
+		}
+		assert.JSONEq(t, chatBody(parts[:]...), string(view))
+		assert.LessOrEqual(t, cap(view), 4<<10)
+	}
+}
+
+func TestScanMediaMixedText(t *testing.T) {
+	text := `{"te\u0078t":"` + strings.Repeat(`a b \"quoted\" \\ \u4e2d `, 512) + `\\"}`
+	var parts, wantParts []string
+	for i := range 12 {
+		parts = append(parts, text, `{"inlineData":{"data":"YWJj","mimeType":"image/png"}}`)
+		wantParts = append(wantParts, text, fmt.Sprintf(`{"inlineData":{"data":"[media:%d]","mimeType":"image/png"}}`, i))
+	}
+	compact := []byte(`{"parts":[` + strings.Join(parts, ",") + `]}`)
+	want := []byte(`{"parts":[` + strings.Join(wantParts, ",") + `]}`)
+	indented, err := common.IndentJson(compact)
 	require.NoError(t, err)
-	_, _, err = reencodeMedia(context.Background(), withCanvas(1, 1), effect)
-	assert.EqualError(t, err, "media /image cannot be decoded")
+	for _, body := range [][]byte{compact, []byte("\n" + string(indented) + "\r\n")} {
+		view, media := scanMedia(body)
+		require.Len(t, media, 12)
+		assert.True(t, bytes.Equal(want, view), "the compact view must preserve the raw text and media order")
+		assert.LessOrEqual(t, cap(view), len(want)+len(text))
+		for i, item := range media {
+			assert.Equal(t, fmt.Sprintf("/parts/%d/inlineData/data", 2*i+1), item.path)
+		}
+	}
 }
 
 // A hook that does not use attachments costs nothing for them: no file is

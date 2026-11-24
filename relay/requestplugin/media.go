@@ -4,22 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"strings"
 
 	"github.com/HugoSmits86/nativewebp"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/kolesa-team/go-webp/v2/decoder"
+	"github.com/kolesa-team/go-webp/v2/encoder"
+	webputils "github.com/kolesa-team/go-webp/v2/utils"
 	"github.com/tidwall/gjson"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/riff"
-	"golang.org/x/image/vp8"
-	"golang.org/x/image/vp8l"
 	_ "golang.org/x/image/webp"
 )
 
@@ -29,6 +32,10 @@ const (
 	maxReencodePixels = 40_000_000
 )
 
+// Level 0 gave the fastest outbound request within the previous encoder's
+// body size on the BenchmarkWebPMedia corpus.
+const webpLosslessLevel = 0
+
 // reencodeSlots bounds the re-encodes running at once in the process.
 var reencodeSlots = make(chan struct{}, 4)
 
@@ -36,6 +43,8 @@ var reencodeSlots = make(chan struct{}, 4)
 // or the data of a Claude base64 source, a Gemini inline data part or a chat
 // input_audio part, whose mime type or audio format is a sibling member.
 type inlineMedia struct {
+	// start and end bound the quoted string in the original JSON.
+	start, end int
 	// path is the JSON Pointer of the media string.
 	path string
 	// mimePath is the JSON Pointer of the sibling mime type member; empty
@@ -74,91 +83,145 @@ func scanMedia(body []byte) ([]byte, []inlineMedia) {
 	if !bytes.Contains(body, []byte("base64")) && !bytes.Contains(body, []byte("nlineData")) && !bytes.Contains(body, []byte("nline_data")) && !bytes.Contains(body, []byte("input_audio")) {
 		return body, nil
 	}
-	var view bytes.Buffer
-	view.Grow(len(body))
+	source := string(body)
 	var media []inlineMedia
-	walkMedia(gjson.ParseBytes(body), "", "", &view, &media)
+	compactSize := walkMedia(gjson.Parse(source), "", "", &media)
 	if len(media) == 0 {
 		return body, nil
 	}
-	return view.Bytes(), media
+
+	viewSize := compactSize
+	for index, item := range media {
+		viewSize += len(mediaRef(index)) + 2 - (item.end - item.start)
+	}
+	view := make([]byte, 0, viewSize)
+	compact := compactSize == len(source)
+	offset := 0
+	for index, item := range media {
+		view = appendMediaViewSpan(view, source[offset:item.start], compact)
+		view = append(view, '"')
+		view = append(view, mediaRef(index)...)
+		view = append(view, '"')
+		offset = item.end
+	}
+	return appendMediaViewSpan(view, source[offset:], compact), media
 }
 
-func walkMedia(value gjson.Result, pointer, key string, view *bytes.Buffer, media *[]inlineMedia) {
+// appendMediaViewSpan copies a range between media strings into the compact view.
+func appendMediaViewSpan(view []byte, span string, compact bool) []byte {
+	if compact {
+		return append(view, span...)
+	}
+	offset := 0
+	forEachJSONString(span, func(start, end int, _ bool) {
+		view = appendJSONSyntax(view, span[offset:start])
+		view = append(view, span[start:end]...)
+		offset = end
+	})
+	return appendJSONSyntax(view, span[offset:])
+}
+
+// appendJSONSyntax copies the non-string tokens between quoted JSON strings.
+func appendJSONSyntax(dst []byte, syntax string) []byte {
+	for i := range len(syntax) {
+		if syntax[i] > ' ' {
+			dst = append(dst, syntax[i])
+		}
+	}
+	return dst
+}
+
+// walkMedia records inline media in source order and returns the compact byte
+// length of the original value, including its quoted media strings.
+func walkMedia(value gjson.Result, pointer, key string, media *[]inlineMedia) int {
 	switch {
 	case value.IsObject():
-		mimeMember := ""
-		if value.Get("type").Str == "base64" && value.Get("media_type").Type == gjson.String {
-			mimeMember = "media_type"
-		} else if key == "inlineData" || key == "inline_data" {
-			for _, name := range []string{"mimeType", "mime_type"} {
-				if value.Get(name).Type == gjson.String {
-					mimeMember = name
-				}
-			}
-		} else if key == "input_audio" && value.Get("format").Type == gjson.String {
-			mimeMember = "format"
-		}
-		view.WriteByte('{')
+		var mimeMember, mime string
+		var checkedMIME bool
+		size := 2 // braces
 		first := true
 		own := len(*media)
 		filename := ""
 		value.ForEach(func(name, member gjson.Result) bool {
 			if !first {
-				view.WriteByte(',')
+				size++ // comma
 			}
 			first = false
-			view.WriteString(name.Raw)
-			view.WriteByte(':')
-			memberPointer := pointer + "/" + escapePointer(name.String())
-			if mimeMember != "" && name.String() == "data" && member.Type == gjson.String {
-				item := inlineMedia{path: memberPointer, mimePath: pointer + "/" + mimeMember, mime: value.Get(mimeMember).Str, data: member.Str}
+			size += len(name.Raw) + 1 // key and colon
+			memberPointer := pointer + "/" + escapePointer(name.Str)
+			isData := name.Str == "data" && member.Type == gjson.String
+			if isData && !checkedMIME {
+				mimeMember, mime = inlineMediaMIME(value, key)
+				checkedMIME = true
+			}
+			if isData && mimeMember != "" {
+				item := inlineMedia{path: memberPointer, mimePath: pointer + "/" + mimeMember, mime: mime, data: member.Str}
 				if mimeMember == "format" {
 					item.mimePath, item.mime, item.audio = "", "audio/"+strings.ToLower(item.mime), true
 				}
-				writePlaceholder(view, media, item)
+				item.start, item.end = member.Index, member.Index+len(member.Raw)
+				*media = append(*media, item)
+				size += len(member.Raw)
 				return true
 			}
-			if name.String() == "filename" && member.Type == gjson.String {
+			if name.Str == "filename" && member.Type == gjson.String {
 				filename = member.Str
 			}
-			walkMedia(member, memberPointer, name.String(), view, media)
+			size += walkMedia(member, memberPointer, name.Str, media)
 			return true
 		})
-		view.WriteByte('}')
 		// A file's name is a sibling of its data URL.
 		for index := own; filename != "" && index < len(*media); index++ {
 			if item := &(*media)[index]; strings.LastIndexByte(item.path, '/') == len(pointer) && strings.HasPrefix(item.path, pointer) {
 				item.filename = filename
 			}
 		}
+		return size
 	case value.IsArray():
-		view.WriteByte('[')
+		size := 2 // brackets
 		index := 0
 		value.ForEach(func(_, item gjson.Result) bool {
 			if index > 0 {
-				view.WriteByte(',')
+				size++ // comma
 			}
-			walkMedia(item, fmt.Sprintf("%s/%d", pointer, index), "", view, media)
+			size += walkMedia(item, fmt.Sprintf("%s/%d", pointer, index), "", media)
 			index++
 			return true
 		})
-		view.WriteByte(']')
+		return size
 	case value.Type == gjson.String:
 		if header, data, found := strings.Cut(value.Str, ","); found && strings.HasPrefix(header, "data:") && strings.HasSuffix(header, ";base64") {
 			mime, _, _ := strings.Cut(strings.TrimPrefix(header, "data:"), ";")
-			writePlaceholder(view, media, inlineMedia{path: pointer, mime: mime, data: data})
-			return
+			*media = append(*media, inlineMedia{
+				path: pointer, mime: mime, data: data,
+				start: value.Index, end: value.Index + len(value.Raw),
+			})
 		}
-		view.WriteString(value.Raw)
-	default:
-		view.WriteString(value.Raw)
 	}
+	return len(value.Raw)
 }
 
-func writePlaceholder(view *bytes.Buffer, media *[]inlineMedia, item inlineMedia) {
-	fmt.Fprintf(view, `"[media:%d]"`, len(*media))
-	*media = append(*media, item)
+// inlineMediaMIME returns the name and value of the MIME or audio format
+// field describing a sibling data string.
+func inlineMediaMIME(object gjson.Result, key string) (string, string) {
+	if object.Get("type").Str == "base64" {
+		if mime := object.Get("media_type"); mime.Type == gjson.String {
+			return "media_type", mime.Str
+		}
+	}
+	switch key {
+	case "inlineData", "inline_data":
+		for _, field := range []string{"mime_type", "mimeType"} {
+			if mime := object.Get(field); mime.Type == gjson.String {
+				return field, mime.Str
+			}
+		}
+	case "input_audio":
+		if format := object.Get("format"); format.Type == gjson.String {
+			return "format", format.Str
+		}
+	}
+	return "", ""
 }
 
 func escapePointer(token string) string {
@@ -192,18 +255,18 @@ func reencodeMedia(ctx context.Context, item inlineMedia, effect requestpatch.Ef
 	if int64(config.Width)*int64(config.Height) > maxReencodePixels || format == "gif" && gifAnimated(raw) {
 		return nil, nil, nil
 	}
-	// With a VP8X chunk the size read above is the canvas the chunk declares,
-	// while the decoder decodes the frame at its own size: the two must agree
-	// for the pixel bound to hold.
-	if format == "webp" {
-		if width, height, err := webpFrameSize(raw); err != nil || width != config.Width || height != config.Height {
-			return nil, nil, fmt.Errorf("media %s cannot be decoded", item.path)
-		}
-	}
 	if err = ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	img, _, err := image.Decode(bytes.NewReader(raw))
+	var img image.Image
+	if format == "webp" {
+		img, err = decodeWebP(ctx, raw, config)
+	} else {
+		img, _, err = image.Decode(bytes.NewReader(raw))
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, ctxErr
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("media %s cannot be decoded", item.path)
 	}
@@ -211,13 +274,20 @@ func reencodeMedia(ctx context.Context, item inlineMedia, effect requestpatch.Ef
 	if longest := max(bounds.Dx(), bounds.Dy()); effect.MaxSide > 0 && longest > effect.MaxSide {
 		width := max(1, bounds.Dx()*effect.MaxSide/longest)
 		height := max(1, bounds.Dy()*effect.MaxSide/longest)
-		scaled := image.NewNRGBA(image.Rect(0, 0, width, height))
-		draw.CatmullRom.Scale(scaled, scaled.Bounds(), img, bounds, draw.Src, nil)
+		scaledBounds := image.Rect(0, 0, width, height)
+		var scaled draw.Image
+		if format == "jpeg" && (effect.Format == "jpeg" || effect.Format == "auto") {
+			// JPEG input is opaque, and jpeg.Encode reads RGBA pixels directly.
+			scaled = image.NewRGBA(scaledBounds)
+		} else {
+			scaled = image.NewNRGBA(scaledBounds)
+		}
+		draw.CatmullRom.Scale(scaled, scaledBounds, img, bounds, draw.Src, nil)
 		img = scaled
 	}
-	opaque, known := img.(interface{ Opaque() bool })
-	transparent := !known || !opaque.Opaque()
 	target := effect.Format
+	opaque, known := img.(interface{ Opaque() bool })
+	transparent := (target == "auto" || target == "jpeg") && (!known || !opaque.Opaque())
 	if target == "auto" {
 		target = "jpeg"
 		if transparent {
@@ -244,10 +314,12 @@ func reencodeMedia(ctx context.Context, item inlineMedia, effect requestpatch.Ef
 	case "png":
 		err = png.Encode(&encoded, img)
 	case "webp":
-		// nativewebp writes lossless WebP only.
-		err = nativewebp.Encode(&encoded, img, nil)
+		err = encodeLosslessWebP(ctx, &encoded, img)
 	default:
 		return nil, nil, fmt.Errorf("format %q is not supported", effect.Format)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, ctxErr
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("media %s cannot be encoded as %s", item.path, target)
@@ -280,29 +352,102 @@ func reencodeMedia(ctx context.Context, item inlineMedia, effect requestpatch.Ef
 	}, nil
 }
 
-// webpFrameSize reads the size of a WebP image's frame from the header of
-// its first VP8 or VP8L chunk.
-func webpFrameSize(data []byte) (int, int, error) {
-	_, chunks, err := riff.NewReader(bytes.NewReader(data))
+func decodeWebP(ctx context.Context, data []byte, config image.Config) (image.Image, error) {
+	dec, err := decoder.NewDecoder(webpWithVP8XFirst(data), nil)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
+	// The decoder validates the VP8/VP8L frame against its VP8X canvas.
+	// Check that these are the dimensions admitted by the host's pixel limit.
+	features := dec.GetFeatures()
+	if features.Width != config.Width || features.Height != config.Height {
+		return nil, errors.New("WebP frame dimensions differ from the image header")
+	}
+	if features.Format == webputils.FormatLossy {
+		if features.HasAlpha {
+			return dec.DecodeNYCbCrA()
+		}
+		return dec.DecodeYCbCr()
+	}
+	return dec.DecodeContext(ctx)
+}
+
+// webpWithVP8XFirst presents VP8X before leading XMP for go-webp.
+// RFC 9649 §2.7 allows metadata and unknown chunks to precede VP8X.
+func webpWithVP8XFirst(data []byte) io.Reader {
+	const (
+		riffHeaderSize  = 12
+		chunkHeaderSize = 8
+		vp8xPayloadSize = 10
+	)
+	original := bytes.NewReader(data)
+	if len(data) < riffHeaderSize+4 {
+		return original
+	}
+	switch string(data[riffHeaderSize : riffHeaderSize+4]) {
+	case "VP8X", "VP8 ", "VP8L":
+		return original
+	}
+
+	cursor := bytes.NewReader(data)
+	form, chunks, err := riff.NewReader(cursor)
+	if err != nil || string(form[:]) != "WEBP" {
+		return original
+	}
+	var leadingXMP bool
 	for {
-		id, length, chunk, err := chunks.Next()
+		id, size, _, err := chunks.Next()
 		if err != nil {
-			return 0, 0, err
+			return original
 		}
-		switch id {
-		case riff.FourCC{'V', 'P', '8', ' '}:
-			decoder := vp8.NewDecoder()
-			decoder.Init(chunk, int(length))
-			header, err := decoder.DecodeFrameHeader()
-			return header.Width, header.Height, err
-		case riff.FourCC{'V', 'P', '8', 'L'}:
-			config, err := vp8l.DecodeConfig(chunk)
-			return config.Width, config.Height, err
+		switch string(id[:]) {
+		case "XMP ":
+			leadingXMP = true
+		case "VP8X":
+			if !leadingXMP || size != vp8xPayloadSize || cursor.Len() < vp8xPayloadSize {
+				return original
+			}
+			// Next leaves the cursor at the start of the VP8X payload.
+			payloadStart := len(data) - cursor.Len()
+			start, end := payloadStart-chunkHeaderSize, payloadStart+vp8xPayloadSize
+			return io.MultiReader(
+				bytes.NewReader(data[:riffHeaderSize]),
+				bytes.NewReader(data[start:end]),
+				bytes.NewReader(data[riffHeaderSize:start]),
+				bytes.NewReader(data[end:]),
+			)
+		case "ICCP", "ANIM", "ANMF", "ALPH", "VP8 ", "VP8L":
+			// Color and image reconstruction chunks have a required order.
+			return original
 		}
 	}
+}
+
+func encodeLosslessWebP(ctx context.Context, w io.Writer, img image.Image) error {
+	const maxVP8LSide = 1 << 14
+	size := img.Bounds().Size()
+	longest := max(size.X, size.Y)
+	// VP8L can represent 16384 pixels per side. go-webp encodes up to 16383.
+	if longest == maxVP8LSide {
+		return nativewebp.Encode(w, img, nil)
+	}
+	if gray, ok := img.(*image.Gray16); ok && min(size.X, size.Y) > 0 && longest < maxVP8LSide {
+		// Draw uses RGBA64At and SetRGBA64, avoiding go-webp's per-pixel color allocations.
+		nrgba := image.NewNRGBA(image.Rectangle{Max: size})
+		draw.Draw(nrgba, nrgba.Bounds(), gray, gray.Bounds().Min, draw.Src)
+		img = nrgba
+	}
+	options, err := encoder.NewLosslessEncoderOptions(encoder.PresetDefault, webpLosslessLevel)
+	if err != nil {
+		return err
+	}
+	options.Exact = 1 // Preserve RGB under fully transparent pixels.
+	enc, err := encoder.NewEncoder(img, options)
+	if err != nil {
+		return err
+	}
+	defer enc.Release()
+	return enc.EncodeContext(ctx, w)
 }
 
 // gifAnimated reports a GIF with more than one image. It walks the block
