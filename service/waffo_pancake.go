@@ -125,7 +125,7 @@ func CreateWaffoPancakeCheckoutSession(ctx context.Context, params *WaffoPancake
 		BuyerIdentity: params.BuyerIdentity,
 	}
 	if params.PriceSnapshot != nil {
-		sdkParams.PriceSnapshot = &pancake.PriceInfo{
+		sdkParams.PriceSnapshot = &pancake.PriceSnapshot{
 			Amount:      params.PriceSnapshot.Amount,
 			TaxCategory: pancake.TaxCategory(params.PriceSnapshot.TaxCategory),
 		}

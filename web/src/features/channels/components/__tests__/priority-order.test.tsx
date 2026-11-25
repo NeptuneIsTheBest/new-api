@@ -640,7 +640,9 @@ test.each(['table', 'card'] as const)(
   async (view) => {
     await mount(view, false)
     const user = userEvent.setup()
-    screen.getByRole('button', { name: 'Drag mode' }).focus()
+    const reorder = screen.getByRole('button', { name: 'Drag mode' })
+    await waitFor(() => expect(reorder).toBeEnabled())
+    reorder.focus()
     await user.keyboard('{Enter}')
     expect(
       screen.getByRole('button', { name: 'Reorder channel 3' })
@@ -684,6 +686,7 @@ test('the header places reorder before batch mode while shared display controls 
   const header = within(screen.getByRole('banner'))
   const toolbar = within(screen.getByRole('region', { name: 'Channels' }))
   const reorder = header.getByRole('button', { name: 'Drag mode' })
+  await waitFor(() => expect(reorder).toBeEnabled())
   reorder.focus()
   await user.tab()
   expect(header.getByRole('button', { name: 'Drag mode help' })).toHaveFocus()

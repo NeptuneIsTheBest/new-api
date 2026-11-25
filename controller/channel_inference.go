@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/common/expfmt"
+	prommodel "github.com/prometheus/common/model"
 )
 
 type inferenceEndpointStatus struct {
@@ -209,7 +210,7 @@ func fetchInferenceStatus(ctx context.Context, channel *model.Channel) (*inferen
 }
 
 func parseInferenceMetrics(raw string, prefix string) ([]inferenceMetric, error) {
-	var parser expfmt.TextParser
+	parser := expfmt.NewTextParser(prommodel.UTF8Validation)
 	families, err := parser.TextToMetricFamilies(strings.NewReader(raw))
 	if err != nil {
 		return nil, err
