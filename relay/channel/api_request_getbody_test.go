@@ -142,40 +142,69 @@ func TestDoApiRequestResponsesZstd(t *testing.T) {
 }
 
 func TestCompressedResponsesBodyStorageAndReplay(t *testing.T) {
+	const endpoint = "https://example.com/v1/responses"
 	originalConfig := common.GetDiskCacheConfig()
 	t.Cleanup(func() { common.SetDiskCacheConfig(originalConfig) })
 	for _, disk := range []bool{false, true} {
 		t.Run(fmt.Sprintf("disk=%t", disk), func(t *testing.T) {
 			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: disk, ThresholdMB: 0, MaxSizeMB: 8, Path: t.TempDir()})
-			payload := []byte(`{}`)
+			payload := []byte(`{"input":"first"}`)
 			storage, err := common.CreateBodyStorage(payload)
 			require.NoError(t, err)
 			defer storage.Close()
-			req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", storage)
+			req, err := http.NewRequest(http.MethodPost, endpoint, storage)
 			require.NoError(t, err)
 			ApplyUpstreamBodyMetadata(req, storage)
-			closer, err := compressResponsesRequestBody(req)
+			secondPayload := []byte(`{}`)
+			secondReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(secondPayload))
 			require.NoError(t, err)
-			defer closer.Close()
-			assert.Equal(t, disk, closer.(common.BodyStorage).IsDisk())
-			sent, err := io.ReadAll(req.Body)
+			requests := []struct {
+				req     *http.Request
+				payload []byte
+				closer  io.Closer
+			}{
+				{req: req, payload: payload},
+				{req: secondReq, payload: secondPayload},
+			}
+			encoder, err := zstd.NewWriter(nil,
+				zstd.WithEncoderLevel(zstd.SpeedFastest),
+				zstd.WithEncoderConcurrency(1),
+			)
 			require.NoError(t, err)
-			require.NoError(t, req.Body.Close())
-			assert.EqualValues(t, len(sent), req.ContentLength)
-			assert.Greater(t, len(sent), len(payload), "small requests must still be compressed")
+			defer encoder.Close()
+			// Even a pool miss must reuse this encoder while the first body is unread.
+			encoderPool := &sync.Pool{New: func() any { return encoder }}
+			for i := range requests {
+				r := &requests[i]
+				r.closer, err = compressResponsesRequestBody(r.req, encoderPool)
+				require.NoError(t, err)
+				defer r.closer.Close()
+				assert.Equal(t, disk, r.closer.(common.BodyStorage).IsDisk())
+			}
+
 			decoder, err := zstd.NewReader(nil)
 			require.NoError(t, err)
 			defer decoder.Close()
-			decoded, err := decoder.DecodeAll(sent, nil)
-			require.NoError(t, err)
-			assert.Equal(t, payload, decoded)
-			for range 2 {
-				replayed, err := req.GetBody()
+			for _, r := range requests {
+				sent, err := io.ReadAll(r.req.Body)
 				require.NoError(t, err)
-				data, err := io.ReadAll(replayed)
+				require.NoError(t, r.req.Body.Close())
+				assert.EqualValues(t, len(sent), r.req.ContentLength)
+				assert.Greater(t, len(sent), len(r.payload), "small requests must still be compressed")
+				decoded, err := decoder.DecodeAll(sent, nil)
 				require.NoError(t, err)
-				require.NoError(t, replayed.Close())
-				assert.Equal(t, sent, data)
+				assert.Equal(t, r.payload, decoded)
+				for range 2 {
+					replayed, err := r.req.GetBody()
+					require.NoError(t, err)
+					data, err := io.ReadAll(replayed)
+					require.NoError(t, err)
+					require.NoError(t, replayed.Close())
+					assert.Equal(t, sent, data)
+				}
+				require.NoError(t, r.closer.Close())
+				_, err = r.req.GetBody()
+				assert.ErrorIs(t, err, common.ErrStorageClosed)
 			}
 			source, err := storage.NewReader()
 			require.NoError(t, err, "compression must not close caller-owned passthrough storage")
@@ -183,9 +212,6 @@ func TestCompressedResponsesBodyStorageAndReplay(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, source.Close())
 			assert.Equal(t, payload, original)
-			require.NoError(t, closer.Close())
-			_, err = req.GetBody()
-			assert.ErrorIs(t, err, common.ErrStorageClosed)
 			require.NoError(t, storage.Close())
 			if disk {
 				count, size, err := common.GetDiskCacheInfo()
@@ -878,7 +904,7 @@ func TestUpstreamGetBody_HTTP2RetryAfterUpstreamStreamReset(t *testing.T) {
 			require.NoError(t, err)
 			ApplyUpstreamBodyMetadata(req, body)
 			if compressed {
-				closer, err := compressResponsesRequestBody(req)
+				closer, err := compressResponsesRequestBody(req, &responsesZstdEncoderPool)
 				require.NoError(t, err)
 				defer closer.Close()
 			}

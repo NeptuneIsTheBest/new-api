@@ -86,6 +86,9 @@ type responsesWSMessage struct {
 	kind int
 	body []byte
 	err  error
+	// The reader supplies stream_id and response.id. A top-level response_id
+	// on an error can identify the target of a control instead.
+	streamID, responseID string
 	// Control replies preserve lane ordering without becoming usage events.
 	control bool
 }
@@ -825,13 +828,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 		info.SetFirstResponseTime()
 		var event struct {
-			dto.ResponsesStreamResponse
-			StreamID string `json:"stream_id"`
+			relaycommon.ResponsesStreamEvent
+			Message string `json:"message"`
 		}
 		if err := common.Unmarshal(incoming.body, &event); err != nil {
 			info.StreamStatus.RecordError("invalid upstream websocket event")
 		} else {
-			if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
+			if event.Type != "error" && incoming.streamID != "" && incoming.streamID != create.StreamID {
 				if err := s.writeClient(nil, incoming); err != nil {
 					s.shutdown(websocket.CloseInternalServerErr, "")
 				}
@@ -839,9 +842,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			// A repeated terminal from the previous response must never finish
 			// a subsequent request on this persistent connection.
-			if event.Response != nil && event.Response.ID != "" && event.Response.ID == state.previousResponseID {
+			if incoming.responseID != "" && incoming.responseID == state.previousResponseID {
 				continue
 			}
+			streamResponse := event.StreamResponse()
 			if event.Type == "error" {
 				var rejection responsesWSErrorEvent
 				_ = common.Unmarshal(incoming.body, &rejection)
@@ -889,7 +893,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						}
 						info.StreamStatus.MarkFailed(code, rejection.Error.Type, rejection.Status)
 					}
-					accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
+					accumulator.Observe(&streamResponse, incoming.body)
 					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 					state.terminal = terminalOf(incoming)
 					if ambiguous {
@@ -919,11 +923,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					service.RecordChannelAffinity(c, s.lockedChannelID)
 				}
 				accepted = true
-				if event.Response != nil && event.Response.ID != "" {
-					responseID = event.Response.ID
+				if incoming.responseID != "" {
+					responseID = incoming.responseID
 				}
 			}
-			accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
+			accumulator.Observe(&streamResponse, incoming.body)
 		}
 		switch event.Type {
 		case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
@@ -1286,20 +1290,21 @@ func (s *responsesWSSession) defaultCreateErrorOwnerLocked(upstreamErr *types.Op
 // routeTargetEvent assigns a frame before it can reach any usage accumulator.
 // It also marks terminal frames before delivery, so repeated frames or an EOF
 // cannot overtake the worker's settlement and client-facing terminal write.
-func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCallState, drop, fatal bool) {
+func (s *responsesWSSession) routeTargetEvent(frame *responsesWSMessage) (owner *responsesWSCallState, drop, fatal bool) {
 	var event struct {
 		responsesWSErrorEvent
 		Response *struct {
 			ID string `json:"id"`
 		} `json:"response"`
 	}
-	if common.Unmarshal(body, &event) != nil {
+	if common.Unmarshal(frame.body, &event) != nil {
 		return nil, false, true
 	}
-	responseID := event.ResponseID
-	if event.Response != nil && event.Response.ID != "" {
-		responseID = event.Response.ID
+	frame.streamID = event.StreamID
+	if event.Response != nil {
+		frame.responseID = event.Response.ID
 	}
+	responseID := cmp.Or(frame.responseID, event.ResponseID)
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if event.Type == "error" && event.Error != nil && event.Error.Code == "websocket_connection_limit_reached" {
@@ -1373,7 +1378,7 @@ func (s *responsesWSSession) routeTargetEvent(body []byte) (owner *responsesWSCa
 		}
 		switch event.Type {
 		case "response.completed", "response.done":
-			status := gjson.GetBytes(body, "response.status")
+			status := gjson.GetBytes(frame.body, "response.status")
 			owner.completed = status.Str == "completed" || event.Type == "response.completed" && !status.Exists()
 			terminal = true
 		case "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
@@ -1452,7 +1457,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 				s.shutdown(websocket.CloseInternalServerErr, "unreserved upstream response")
 				return
 			}
-			state, drop, fatal := s.routeTargetEvent(body)
+			state, drop, fatal := s.routeTargetEvent(&incoming)
 			if drop {
 				continue
 			}

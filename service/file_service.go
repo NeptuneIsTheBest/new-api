@@ -177,7 +177,7 @@ func cacheDownloadedFile(c *gin.Context, resp *http.Response, url string) (*type
 		return nil, fmt.Errorf("failed to read file content: %w", err)
 	}
 	mimeType := smartDetectMimeType(resp, url, prefix)
-	writer := fileCacheWriter{context: c}
+	writer := fileCacheWriter{context: c, bufferDiskWrites: true}
 	if resp.ContentLength > 0 {
 		writer.expectedSize = int64(base64.StdEncoding.EncodedLen(int(min(resp.ContentLength, maxBytes))))
 	}

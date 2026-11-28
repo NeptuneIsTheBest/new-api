@@ -857,6 +857,22 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		PreviousResponseID string `json:"previous_response_id"`
 		ServiceTier        string `json:"service_tier"`
 	}
+	const parameters = `{
+		"type":"object","properties":{
+			"filters":{"type":"array","items":{"type":"object","properties":{
+				"field":{"type":"string","enum":["title","author","summary"]},"value":{"type":"string"}
+			},"required":["field","value"],"additionalProperties":false}},
+			"limit":{"type":"integer","minimum":1,"maximum":100}
+		},"required":["filters","limit"],"additionalProperties":false
+	}`
+	tools := make([]string, 64)
+	for i := range tools {
+		tools[i] = fmt.Sprintf(`{"type":"function","name":"lookup_%02d","description":"Look up matching entries","parameters":%s,"strict":true}`, i, parameters)
+	}
+	created := []byte(`{ "type":"response.created", "sequence_number":0, "response":{
+		"tools":[` + strings.Join(tools, ", ") + `], "id":"resp_1", "model":"gpt-4o", "status":"in_progress",
+		"instructions":"use the declared tools", "metadata":{"trace":"raw\u002dvalue"}
+	}, "vendor":{"keep":[true,null,1.00]} }`)
 	received := make(chan upstreamRequest, 4)
 	fixture := newResponsesWSBillingTest(t, `param("service_tier") == "priority" ? tier("priority", p * 4) : tier("base", p * 2)`, func(ws *websocket.Conn, r *http.Request) {
 		for index := 1; ; index++ {
@@ -870,6 +886,9 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 			}
 			event.Authorization = r.Header.Get("Authorization")
 			received <- event
+			if index == 1 && !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, created)) {
+				return
+			}
 			if index == 2 {
 				duplicate := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`
 				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(duplicate))) {
@@ -896,6 +915,12 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	} {
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
+		if index == 0 {
+			kind, data, err := client.ReadMessage()
+			require.NoError(t, err)
+			assert.Equal(t, websocket.TextMessage, kind)
+			require.Equal(t, created, data)
+		}
 		_, data, err := client.ReadMessage()
 		require.NoError(t, err)
 		var terminal struct {

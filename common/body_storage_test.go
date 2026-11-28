@@ -85,8 +85,11 @@ func TestCreateBodyStorageFromReader(t *testing.T) {
 		fallbackAt    int64
 		dataWithEOF   bool
 	}{
+		{name: "EOF after full first chunk", size: 512, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, spillAt: -1},
+		{name: "one byte in second chunk", size: 513, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, spillAt: -1},
 		{name: "unknown below threshold", size: threshold - 1, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, spillAt: -1},
 		{name: "unknown at threshold", size: threshold, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, wantDisk: true, spillAt: threshold},
+		{name: "threshold with final data and EOF", size: threshold, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, wantDisk: true, spillAt: -1, dataWithEOF: true},
 		{name: "unknown above threshold", size: threshold + 1, contentLength: -1, thresholdMB: 1, cacheMB: 4, maxBytes: 2 * threshold, wantDisk: true, spillAt: threshold},
 		{name: "actual size fits below request limit", size: 3 * threshold / 2, contentLength: -1, thresholdMB: 1, cacheMB: 2, maxBytes: 4 * threshold, wantDisk: true, spillAt: threshold},
 		{name: "zero length hint", size: threshold + 1, contentLength: 0, thresholdMB: 1, cacheMB: 2, maxBytes: 4 * threshold, wantDisk: true, spillAt: threshold},
@@ -202,6 +205,7 @@ func TestCreateBodyStorageFromReaderErrors(t *testing.T) {
 		spillAt       int64
 		fallbackAt    int64
 		readError     error
+		dataWithError bool
 		wantError     error
 		invalidPath   bool
 		httpLimit     bool
@@ -210,6 +214,7 @@ func TestCreateBodyStorageFromReaderErrors(t *testing.T) {
 		{name: "oversized before threshold", size: 18, maxBytes: 17, cacheMB: 4, spillAt: -1, wantError: ErrRequestBodyTooLarge, wantReadBytes: 18},
 		{name: "oversized after spill", size: 2*threshold + 1, maxBytes: 2 * threshold, cacheMB: 4, spillAt: threshold, wantError: ErrRequestBodyTooLarge, wantReadBytes: 2*threshold + 1},
 		{name: "read error before threshold", size: 17, maxBytes: 2 * threshold, cacheMB: 4, spillAt: -1, readError: readErr, wantError: readErr, wantReadBytes: 17},
+		{name: "read error with last byte of threshold", size: threshold, maxBytes: 2 * threshold, cacheMB: 4, spillAt: -1, readError: readErr, dataWithError: true, wantError: readErr, invalidPath: true, wantReadBytes: threshold},
 		{name: "read error after spill", size: threshold + 17, maxBytes: 2 * threshold, cacheMB: 4, spillAt: threshold, readError: readErr, wantError: readErr, wantReadBytes: threshold + 17},
 		{name: "HTTP body limit after spill", size: 2*threshold + 1, maxBytes: 2 * threshold, cacheMB: 4, spillAt: threshold, httpLimit: true, wantReadBytes: 2 * threshold},
 		{name: "oversized after fallback", size: 2*threshold + 1, maxBytes: 2 * threshold, cacheMB: 1, spillAt: threshold, fallbackAt: threshold + 1, wantError: ErrRequestBodyTooLarge, wantReadBytes: 2*threshold + 1},
@@ -229,6 +234,9 @@ func TestCreateBodyStorageFromReaderErrors(t *testing.T) {
 			var input io.Reader = bytes.NewReader(payload[:test.size])
 			if test.readError != nil {
 				input = io.MultiReader(input, iotest.ErrReader(test.readError))
+			}
+			if test.dataWithError {
+				input = iotest.DataErrReader(input)
 			}
 			if test.httpLimit {
 				body := http.MaxBytesReader(nil, io.NopCloser(input), test.maxBytes)

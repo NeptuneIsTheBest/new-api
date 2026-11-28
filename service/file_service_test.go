@@ -118,14 +118,15 @@ func TestFileDownloadErrorsAndMemoryFallback(t *testing.T) {
 		limit           int
 	}{
 		{name: "read before encoding", payload: iotest.ErrReader(readErr), limit: 4, wantError: "download interrupted"},
-		{name: "read after spilling", payload: io.MultiReader(strings.NewReader(strings.Repeat("x", 8192)), iotest.ErrReader(readErr)), limit: 4, wantError: "download interrupted"},
+		{name: "read after spilling", payload: io.MultiReader(strings.NewReader(strings.Repeat("x", 1<<20)), iotest.ErrReader(readErr)), limit: 4, wantError: "download interrupted"},
 		{name: "actual bytes exceed limit", payload: strings.NewReader(strings.Repeat("x", (1<<20)+1)), limit: 1, wantError: "file size exceeds maximum allowed size"},
 		{name: "exact limit", payload: strings.NewReader(strings.Repeat("x", 1<<20)), limit: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := common.GetDiskCacheStats()
 			constant.MaxFileDownloadMB = tc.limit
-			response := &http.Response{Body: io.NopCloser(tc.payload), ContentLength: 1, Header: http.Header{"Content-Type": {"application/pdf"}}}
+			reader := &fileDownloadReader{t: t, reader: tc.payload}
+			response := &http.Response{Body: io.NopCloser(reader), ContentLength: 1, Header: http.Header{"Content-Type": {"application/pdf"}}}
 			data, err := cacheDownloadedFile(nil, response, "https://example.test/file")
 			if tc.wantError != "" {
 				require.ErrorContains(t, err, tc.wantError)
@@ -167,10 +168,10 @@ func TestFileDownloadErrorsAndMemoryFallback(t *testing.T) {
 
 func TestFileCacheWriteFailuresRemovePartialFiles(t *testing.T) {
 	configureFileCache(t, 0)
-	for _, failAt := range []string{"write", "encoder tail", "close", "capacity"} {
+	for _, failAt := range []string{"write", "encoder tail", "flush", "close", "capacity"} {
 		t.Run(failAt, func(t *testing.T) {
 			before := common.GetDiskCacheStats()
-			writer := fileCacheWriter{}
+			writer := fileCacheWriter{bufferDiskWrites: failAt == "flush" || failAt == "capacity"}
 			t.Cleanup(writer.abort)
 			_, err := writer.Write([]byte("YWJj"))
 			require.NoError(t, err)
@@ -189,8 +190,11 @@ func TestFileCacheWriteFailuresRemovePartialFiles(t *testing.T) {
 					_, err = encoder.Write([]byte("d"))
 					require.NoError(t, err)
 					err = encoder.Close()
-				case "close":
-					_, err = writer.finish("application/pdf", 3)
+				case "flush", "close":
+					var data *types.CachedFileData
+					data, err = writer.finish("application/pdf", 3)
+					assert.Nil(t, data)
+					require.ErrorContains(t, err, "failed to "+failAt+" cache file")
 				}
 			}
 			require.Error(t, err)

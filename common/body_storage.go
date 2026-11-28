@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -380,6 +381,54 @@ func CreateBodyStorage(data []byte) (BodyStorage, error) {
 	return newMemoryStorage(data), nil
 }
 
+// readBodyStoragePrefix returns either a complete in-memory body or a stream
+// starting with the buffered prefix when the body reaches the disk threshold.
+func readBodyStoragePrefix(reader io.Reader, threshold, maxBytes int64) (body []byte, stream io.Reader, err error) {
+	limit := threshold
+	if maxBytes < threshold {
+		limit = maxBytes + 1
+	}
+
+	// Start with io.ReadAll's small chunks and keep them until storage is chosen.
+	chunks := make([][]byte, 0, 8)
+	chunk := make([]byte, 0, 512)
+	nextSize := int64(256)
+	remaining := io.LimitedReader{R: reader, N: limit}
+	for remaining.N > 0 && err == nil {
+		if len(chunk) == cap(chunk) {
+			chunks = append(chunks, chunk)
+			chunk = make([]byte, 0, min(nextSize, remaining.N))
+			nextSize = min(nextSize+nextSize/2, 256<<10)
+		}
+		var n int
+		n, err = remaining.Read(chunk[len(chunk):cap(chunk)])
+		chunk = chunk[:len(chunk)+n]
+	}
+	if err != nil && err != io.EOF {
+		return nil, nil, err
+	}
+	size := limit - remaining.N
+	if size > maxBytes {
+		return nil, nil, ErrRequestBodyTooLarge
+	}
+	if len(chunk) > 0 {
+		chunks = append(chunks, chunk)
+	}
+	if size < threshold {
+		if len(chunks) == 1 {
+			return chunks[0], nil, nil
+		}
+		return bytes.Join(chunks, nil), nil, nil
+	}
+	// Give the stream its own slice headers so small in-memory bodies can
+	// keep their chunk list on the stack. The payload buffers are shared.
+	prefix := append(net.Buffers(nil), chunks...)
+	if err == io.EOF {
+		return nil, &prefix, nil
+	}
+	return nil, io.MultiReader(&prefix, reader), nil
+}
+
 // CreateBodyStorageFromReader 从 Reader 创建存储（用于大请求的流式处理）
 func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes int64) (BodyStorage, error) {
 	threshold := GetDiskCacheThresholdBytes()
@@ -394,19 +443,15 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	// after decompression). Only the threshold-sized prefix needs to fit;
 	// subsequent writes check capacity against the actual size as it grows.
 	if !useDisk && IsDiskCacheAvailable(threshold) {
-		data, err := io.ReadAll(io.LimitReader(reader, min(threshold, maxBytes+1)))
+		data, stream, err := readBodyStoragePrefix(reader, threshold, maxBytes)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(data)) > maxBytes {
-			return nil, ErrRequestBodyTooLarge
-		}
-		if int64(len(data)) < threshold {
+		if stream == nil {
 			IncrementMemoryCacheHits()
 			return newMemoryStorage(data), nil
 		}
-
-		reader = io.MultiReader(bytes.NewReader(data), reader)
+		reader = stream
 		useDisk = true
 	}
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -13,17 +14,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// fileCacheWriter receives encoded bytes. Only the prefix below the configured
-// threshold stays in memory when disk caching is available. It owns unfinished
-// files until finish transfers ownership to CachedFileData.
+// fileCacheWriter keeps the encoded prefix in memory until it switches to disk.
+// It batches small encoder writes for downloads and owns the temporary file
+// until finish transfers it to CachedFileData.
 type fileCacheWriter struct {
-	context      *gin.Context
-	buffer       strings.Builder
-	file         *os.File
-	path         string
-	size         int64
-	expectedSize int64
-	memoryOnly   bool
+	context          *gin.Context
+	buffer           strings.Builder
+	file             *os.File
+	diskBuffer       *bufio.Writer
+	path             string
+	size             int64
+	expectedSize     int64
+	memoryOnly       bool
+	bufferDiskWrites bool
 }
 
 func (w *fileCacheWriter) Write(p []byte) (int, error) {
@@ -44,6 +47,9 @@ func (w *fileCacheWriter) Write(p []byte) (int, error) {
 				return 0, fmt.Errorf("failed to write cache prefix: %w", err)
 			}
 			w.buffer.Reset()
+			if w.bufferDiskWrites {
+				w.diskBuffer = bufio.NewWriterSize(file, 32<<10)
+			}
 		}
 	}
 	if w.file == nil {
@@ -55,7 +61,11 @@ func (w *fileCacheWriter) Write(p []byte) (int, error) {
 	if !common.IsDiskCacheAvailable(nextSize) {
 		return 0, fmt.Errorf("disk cache capacity exceeded")
 	}
-	n, err := w.file.Write(p)
+	var dst io.Writer = w.file
+	if w.diskBuffer != nil {
+		dst = w.diskBuffer
+	}
+	n, err := dst.Write(p)
 	w.size += int64(n)
 	return n, err
 }
@@ -69,6 +79,11 @@ func (w *fileCacheWriter) finish(mimeType string, size int64) (*types.CachedFile
 	}
 	if w.file == nil {
 		return types.NewMemoryCachedData(w.buffer.String(), mimeType, size), nil
+	}
+	if w.diskBuffer != nil {
+		if err := w.diskBuffer.Flush(); err != nil {
+			return nil, fmt.Errorf("failed to flush cache file: %w", err)
+		}
 	}
 	if err := w.file.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close cache file: %w", err)

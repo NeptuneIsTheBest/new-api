@@ -401,7 +401,7 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		req.Method == http.MethodPost &&
 		info.RelayMode != constant.RelayModeResponsesCompact &&
 		info.GetFinalRequestRelayFormat() == types.RelayFormatOpenAIResponses {
-		compressedStorage, err = compressResponsesRequestBody(req)
+		compressedStorage, err = compressResponsesRequestBody(req, &responsesZstdEncoderPool)
 		if err != nil {
 			return nil, fmt.Errorf("compress responses request body failed: %w", err)
 		}
@@ -440,18 +440,12 @@ func (b *responseBodyWithRequestStorage) Close() error {
 	return b.closeErr
 }
 
+var responsesZstdEncoderPool sync.Pool // *zstd.Encoder
+
 // compressResponsesRequestBody keeps the compressed payload replayable for
 // transport retries. The caller must keep the storage alive until the response
 // body is closed, or release it if the request fails without a response.
-func compressResponsesRequestBody(req *http.Request) (io.Closer, error) {
-	var compressed bytes.Buffer
-	encoder, err := zstd.NewWriter(&compressed,
-		zstd.WithEncoderLevel(zstd.SpeedFastest),
-		zstd.WithEncoderConcurrency(1),
-	)
-	if err != nil {
-		return nil, err
-	}
+func compressResponsesRequestBody(req *http.Request, encoderPool *sync.Pool) (io.Closer, error) {
 	source := req.Body
 	if source == nil {
 		source = http.NoBody
@@ -459,6 +453,20 @@ func compressResponsesRequestBody(req *http.Request) (io.Closer, error) {
 	// ApplyUpstreamBodyMetadata hides the storage's Close method, preserving
 	// its caller-owned lifetime when releasing this request's source reader.
 	defer source.Close()
+
+	encoder, ok := encoderPool.Get().(*zstd.Encoder)
+	if !ok {
+		var err error
+		encoder, err = zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(1),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var compressed bytes.Buffer
+	encoder.Reset(&compressed)
 	_, readErr := io.Copy(encoder, source)
 	closeErr := encoder.Close()
 	if readErr != nil {
@@ -467,6 +475,10 @@ func compressResponsesRequestBody(req *http.Request) (io.Closer, error) {
 	if closeErr != nil {
 		return nil, closeErr
 	}
+	// Detach the buffer backing this request's replays before pooling the encoder.
+	encoder.Reset(io.Discard)
+	encoderPool.Put(encoder)
+
 	body, closer, err := common.NewOutboundJSONBody(compressed.Bytes())
 	if err != nil {
 		return nil, err
