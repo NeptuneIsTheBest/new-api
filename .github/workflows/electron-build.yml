@@ -85,6 +85,7 @@ jobs:
             go.sum
             relaykit/go.sum
             tokenkit/go.sum
+            pluginkit/go.sum
 
       # - name: Build Go binary (macos/Linux)
       #   if: runner.os != 'Windows'

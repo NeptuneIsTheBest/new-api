@@ -16,10 +16,13 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestModelJSONRoutingPreservesValidationAndReplay(t *testing.T) {
@@ -169,6 +172,49 @@ func TestChannelMatchesExpectedTaskPluginUsesPinnedLegacyIndex(t *testing.T) {
 	assert.False(t, channelMatchesExpectedTaskPlugin(c, &model.Channel{Type: constant.ChannelTypeJimeng}, "legacy-alpha"))
 }
 
+// Two plugins may declare one built-in channel type, each with its own
+// models: a channel of the type serves the plugin of the requested model, and
+// when both declare it the first in key order runs.
+func TestSharedChannelTypeServesEachDeclaringPlugin(t *testing.T) {
+	registry := jsplugin.NewRegistry()
+	_, err := registry.Register(distributorEndpointPluginSourceWithModels("zhipu-video", constant.ChannelTypeZhipu_v4, "glm-video", "glm-shared"), jsplugin.Options{})
+	require.NoError(t, err)
+	_, err = registry.Register(distributorEndpointPluginSourceWithModels("zhipu-image", constant.ChannelTypeZhipu_v4, "glm-image", "glm-shared"), jsplugin.Options{})
+	require.NoError(t, err)
+	generation := registry.Generation()
+	require.Empty(t, registry.RoutingErrors())
+	channel := &model.Channel{Id: 1, Type: constant.ChannelTypeZhipu_v4}
+
+	for _, testCase := range []struct{ model, plugin string }{
+		{model: "glm-video", plugin: "zhipu-video"},
+		{model: "glm-image", plugin: "zhipu-image"},
+		{model: "glm-shared", plugin: "zhipu-image"},
+	} {
+		t.Run(testCase.model, func(t *testing.T) {
+			candidates := generation.LookupEndpointCandidates("POST", "/v1/responses", testCase.model)
+			require.NotEmpty(t, candidates)
+			c, _ := gin.CreateTestContext(nil)
+			c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: generation, Plugin: candidates[len(candidates)-1].Plugin})
+			c.Set(jsplugin.ContextKeyPinnedEndpoint, jsplugin.PinnedEndpoint{
+				Generation: generation,
+				Plugin:     candidates[len(candidates)-1].Plugin,
+				Protocol:   candidates[len(candidates)-1].Protocol,
+				Operation:  candidates[len(candidates)-1].Operation,
+				Model:      testCase.model,
+				Candidates: candidates,
+			})
+			expected := candidates[len(candidates)-1].Plugin.Meta.Key
+			c.Set("expected_task_plugin_key", expected)
+
+			assert.True(t, channelMatchesExpectedTaskPlugin(c, channel, expected))
+			require.Nil(t, SetupContextForSelectedChannel(c, channel, testCase.model))
+			value, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint)
+			require.True(t, exists)
+			assert.Equal(t, testCase.plugin, value.(jsplugin.PinnedEndpoint).Plugin.Meta.Key)
+		})
+	}
+}
+
 func TestChannelMatchesExpectedTaskPluginRejectsUnindexedLegacyChannel(t *testing.T) {
 	registry := jsplugin.NewRegistry()
 	plugin, err := registry.Register(distributorTaskPluginSource("legacy-alpha", constant.ChannelTypeKling), jsplugin.Options{})
@@ -249,6 +295,11 @@ export function parseTaskResult() { return {status: "SUCCESS"}; }
 }
 
 func distributorEndpointPluginSource(key string, channelType int) string {
+	return distributorEndpointPluginSourceWithModels(key, channelType, "task-model")
+}
+
+func distributorEndpointPluginSourceWithModels(key string, channelType int, models ...string) string {
+	encoded, _ := common.Marshal(models)
 	return fmt.Sprintf(`
 export const meta = {
   apiVersion: 1,
@@ -257,7 +308,7 @@ export const meta = {
   version: "1.0.0",
   author: {name: "Test"},
   channelTypes: [%d],
-  models: ["task-model"],
+  models: %s,
   fetchMode: "per_task",
   protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}],
 };
@@ -266,11 +317,11 @@ export function parseSubmitResponse() { return {taskId: "task"}; }
 export function buildQueryRequest() { return {}; }
 export function parseTaskResult() { return {status: "SUCCESS"}; }
 export const protocols = {openai_responses: {
-  decodeRequest: function(ctx) { return {kind: "submit", model: "task-model", requestBody: ctx.body.value}; },
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
   renderEvents: function() { return {events: [], state: null, done: false}; },
   renderFinal: function() { return {output: []}; },
 }};
-`, key, key, channelType)
+`, key, key, channelType, encoded)
 }
 
 func TestTokenModelLimitAllowsLegacyAliasAndModifierVariant(t *testing.T) {
@@ -320,13 +371,105 @@ func TestTokenModelLimitAllowsExemptAtNameByFullName(t *testing.T) {
 	assert.False(t, TokenModelLimitAllows(baseOnly, "opaque@sha256:deadbeef"))
 }
 
+func TestDistributeModelAvailability(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	autoGroups := setting.AutoGroups2JsonString()
+	usableGroups := setting.UserUsableGroups2JSONString()
+	groupRatios := ratio_setting.GroupRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(autoGroups))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(usableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(groupRatios))
+	})
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["default","vip"]`))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"vip":1}`))
+
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := setupChannelRoutingTestDB(t, dialect)
+			for _, channel := range []*model.Channel{
+				{Group: "default", Models: "online", Status: common.ChannelStatusEnabled},
+				{Group: "default", Models: "auto-paused", Status: common.ChannelStatusAutoDisabled},
+				{Group: "vip", Models: "deepseek-flash", Status: common.ChannelStatusManuallyDisabled},
+				{Group: "private", Models: "private-only", Status: common.ChannelStatusEnabled},
+			} {
+				channel.Type = constant.ChannelTypeOpenAI
+				channel.Key = "routing-test"
+				require.NoError(t, db.Create(channel).Error)
+				require.NoError(t, channel.AddAbilities(db))
+			}
+			for _, cache := range []bool{false, true} {
+				common.MemoryCacheEnabled = cache
+				model.InitChannelCache()
+				for _, tc := range []struct {
+					name, group, model, path string
+					tokenGroups              []string
+					status                   int
+					lookupFailure            bool
+				}{
+					{name: "unknown", group: "default", model: "unknown", status: http.StatusNotFound},
+					{name: "other group only", path: "/v1/messages", group: "default", model: "private-only", status: http.StatusNotFound},
+					{name: "manually disabled", path: "/v1/messages", group: "vip", model: "deepseek-flash", status: http.StatusServiceUnavailable},
+					{name: "automatically disabled", group: "default", model: "auto-paused", status: http.StatusServiceUnavailable},
+					{name: "normalized model in later auto group", group: "auto", model: "deepseek-flash@effort:max", status: http.StatusServiceUnavailable},
+					{name: "restricted auto groups", group: "auto", tokenGroups: []string{"default"}, model: "deepseek-flash", status: http.StatusNotFound},
+					{name: "enabled", group: "auto", model: "online", status: http.StatusNoContent},
+					{name: "lookup error", group: "auto", model: "unknown", status: http.StatusServiceUnavailable, lookupFailure: true},
+					{name: "healthy group after lookup error", group: "auto", tokenGroups: []string{"vip", "default"}, model: "online", status: http.StatusNoContent, lookupFailure: true},
+				} {
+					t.Run(fmt.Sprintf("cache=%t/%s", cache, tc.name), func(t *testing.T) {
+						if tc.lookupFailure {
+							failNext := true
+							queries := db.Callback().Query()
+							abilityTable := db.NamingStrategy.TableName("Ability")
+							const callback = "test:fail_first_route_lookup"
+							require.NoError(t, queries.Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+								if failNext && tx.Statement.Table == abilityTable {
+									failNext = false
+									tx.AddError(errors.New("channel lookup failed"))
+								}
+							}))
+							t.Cleanup(func() {
+								require.NoError(t, queries.Remove(callback))
+								assert.Equal(t, cache && tc.status == http.StatusNoContent, failNext)
+							})
+						}
+						path := common.GetStringIfEmpty(tc.path, "/v1/chat/completions")
+						router := gin.New()
+						router.POST(path, func(c *gin.Context) {
+							common.SetContextKey(c, constant.ContextKeyUsingGroup, tc.group)
+							common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+							if tc.tokenGroups != nil {
+								common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, tc.tokenGroups)
+							}
+						}, Distribute(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+						req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(fmt.Sprintf(`{"model":%q}`, tc.model)))
+						req.Header.Set("Content-Type", "application/json")
+						req.Header.Set("Accept-Language", "en")
+						w := httptest.NewRecorder()
+						router.ServeHTTP(w, req)
+						require.Equal(t, tc.status, w.Code, w.Body.String())
+						if tc.status == http.StatusNotFound {
+							assert.Contains(t, w.Body.String(), `"code":"model_not_found"`)
+							assert.Contains(t, w.Body.String(), "Model "+tc.model+" is not configured for any group available to this request")
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
 func TestDistributeHidesTaskPluginDetailsButLogsDiagnostics(t *testing.T) {
 	require.NoError(t, i18n.Init())
-	previousCacheEnabled := common.MemoryCacheEnabled
-	common.MemoryCacheEnabled = true
-	t.Cleanup(func() { common.MemoryCacheEnabled = previousCacheEnabled })
-
 	const group = "private-plugin-error-test-group"
+	db := setupChannelRoutingTestDB(t, "sqlite")
+	channel := &model.Channel{Type: constant.ChannelTypeKling, Group: group, Models: "task-model", Status: common.ChannelStatusManuallyDisabled}
+	require.NoError(t, db.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(db))
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
 	for _, locale := range []struct{ language, message string }{
 		{"en", "No available channel for model task-model under group " + group + ": the model is claimed by a task plugin, which has no enabled channel serving it (distributor)"},
 		{"zh-CN", "分组 " + group + " 下模型 task-model 无可用渠道：该模型由任务插件认领，但当前没有启用的渠道可服务此模型（distributor）"},
@@ -401,7 +544,7 @@ func TestNoAvailableChannelMessageWithoutPlugin(t *testing.T) {
 	plain, _ := gin.CreateTestContext(nil)
 	plain.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	plain.Request.Header.Set("Accept-Language", "en")
-	generic := noAvailableChannelMessage(plain, "default", "gpt-4o")
+	generic := noAvailableChannelMessage(plain, "default", "gpt-4o", i18n.MsgDistributorNoAvailableChannel)
 	assert.NotContains(t, generic, "task plugin")
 	assert.Contains(t, generic, "gpt-4o")
 }

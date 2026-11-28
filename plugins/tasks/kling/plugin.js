@@ -7,7 +7,7 @@ export const meta = {
     en: "Kuaishou Kling video generation (text-to-video and image-to-video)",
     zh: "快手可灵视频生成（文生视频、图生视频）",
   },
-  version: "1.2.0",
+  version: "1.2.1",
   author: { name: "QuantumNous" },
   channelTypes: [50],
   models: ["kling-v2-5-turbo", "kling-v2-6", "kling-v3", "kling-4.0"],
@@ -85,7 +85,7 @@ const KLING4_ACTIONS = { "text-to-video": "text_to_video", "image-to-video": "im
 // kling-v3, then of Kling 4.0. The host protocols send the one nearest the
 // request's size; without a size Kling uses its default, 16:9.
 const KLING_ASPECT_RATIOS = ["16:9", "9:16", "1:1"];
-const KLING4_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "21:9"];
+const KLING4_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "21:9", "4:3", "3:4"];
 
 // Kling's numeric error codes for the statuses the gateway answers with
 // (kling.ai/document-api/api/get-started/error-codes).

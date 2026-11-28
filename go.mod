@@ -45,6 +45,7 @@ require (
 	github.com/jfreymuth/vorbis v1.0.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
+	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -95,10 +96,10 @@ require (
 	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/Calcium-Ion/go-epay v0.0.6
 	github.com/ClickHouse/clickhouse-go/v2 v2.50.0
-	github.com/HugoSmits86/nativewebp v1.3.0
-	github.com/MoeForge/moego v0.1.0-alpha.3
+	github.com/MoeForge/moego v0.1.0-alpha.5
 	github.com/MoeForge/moejs v0.1.0
-	github.com/QuantumNous/new-api/relaykit v0.0.0
+	github.com/QuantumNous/new-api/pluginkit v0.0.0
+	github.com/QuantumNous/new-api/relaykit v0.3.8
 	github.com/QuantumNous/new-api/tokenkit v0.0.0
 	github.com/abema/go-mp4 v1.7.4
 	github.com/alicebob/miniredis/v2 v2.40.0
@@ -134,7 +135,6 @@ require (
 	github.com/jfreymuth/oggvorbis v1.0.5
 	github.com/jinzhu/copier v0.4.0
 	github.com/joho/godotenv v1.5.1
-	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.20.3
 	github.com/ledongthuc/pdf v0.0.0-20261020125853-5e46805f718e
 	github.com/mewkiz/flac v1.0.14
@@ -169,6 +169,8 @@ require (
 	gorm.io/driver/postgres v1.6.3
 	gorm.io/gorm v1.31.2
 )
+
+replace github.com/QuantumNous/new-api/pluginkit => ./pluginkit
 
 replace github.com/QuantumNous/new-api/relaykit => ./relaykit
 

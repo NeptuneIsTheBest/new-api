@@ -158,19 +158,24 @@ func TestUnfinishedSyncTaskQueriesDatabaseMatrix(t *testing.T) {
 				progress any
 				pending  bool
 			}{
-				{name: "not started", status: TaskStatusNotStart, progress: "0%", pending: true},
-				{name: "submitted", status: TaskStatusSubmitted, progress: "0%", pending: true},
-				{name: "queued", status: TaskStatusQueued, progress: "0%", pending: true},
-				{name: "in progress", status: TaskStatusInProgress, progress: "50%", pending: true},
+				{name: "not started", status: TaskStatusNotStart, progress: "99%", pending: true},
+				{name: "submitted", status: TaskStatusSubmitted, progress: "99%", pending: true},
+				{name: "queued", status: TaskStatusQueued, progress: "99%", pending: true},
+				{name: "in progress", status: TaskStatusInProgress, progress: "99%", pending: true},
 				{name: "legacy unknown", status: TaskStatusUnknown, progress: "0%", pending: true},
 				{name: "legacy empty status", status: "", progress: "0%", pending: true},
 				{name: "empty progress", status: TaskStatusQueued, progress: "", pending: true},
-				{name: "success with stale progress", status: TaskStatusSuccess, progress: "50%"},
-				{name: "failure with stale progress", status: TaskStatusFailure, progress: "50%"},
-				{name: "completed progress", status: TaskStatusInProgress, progress: "100%"},
+				{name: "success with stale progress", status: TaskStatusSuccess, progress: "99%"},
+				{name: "failure with stale progress", status: TaskStatusFailure, progress: "99%"},
+				{name: "not started at full progress", status: TaskStatusNotStart, progress: "100%", pending: true},
+				{name: "submitted at full progress", status: TaskStatusSubmitted, progress: "100%", pending: true},
+				{name: "queued at full progress", status: TaskStatusQueued, progress: "100%", pending: true},
+				{name: "in progress at full progress", status: TaskStatusInProgress, progress: "100%", pending: true},
+				{name: "success at full progress", status: TaskStatusSuccess, progress: "100%"},
+				{name: "failure at full progress", status: TaskStatusFailure, progress: "100%"},
 				{name: "nonstandard status", status: "RETRYING", progress: "0%"},
 				{name: "null status", status: nil, progress: "0%"},
-				{name: "null progress", status: TaskStatusQueued, progress: nil},
+				{name: "null progress", status: TaskStatusQueued, progress: nil, pending: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					require.NoError(t, db.Where("1 = 1").Delete(&Task{}).Error)

@@ -233,7 +233,7 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 	}
 
 	c.Render(-1, common.CustomEvent{Data: "event: " + resp.Type + "\n"})
-	c.Render(-1, common.CustomEvent{Data: "data: " + data + "\n"})
+	c.Render(-1, common.CustomEvent{Data: "data: " + data})
 	_ = FlushWriter(c)
 }
 

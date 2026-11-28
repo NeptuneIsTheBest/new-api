@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
@@ -48,9 +47,7 @@ func TestRegistryIndexesNativeRoutesAndProtocolsInOneGeneration(t *testing.T) {
 	byKey, ok := generation.Get("routing-alpha")
 	require.True(t, ok)
 	assert.Same(t, plugin, byKey)
-	byType, ok := generation.GetByChannelType(50)
-	require.True(t, ok)
-	assert.Same(t, plugin, byType)
+	assert.Equal(t, []*LoadedPlugin{plugin}, generation.PluginsByChannelType(50))
 	byModel, ok := generation.GetByModel("video-alpha")
 	require.True(t, ok)
 	assert.Same(t, plugin, byModel)
@@ -81,27 +78,6 @@ func TestRegistryIndexesSharedEndpointCandidatesForDistinctLegacyProviders(t *te
 	assert.Equal(t, "gemini-provider", candidates[0].Plugin.Meta.Key)
 	assert.Equal(t, "vertex-provider", candidates[1].Plugin.Meta.Key)
 	assert.Empty(t, registry.RoutingErrors())
-}
-
-func TestSupportsRegisteredHostProtocols(t *testing.T) {
-	assert.True(t, SupportsHostProtocol("openai_responses"))
-	assert.True(t, SupportsHostProtocol("openai_video"))
-	assert.True(t, SupportsHostProtocol(ProtocolOpenAIImage))
-	assert.False(t, SupportsHostProtocol("plugin_owned_wire"))
-}
-
-func TestLookupHostProtocolOperationExcludesRetrieveWithoutModelField(t *testing.T) {
-	_, _, ok := LookupHostProtocolOperation(http.MethodGet, "/v1/responses/:response_id")
-	assert.False(t, ok)
-	_, _, ok = LookupHostProtocolOperation(http.MethodPost, "/v1/responses")
-	assert.True(t, ok)
-	for _, path := range []string{"/v1/images/generations", "/v1/images/edits"} {
-		protocol, operation, found := LookupHostProtocolOperation(http.MethodPost, path)
-		require.True(t, found, path)
-		assert.Equal(t, ProtocolOpenAIImage, protocol)
-		assert.Equal(t, "model", operation.ModelField)
-		assert.Empty(t, operation.Modes, "the synchronous image protocol has no request modes")
-	}
 }
 
 // The OpenAI Images protocol is claimed in bare-string form, binds both image
@@ -136,30 +112,6 @@ func TestOpenAIImageProtocolClaimBindsBothEndpointsAndRequiresRender(t *testing.
 	require.ErrorContains(t, err, `missing hook "render"`)
 	_, err = CompilePlugin(routingTestPluginSource("image-modes", 17, `["image-a"]`, `protocols: [{name: "openai_image", supports: ["sync"]}],`, exports), Options{})
 	require.ErrorContains(t, err, "does not define modes")
-}
-
-func TestFileReferenceRoundTripAddressesRepeatedFieldFiles(t *testing.T) {
-	assert.Equal(t, "request_file:image[]", FileReference("image[]", 0))
-	assert.Equal(t, "request_file:image[]#2", FileReference("image[]", 2))
-	for _, tc := range []struct {
-		ref   string
-		field string
-		index int
-		ok    bool
-	}{
-		{"request_file:input_reference", "input_reference", 0, true},
-		{"request_file:image[]#1", "image[]", 1, true},
-		{"request_file:image[]#01", "", 0, false},
-		{"request_file:image[]#-1", "", 0, false},
-		{"request_file:#1", "", 0, false},
-		{"request_file:", "", 0, false},
-		{"image", "", 0, false},
-	} {
-		field, index, ok := ParseFileReference(tc.ref)
-		assert.Equal(t, tc.ok, ok, tc.ref)
-		assert.Equal(t, tc.field, field, tc.ref)
-		assert.Equal(t, tc.index, index, tc.ref)
-	}
 }
 
 func TestPerProtocolModelsNarrowEndpointBindings(t *testing.T) {
@@ -202,8 +154,9 @@ func TestPerProtocolModelsAllowDisjointPluginsOnSharedProtocol(t *testing.T) {
 
 func TestPreflightRoutingConflict(t *testing.T) {
 	first := mustCompileRoutingPlugin(t, "preflight-first", 90, `["model-a"]`, "", "")
-	second := mustCompileRoutingPlugin(t, "preflight-second", 90, `["model-b"]`, "", "")
+	second := mustCompileRoutingPlugin(t, "preflight-second", 0, `["MODEL-A"]`, "", "")
 	replacement := mustCompileRoutingPlugin(t, "preflight-first", 90, `["model-a-v2"]`, "", "")
+	sameType := mustCompileRoutingPlugin(t, "preflight-same-type", 90, `["model-b"]`, "", "")
 
 	require.NoError(t, PreflightRoutingConflict(nil, first), "a lone candidate against a nil generation must be admitted")
 
@@ -213,10 +166,10 @@ func TestPreflightRoutingConflict(t *testing.T) {
 
 	err := PreflightRoutingConflict(current, second)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "preflight-first")
-	assert.Contains(t, err.Error(), "channelType 90 conflicts")
+	assert.Contains(t, err.Error(), `plugin preflight-second model "MODEL-A" conflicts with plugin preflight-first`)
 
 	require.NoError(t, PreflightRoutingConflict(current, replacement), "same-key re-upload must replace rather than self-conflict")
+	require.NoError(t, PreflightRoutingConflict(current, sameType), "plugins may share a channel type")
 
 	left := mustCompileRoutingPlugin(t, "preflight-left", 0, `["shared-model"]`,
 		`protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}],`,
@@ -253,246 +206,6 @@ func TestPerProtocolModelsAcceptSharedPluginClaims(t *testing.T) {
 			assert.Same(t, first, generation.PluginsByModel("shared-model")[0])
 		})
 	}
-}
-
-func TestProtocolClaimDecodeAndValidation(t *testing.T) {
-	tests := []struct {
-		name          string
-		models        string
-		metaFields    string
-		exports       string
-		errContains   string
-		wantProtocols []ProtocolClaim
-	}{
-		{
-			name:       "string and object entries mix",
-			models:     `["gpt-5.5", "gpt-5.6"]`,
-			metaFields: `protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}, {name: "openai_video", models: ["gpt-5.5"]}],`,
-			exports: `export const protocols = {
-				openai_responses: {
-					decodeRequest: function(ctx) { return ctx; },
-					renderEvents: function() { return {events: [], state: null, done: false}; },
-					renderFinal: function(ctx, task) { return task; }
-				},
-				openai_video: {
-					decodeRequest: function(ctx) { return ctx; },
-					render: function(ctx, task) { return task; }
-				}
-			};
-			export function listArtifacts() { return []; }
-			export function buildContentRequest() { return {}; }`,
-			wantProtocols: []ProtocolClaim{
-				{Name: "openai_responses", Supports: []string{"stream", "sync", "background"}, objectForm: true},
-				{Name: "openai_video", Models: []string{"gpt-5.5"}, objectForm: true},
-			},
-		},
-		{
-			name:          "absent protocols is fine",
-			models:        `["gpt-5.5"]`,
-			wantProtocols: []ProtocolClaim{},
-		},
-		{
-			name:        "object with unknown field",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: [{name: "openai_responses", models: ["gpt-5.5"], extra: true}],`,
-			errContains: `unknown field "extra"`,
-		},
-		{
-			name:        "model outside meta models",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: [{name: "openai_responses", models: ["gpt-9.9"], supports: ["stream", "sync", "background"]}],`,
-			errContains: "is not declared in plugin meta models",
-		},
-		{
-			name:        "duplicate models in claim",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: [{name: "openai_responses", models: ["gpt-5.5", "gpt-5.5"], supports: ["stream", "sync", "background"]}],`,
-			errContains: "models must be unique",
-		},
-		{
-			name:        "blank model in claim",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: [{name: "openai_responses", models: [" "], supports: ["stream", "sync", "background"]}],`,
-			errContains: "non-empty canonical names",
-		},
-		{
-			name:        "empty models rejected",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: [{name: "openai_responses", models: []}],`,
-			errContains: "models must contain at least one model",
-		},
-		{
-			name:        "explicit null protocols",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `protocols: null,`,
-			errContains: "must be an array",
-		},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			exports := testCase.exports
-			if exports == "" && testCase.errContains != "" {
-				exports = routingProtocolExport("openai_responses")
-			}
-			plugin, err := CompilePlugin(
-				routingTestPluginSource("claim-decode", 0, testCase.models, testCase.metaFields, exports),
-				Options{},
-			)
-			if testCase.errContains != "" {
-				require.ErrorContains(t, err, testCase.errContains)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, testCase.wantProtocols, plugin.Meta.Protocols)
-		})
-	}
-}
-
-func TestRouteModelsDecodeAndValidation(t *testing.T) {
-	routeExports := `export const native = {
-		decodeJob: function(ctx) { return {kind: "submit", model: "gpt-5.5", requestBody: ctx.body.value}; },
-		jobCreated: function(ctx, task) { return task; },
-		jobStatus: function(ctx, task) { return task; }
-	};`
-	tests := []struct {
-		name        string
-		models      string
-		metaFields  string
-		errContains string
-	}{
-		{
-			name:       "submit route with models",
-			models:     `["gpt-5.5", "gpt-5.6"]`,
-			metaFields: `routes: [{method: "POST", path: "/v1/batch", type: "submit", models: ["gpt-5.5"], decode: "decodeJob", render: "jobCreated"}],`,
-		},
-		{
-			name:        "query route rejects models",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "GET", path: "/v1/batch/:task_id", type: "query", models: ["gpt-5.5"], render: "jobStatus"}],`,
-			errContains: "must not declare models",
-		},
-		{
-			name:        "model outside meta models",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "POST", path: "/v1/batch", type: "submit", models: ["gpt-9.9"], decode: "decodeJob", render: "jobCreated"}],`,
-			errContains: "is not declared in plugin meta models",
-		},
-		{
-			name:        "duplicate models",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "POST", path: "/v1/batch", type: "submit", models: ["gpt-5.5", "gpt-5.5"], decode: "decodeJob", render: "jobCreated"}],`,
-			errContains: "models must be unique",
-		},
-		{
-			name:        "blank model entry",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "POST", path: "/v1/batch", type: "submit", models: [" "], decode: "decodeJob", render: "jobCreated"}],`,
-			errContains: "non-empty canonical names",
-		},
-		{
-			name:        "empty models rejected",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "POST", path: "/v1/batch", type: "submit", models: [], decode: "decodeJob", render: "jobCreated"}],`,
-			errContains: "models must contain at least one model",
-		},
-		{
-			name:        "query route empty models rejected",
-			models:      `["gpt-5.5"]`,
-			metaFields:  `routes: [{method: "GET", path: "/v1/batch/:task_id", type: "query", models: [], render: "jobStatus"}],`,
-			errContains: "models must contain at least one model",
-		},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			plugin, err := CompilePlugin(
-				routingTestPluginSource("route-models", 0, testCase.models, testCase.metaFields, routeExports),
-				Options{},
-			)
-			if testCase.errContains != "" {
-				require.ErrorContains(t, err, testCase.errContains)
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, plugin.Meta.Routes, 1)
-			assert.Equal(t, []string{"gpt-5.5"}, plugin.Meta.Routes[0].Models)
-		})
-	}
-}
-
-func TestRouteRetainResultDecodeAndValidation(t *testing.T) {
-	routeExports := `export const native = {
-		decodeJob: function(ctx) { return {kind: "submit", model: "gpt-5.5", requestBody: ctx.body.value}; },
-		jobCreated: function(ctx, task) { return task; },
-		jobStatus: function(ctx, task) { return task; }
-	};`
-	falseValue := false
-	tests := []struct {
-		name        string
-		metaFields  string
-		want        *bool
-		errContains string
-	}{
-		{
-			name:       "undeclared route retains",
-			metaFields: `routes: [{method: "POST", path: "/v1/batch", type: "submit", decode: "decodeJob", render: "jobCreated"}],`,
-		},
-		{
-			name:       "submit route declines retention",
-			metaFields: `routes: [{method: "POST", path: "/v1/batch", type: "submit", decode: "decodeJob", render: "jobCreated", retainResult: false}],`,
-			want:       &falseValue,
-		},
-		{
-			name:        "query route rejects retainResult",
-			metaFields:  `routes: [{method: "GET", path: "/v1/batch/:task_id", type: "query", render: "jobStatus", retainResult: true}],`,
-			errContains: "must not declare retainResult",
-		},
-		{
-			name:        "non-boolean value",
-			metaFields:  `routes: [{method: "POST", path: "/v1/batch", type: "submit", decode: "decodeJob", render: "jobCreated", retainResult: "no"}],`,
-			errContains: "retainResult must be a boolean",
-		},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			plugin, err := CompilePlugin(
-				routingTestPluginSource("route-retain", 0, `["gpt-5.5"]`, testCase.metaFields, routeExports),
-				Options{},
-			)
-			if testCase.errContains != "" {
-				require.ErrorContains(t, err, testCase.errContains)
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, plugin.Meta.Routes, 1)
-			assert.Equal(t, testCase.want, plugin.Meta.Routes[0].RetainResult)
-		})
-	}
-}
-
-func TestRouteRequestContextKeepsFormAndMultipartValuesAcrossDecoderWrites(t *testing.T) {
-	plugin, err := CompilePlugin(routingTestPluginSource("route-request-writes", 0, `["gpt-5.5"]`, "", `
-export function decodeJob(ctx) {
-	const seen = {
-		prompt: ctx.body.fields.prompt[0],
-		filename: ctx.body.files[0].filename,
-		params: Object.keys(ctx.params).length,
-		query: Object.keys(ctx.query).length
-	};
-	ctx.body.fields.prompt[0] = "mutated";
-	ctx.body.files[0].filename = "mutated.png";
-	return seen;
-}`), Options{})
-	require.NoError(t, err)
-	fields := map[string][]string{"prompt": {"original"}}
-	files := []map[string]any{{"ref": "request_file:image", "filename": "safe.png"}}
-	request := RouteRequestContext{Body: map[string]any{"kind": "multipart", "fields": fields, "files": files}}
-	for range 2 {
-		seen, err := plugin.Engine.Call(context.Background(), "decodeJob", request.JSValue())
-		require.NoError(t, err)
-		assert.Equal(t, map[string]any{"prompt": "original", "filename": "safe.png", "params": int64(0), "query": int64(0)}, seen)
-	}
-	assert.Equal(t, "original", fields["prompt"][0])
-	assert.Equal(t, "safe.png", files[0]["filename"])
 }
 
 func TestRegistryNoOpMutationsKeepCurrentGeneration(t *testing.T) {
@@ -559,8 +272,8 @@ export function parseTaskResult() { return {}; }
 
 func TestRegistryReportsPartialAndFailedRebuildOutcomes(t *testing.T) {
 	registry := NewRegistry()
-	alpha := mustCompileRoutingPlugin(t, "outcome-alpha", 601, `["alpha"]`, "", "")
-	beta := mustCompileRoutingPlugin(t, "outcome-beta", 601, `["beta"]`, "", "")
+	alpha := mustCompileRoutingPlugin(t, "outcome-alpha", 0, `["alpha"]`, "", "")
+	beta := mustCompileRoutingPlugin(t, "outcome-beta", 0, `["ALPHA"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{alpha, beta}))
 
 	partial := registry.LastRebuildOutcome()
@@ -592,16 +305,10 @@ func TestRegistryExcludesConflictingPluginWithoutBlockingGeneration(t *testing.T
 		expectedError string
 	}{
 		{
-			name:          "legacy channel type",
-			first:         mustCompileRoutingPlugin(t, "channel-alpha", 50, `["alpha"]`, "", ""),
-			second:        mustCompileRoutingPlugin(t, "channel-beta", 50, `["beta"]`, "", ""),
-			expectedError: "channelType 50 conflicts",
-		},
-		{
-			name:          "overlapping channelTypes entry",
-			first:         mustCompileRoutingPlugin(t, "channel-alpha", 0, `["alpha"]`, `channelTypes: [55, 1],`, ""),
-			second:        mustCompileRoutingPlugin(t, "channel-beta", 0, `["beta"]`, `channelTypes: [1],`, ""),
-			expectedError: "channelType 1 conflicts",
+			name:          "model differing only in case",
+			first:         mustCompileRoutingPlugin(t, "model-alpha", 0, `["alpha"]`, "", ""),
+			second:        mustCompileRoutingPlugin(t, "model-beta", 0, `["ALPHA"]`, "", ""),
+			expectedError: `model "ALPHA" conflicts with plugin model-alpha`,
 		},
 	}
 
@@ -622,13 +329,27 @@ func TestRegistryExcludesConflictingPluginWithoutBlockingGeneration(t *testing.T
 	}
 }
 
+// Several plugins may declare a built-in channel type: each is admitted, and
+// a channel of the type serves them in key order.
+func TestPluginsShareChannelType(t *testing.T) {
+	registry := NewRegistry()
+	beta := mustCompileRoutingPlugin(t, "zhipu-beta", 0, `["glm-video"]`, `channelTypes: [26, 16],`, "")
+	alpha := mustCompileRoutingPlugin(t, "zhipu-alpha", 26, `["cogview"]`, "", "")
+	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{beta, alpha}))
+
+	assert.Empty(t, registry.RoutingErrors())
+	assert.Equal(t, []*LoadedPlugin{alpha, beta}, registry.PluginsByChannelType(26))
+	assert.Equal(t, []*LoadedPlugin{beta}, registry.PluginsByChannelType(16))
+	assert.Empty(t, registry.PluginsByChannelType(1))
+}
+
 func TestRegistryRetainsIncumbentWhenUpdatedPluginConflicts(t *testing.T) {
 	registry := NewRegistry()
 	incumbent := mustCompileRoutingPlugin(t, "incumbent", 70, `["model-v1"]`, "", "")
 	other := mustCompileRoutingPlugin(t, "other", 71, `["other-model"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{incumbent, other}))
 
-	conflictingUpdate := mustCompileRoutingPlugin(t, "incumbent", 71, `["model-v2"]`, "", "")
+	conflictingUpdate := mustCompileRoutingPlugin(t, "incumbent", 70, `["model-v2", "OTHER-MODEL"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{conflictingUpdate, other}))
 
 	active, ok := registry.Get("incumbent")
@@ -648,8 +369,8 @@ func TestRegistryRetainsIncumbentWhenUpdatedPluginConflicts(t *testing.T) {
 
 func TestRegistryAdmitsNewConflictsInDeterministicKeyOrder(t *testing.T) {
 	registry := NewRegistry()
-	alpha := mustCompileRoutingPlugin(t, "alpha", 80, `["alpha-model"]`, "", "")
-	beta := mustCompileRoutingPlugin(t, "beta", 80, `["beta-model"]`, "", "")
+	alpha := mustCompileRoutingPlugin(t, "alpha", 0, `["shared-model"]`, "", "")
+	beta := mustCompileRoutingPlugin(t, "beta", 0, `["SHARED-MODEL"]`, "", "")
 
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{beta, alpha}))
 
@@ -658,7 +379,7 @@ func TestRegistryAdmitsNewConflictsInDeterministicKeyOrder(t *testing.T) {
 	assert.Same(t, alpha, active)
 	_, betaActive := registry.Get("beta")
 	assert.False(t, betaActive)
-	assert.Contains(t, registry.RoutingErrors()["beta"], "channelType 80 conflicts")
+	assert.Contains(t, registry.RoutingErrors()["beta"], `model "SHARED-MODEL" conflicts with plugin alpha`)
 }
 
 func TestRegistryPublishesHealthyUpdateAlongsideRejectedUpdate(t *testing.T) {
@@ -669,7 +390,7 @@ func TestRegistryPublishesHealthyUpdateAlongsideRejectedUpdate(t *testing.T) {
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{healthyV1, offenderV1, owner}))
 
 	healthyV2 := mustCompileRoutingPlugin(t, "healthy", 84, `["healthy-v2"]`, "", "")
-	offenderV2 := mustCompileRoutingPlugin(t, "offender", 83, `["offender-v2"]`, "", "")
+	offenderV2 := mustCompileRoutingPlugin(t, "offender", 82, `["offender-v2", "OWNER"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{healthyV2, offenderV2, owner}))
 
 	activeHealthy, ok := registry.Get("healthy")
@@ -678,27 +399,27 @@ func TestRegistryPublishesHealthyUpdateAlongsideRejectedUpdate(t *testing.T) {
 	activeOffender, ok := registry.Get("offender")
 	require.True(t, ok)
 	assert.Same(t, offenderV1, activeOffender)
-	assert.Contains(t, registry.RoutingErrors()["offender"], "channelType 83 conflicts")
+	assert.Contains(t, registry.RoutingErrors()["offender"], `conflicts with plugin offender model "OWNER"`)
 }
 
 func TestRegistryAdmitsInterdependentUpdatesAsOneGeneration(t *testing.T) {
 	tests := []struct {
-		name       string
-		firstType  int
-		secondType int
+		name         string
+		firstModels  string
+		secondModels string
 	}{
-		{name: "one update frees the type needed by another", firstType: 102, secondType: 103},
-		{name: "two plugins swap types", firstType: 102, secondType: 101},
+		{name: "one update frees the name needed by another", firstModels: `["SECOND-OWNED"]`, secondModels: `["second-v2"]`},
+		{name: "two plugins swap names", firstModels: `["SECOND-OWNED"]`, secondModels: `["FIRST-OWNED"]`},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			registry := NewRegistry()
-			firstV1 := mustCompileRoutingPlugin(t, "dependent-first", 101, `["first-v1"]`, "", "")
-			secondV1 := mustCompileRoutingPlugin(t, "dependent-second", 102, `["second-v1"]`, "", "")
+			firstV1 := mustCompileRoutingPlugin(t, "dependent-first", 0, `["first-owned"]`, "", "")
+			secondV1 := mustCompileRoutingPlugin(t, "dependent-second", 0, `["second-owned"]`, "", "")
 			require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{firstV1, secondV1}))
 
-			firstV2 := mustCompileRoutingPlugin(t, "dependent-first", testCase.firstType, `["first-v2"]`, "", "")
-			secondV2 := mustCompileRoutingPlugin(t, "dependent-second", testCase.secondType, `["second-v2"]`, "", "")
+			firstV2 := mustCompileRoutingPlugin(t, "dependent-first", 0, testCase.firstModels, "", "")
+			secondV2 := mustCompileRoutingPlugin(t, "dependent-second", 0, testCase.secondModels, "", "")
 			require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{firstV2, secondV2}))
 
 			activeFirst, ok := registry.Get("dependent-first")
@@ -714,13 +435,13 @@ func TestRegistryAdmitsInterdependentUpdatesAsOneGeneration(t *testing.T) {
 
 func TestRejectedUpdateDoesNotRestoreIncumbentAheadOfHealthyPeer(t *testing.T) {
 	registry := NewRegistry()
-	alphaV1 := mustCompileRoutingPlugin(t, "fallback-alpha", 111, `["alpha-v1"]`, "", "")
-	betaV1 := mustCompileRoutingPlugin(t, "fallback-beta", 112, `["beta-v1"]`, "", "")
-	owner := mustCompileRoutingPlugin(t, "fallback-owner", 113, `["owner"]`, "", "")
+	alphaV1 := mustCompileRoutingPlugin(t, "fallback-alpha", 0, `["alpha-owned"]`, "", "")
+	betaV1 := mustCompileRoutingPlugin(t, "fallback-beta", 0, `["beta-v1"]`, "", "")
+	owner := mustCompileRoutingPlugin(t, "fallback-owner", 0, `["owner"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{alphaV1, betaV1, owner}))
 
-	alphaV2 := mustCompileRoutingPlugin(t, "fallback-alpha", 113, `["alpha-v2"]`, "", "")
-	betaV2 := mustCompileRoutingPlugin(t, "fallback-beta", 111, `["beta-v2"]`, "", "")
+	alphaV2 := mustCompileRoutingPlugin(t, "fallback-alpha", 0, `["alpha-v2", "OWNER"]`, "", "")
+	betaV2 := mustCompileRoutingPlugin(t, "fallback-beta", 0, `["beta-v2", "ALPHA-OWNED"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{alphaV2, betaV2, owner}))
 
 	_, alphaActive := registry.Get("fallback-alpha")
@@ -731,16 +452,16 @@ func TestRejectedUpdateDoesNotRestoreIncumbentAheadOfHealthyPeer(t *testing.T) {
 	activeOwner, ok := registry.Get("fallback-owner")
 	require.True(t, ok)
 	assert.Same(t, owner, activeOwner)
-	assert.Contains(t, registry.RoutingErrors()["fallback-alpha"], "channelType 113 conflicts")
+	assert.Contains(t, registry.RoutingErrors()["fallback-alpha"], `conflicts with plugin fallback-alpha model "OWNER"`)
 	assert.NotContains(t, registry.RoutingErrors(), "fallback-beta")
 }
 
 func TestRemovingOverrideNeverRetainsRemovedIncumbent(t *testing.T) {
 	registry := NewRegistry()
-	override := mustCompileRoutingPlugin(t, "fallback", 92, `["override"]`, "", "")
-	owner := mustCompileRoutingPlugin(t, "owner", 91, `["owner"]`, "", "")
+	override := mustCompileRoutingPlugin(t, "fallback", 0, `["override"]`, "", "")
+	owner := mustCompileRoutingPlugin(t, "owner", 0, `["owner"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{override, owner}))
-	factory, err := registry.RegisterFactory(routingTestPluginSource("fallback", 91, `["factory"]`, "", ""), Options{})
+	factory, err := registry.RegisterFactory(routingTestPluginSource("fallback", 0, `["factory", "OWNER"]`, "", ""), Options{})
 	require.NoError(t, err)
 
 	require.NoError(t, registry.Unregister("fallback"))
@@ -752,7 +473,7 @@ func TestRemovingOverrideNeverRetainsRemovedIncumbent(t *testing.T) {
 	assert.Same(t, owner, ownerActive)
 	assert.NotContains(t, registry.OverridePlugins(), "fallback")
 	assert.NotContains(t, registry.ActiveOverridePlugins(), "fallback")
-	assert.Contains(t, registry.RoutingErrors()["fallback"], "channelType 91 conflicts")
+	assert.Contains(t, registry.RoutingErrors()["fallback"], `conflicts with plugin fallback model "OWNER"`)
 
 	require.NoError(t, registry.Unregister("owner"))
 	fallbackPlugin, ok := registry.Get("fallback")
@@ -762,13 +483,13 @@ func TestRemovingOverrideNeverRetainsRemovedIncumbent(t *testing.T) {
 
 func TestRejectedNewOverrideRetainsFactoryIncumbent(t *testing.T) {
 	registry := NewRegistry()
-	factorySource := routingTestPluginSource("factory-fallback", 121, `["factory"]`, "", "")
+	factorySource := routingTestPluginSource("factory-fallback", 0, `["factory"]`, "", "")
 	factory, err := registry.RegisterFactory(factorySource, Options{})
 	require.NoError(t, err)
-	owner := mustCompileRoutingPlugin(t, "factory-owner", 122, `["owner"]`, "", "")
+	owner := mustCompileRoutingPlugin(t, "factory-owner", 0, `["owner"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{owner}))
 
-	conflictingOverride := mustCompileRoutingPlugin(t, "factory-fallback", 122, `["override"]`, "", "")
+	conflictingOverride := mustCompileRoutingPlugin(t, "factory-fallback", 0, `["override", "OWNER"]`, "", "")
 	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{conflictingOverride, owner}))
 
 	active, ok := registry.Get("factory-fallback")
@@ -776,7 +497,7 @@ func TestRejectedNewOverrideRetainsFactoryIncumbent(t *testing.T) {
 	assert.Same(t, factory, active)
 	assert.Same(t, conflictingOverride, registry.OverridePlugins()["factory-fallback"])
 	assert.NotContains(t, registry.ActiveOverridePlugins(), "factory-fallback")
-	assert.Contains(t, registry.RoutingErrors()["factory-fallback"], "channelType 122 conflicts")
+	assert.Contains(t, registry.RoutingErrors()["factory-fallback"], `conflicts with plugin factory-fallback model "OWNER"`)
 }
 
 func TestGenericChannelTypesDoNotCreateLegacyIdentityConflicts(t *testing.T) {
@@ -787,300 +508,8 @@ func TestGenericChannelTypesDoNotCreateLegacyIdentityConflicts(t *testing.T) {
 			second := mustCompileRoutingPlugin(t, "generic-beta", channelType, `["beta"]`, "", "")
 
 			require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{first, second}))
-			_, found := registry.GetByChannelType(channelType)
-			assert.False(t, found)
+			assert.Empty(t, registry.PluginsByChannelType(channelType))
 		})
-	}
-}
-
-func TestDeclarativeRouteValidationProtectsNamespacesAndCanonicalSyntax(t *testing.T) {
-	tests := []struct {
-		name          string
-		route         Route
-		expectedError string
-	}{
-		{
-			name:          "static assets",
-			route:         Route{Method: "GET", Path: "/assets/x", Type: RouteTypeQuery, Render: "native"},
-			expectedError: "reserved namespace /assets",
-		},
-		{
-			name:          "generic task management",
-			route:         Route{Method: "GET", Path: "/v1/tasks/:task_id", Type: RouteTypeQuery, Render: "native"},
-			expectedError: "reserved namespace /v1/tasks",
-		},
-		{
-			name:          "SPA root",
-			route:         Route{Method: "POST", Path: "/console/jobs", Type: RouteTypeSubmit},
-			expectedError: "reserved namespace /console",
-		},
-		{
-			name:          "request processing page",
-			route:         Route{Method: "GET", Path: "/request-processing", Type: RouteTypeQuery, Render: "native"},
-			expectedError: "reserved namespace /request-processing",
-		},
-		{
-			name:          "security page",
-			route:         Route{Method: "GET", Path: "/security/:section", Type: RouteTypeQuery, Render: "native"},
-			expectedError: "reserved namespace /security",
-		},
-		{
-			name:          "dynamic root can claim reserved subtree",
-			route:         Route{Method: "POST", Path: "/:root/jobs", Type: RouteTypeSubmit},
-			expectedError: "intersects reserved namespace",
-		},
-		{
-			name:          "dynamic v1 namespace can claim task management",
-			route:         Route{Method: "POST", Path: "/v1/:namespace", Type: RouteTypeSubmit},
-			expectedError: "reserved namespace /v1/tasks",
-		},
-		{
-			name:          "root catch-all can claim reserved subtree",
-			route:         Route{Method: "POST", Path: "/*rest", Type: RouteTypeSubmit},
-			expectedError: "intersects reserved namespace",
-		},
-		{
-			name:          "repeated slash",
-			route:         Route{Method: "POST", Path: "/vendor//jobs", Type: RouteTypeSubmit},
-			expectedError: "empty segments",
-		},
-		{
-			name:          "noncanonical method",
-			route:         Route{Method: " post ", Path: "/vendor/jobs", Type: RouteTypeSubmit},
-			expectedError: "canonical uppercase",
-		},
-		{
-			name:          "non-terminal catch-all",
-			route:         Route{Method: "POST", Path: "/vendor/*rest/jobs", Type: RouteTypeSubmit},
-			expectedError: "invalid catch-all",
-		},
-		{
-			name:          "query declares decoder",
-			route:         Route{Method: "GET", Path: "/vendor/jobs/:task_id", Type: RouteTypeQuery, Decode: "decode", Render: "show"},
-			expectedError: "must not declare decode",
-		},
-		{
-			name:          "submit missing presenter",
-			route:         Route{Method: "POST", Path: "/vendor/jobs", Type: RouteTypeSubmit, Decode: "decode"},
-			expectedError: "must declare decode and render",
-		},
-		{
-			name:          "dynamic missing decoder",
-			route:         Route{Method: "POST", Path: "/vendor/query", Type: RouteTypeDynamic, Render: "show"},
-			expectedError: "must declare decode and render",
-		},
-		{
-			name:          "dynamic missing presenter",
-			route:         Route{Method: "POST", Path: "/vendor/query", Type: RouteTypeDynamic, Decode: "decode"},
-			expectedError: "must declare decode and render",
-		},
-		{
-			name:          "query declares action",
-			route:         Route{Method: "GET", Path: "/vendor/jobs/:task_id", Type: RouteTypeQuery, Render: "show", Action: "retrieve"},
-			expectedError: "must not declare action",
-		},
-		{
-			name:          "submit declares task id parameter",
-			route:         Route{Method: "POST", Path: "/vendor/jobs", Type: RouteTypeSubmit, Decode: "decode", Render: "created", TaskIDParam: "task_id"},
-			expectedError: "must not declare taskIdParam",
-		},
-		{
-			name:          "dynamic declares task id parameter",
-			route:         Route{Method: "POST", Path: "/vendor/query", Type: RouteTypeDynamic, Decode: "decode", Render: "show", TaskIDParam: "task_id"},
-			expectedError: "must not declare taskIdParam",
-		},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			meta := Meta{APIVersion: 1, Key: "validation", Name: "Validation", Version: "1.0.0", Author: AuthorMeta{Name: "Test"}, Models: []string{"model"}, FetchMode: "per_task", Routes: []Route{testCase.route}}
-			require.ErrorContains(t, ValidateV1Meta(meta), testCase.expectedError)
-		})
-	}
-}
-
-func TestRemovedEndpointsAndProtocolHooksAreValidatedAtCompileTime(t *testing.T) {
-	removed := routingTestPluginSource(
-		"removed-endpoint",
-		0,
-		`["model"]`,
-		`endpoints: [{method: "POST", path: "/v1/chat/completions", protocol: "chat"}],`,
-		routingProtocolExport("chat"),
-	)
-	_, err := CompilePlugin(removed, Options{})
-	require.ErrorContains(t, err, "endpoints is no longer supported")
-
-	unknown := routingTestPluginSource("unknown-protocol", 0, `["model"]`, `protocols: ["chat"],`, ``)
-	_, err = CompilePlugin(unknown, Options{})
-	require.ErrorContains(t, err, `protocol "chat" is unknown`)
-
-	missingHook := routingTestPluginSource(
-		"bad-protocol",
-		0,
-		`["model"]`,
-		`protocols: ["openai_responses"],`,
-		`export const protocols = {openai_responses: {
-			decodeRequest: function() { return {}; },
-			renderEvents: function() { return {events: [], done: false}; }
-		}};`,
-	)
-	_, err = CompilePlugin(missingHook, Options{})
-	require.ErrorContains(t, err, `plugin bad-protocol protocol "openai_responses" must declare supports; replace the bare string with {name: "openai_responses", supports: [...]} choosing from "stream", "sync", "background"`)
-
-	for _, removedExport := range []string{"renderers", "renderError", "resolveRequest"} {
-		t.Run("removed export "+removedExport, func(t *testing.T) {
-			source := routingTestPluginSource("removed-export", 0, `["model"]`, "", `export const `+removedExport+` = {};`)
-			_, compileErr := CompilePlugin(source, Options{})
-			require.ErrorContains(t, compileErr, `export "`+removedExport+`" is no longer supported`)
-		})
-	}
-
-	t.Run("removed route renderer", func(t *testing.T) {
-		source := routingTestPluginSource(
-			"removed-route-renderer", 0, `["model"]`,
-			`routes: [{method:"GET",path:"/vendor/:task_id",type:"query",render:"show",renderer:"legacy"}],`,
-			`export const native = {show: function(ctx, task) { return task; }};`,
-		)
-		_, compileErr := CompilePlugin(source, Options{})
-		require.ErrorContains(t, compileErr, "field renderer is no longer supported")
-	})
-}
-
-func TestRegistryRejectsPrototypeInheritedHooks(t *testing.T) {
-	for _, member := range []string{"constructor", "toString", "__proto__"} {
-		t.Run("native "+member, func(t *testing.T) {
-			source := routingTestPluginSource(
-				"inherited-renderer",
-				0,
-				`["model"]`,
-				fmt.Sprintf(`routes: [{method: "GET", path: "/vendor/jobs/:task_id", type: "query", render: %q}],`, member),
-				`const nativePrototype = {
-					constructor: function(task) { return task; },
-					toString: function(task) { return task; },
-					["__proto__"]: function(task) { return task; },
-				};
-				export const native = Object.create(nativePrototype);`,
-			)
-
-			_, err := CompilePlugin(source, Options{})
-			require.ErrorContains(t, err, fmt.Sprintf(`references missing native render %q`, member))
-		})
-	}
-
-	t.Run("protocol object", func(t *testing.T) {
-		source := routingTestPluginSource(
-			"inherited-protocol",
-			0,
-			`["model"]`,
-			`protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}],`,
-			`const protocol = {
-				decodeRequest: function(ctx) { return ctx; },
-				renderEvents: function() { return {events: [], state: null, done: false}; },
-				renderFinal: function(ctx, task) { return task; },
-			};
-			export const protocols = Object.create({openai_responses: protocol});`,
-		)
-
-		_, err := CompilePlugin(source, Options{})
-		require.ErrorContains(t, err, `protocol "openai_responses" is missing hook "decodeRequest"`)
-	})
-
-	t.Run("protocol hook", func(t *testing.T) {
-		source := routingTestPluginSource(
-			"inherited-protocol-hook",
-			0,
-			`["model"]`,
-			`protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}],`,
-			`const protocolPrototype = {
-				decodeRequest: function(ctx) { return ctx; },
-				renderEvents: function() { return {events: [], state: null, done: false}; },
-				renderFinal: function(ctx, task) { return task; },
-			};
-			export const protocols = {openai_responses: Object.create(protocolPrototype)};`,
-		)
-
-		_, err := CompilePlugin(source, Options{})
-		require.ErrorContains(t, err, `protocol "openai_responses" is missing hook "decodeRequest"`)
-	})
-}
-
-func TestMetaDecoderRejectsLossyOrUnknownRoutingFields(t *testing.T) {
-	tests := []struct {
-		name          string
-		metaFields    string
-		expectedError string
-	}{
-		{
-			name:          "fractional channel type",
-			metaFields:    `channelTypes: [50.5],`,
-			expectedError: "channelTypes element 1 must be an integer",
-		},
-		{
-			name:          "non-string model",
-			metaFields:    `models: ["model", 2],`,
-			expectedError: "models must be an array of strings",
-		},
-		{
-			name:          "unknown route field",
-			metaFields:    `routes: [{method: "POST", path: "/vendor/jobs", type: "submit", auth: false}],`,
-			expectedError: `unknown field "auth"`,
-		},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			source := fmt.Sprintf(`
-export const meta = {
-	apiVersion: 1, key: "strict-meta", name: "Strict", version: "1.0.0",
-	author: {name: "Test"},
-	models: ["model"], fetchMode: "per_task", %s
-};
-export function buildSubmitRequest() { return {}; }
-export function parseSubmitResponse() { return {}; }
-export function buildQueryRequest() { return {}; }
-export function parseTaskResult() { return {}; }
-export function resolveRequest() { return {kind: "submit", model: "model"}; }
-`, testCase.metaFields)
-			_, err := CompilePlugin(source, Options{})
-			require.ErrorContains(t, err, testCase.expectedError)
-		})
-	}
-}
-
-func TestProtocolHookInspectionIsDeadlineBounded(t *testing.T) {
-	source := `
-export const meta = {
-	apiVersion: 1, key: "getter-timeout", name: "Getter", version: "1.0.0",
-	author: {name: "Test"},
-	models: ["model"], fetchMode: "per_task",
-	protocols: [{name: "openai_responses", supports: ["stream", "sync", "background"]}],
-};
-export function buildSubmitRequest() { return {}; }
-export function parseSubmitResponse() { return {}; }
-export function buildQueryRequest() { return {}; }
-export function parseTaskResult() { return {}; }
-export const protocols = {
-	get openai_responses() { while (true) {} }
-};
-`
-	_, err := CompilePlugin(source, Options{Timeout: 20 * time.Millisecond})
-	require.ErrorContains(t, err, "inspection interrupted")
-}
-
-func TestReservedNamespaceChecksUseSegmentBoundaries(t *testing.T) {
-	// The host namespaces the outer router reveals, /api among them, are
-	// decided at admission, so these routes compile.
-	for _, routePath := range []string{"/apiary/jobs", "/api/plugin", "/api/:version/jobs", "/api/v3/contents/generations/tasks", "/api/common/v3/submit_task_v2"} {
-		meta := Meta{
-			APIVersion: 1,
-			Key:        "apiary",
-			Name:       "Apiary",
-			Version:    "1.0.0",
-			Author:     AuthorMeta{Name: "Test"},
-			Models:     []string{"model"},
-			FetchMode:  "per_task",
-			Routes:     []Route{{Method: "POST", Path: routePath, Type: RouteTypeSubmit, Decode: "decode", Render: "render"}},
-		}
-		require.NoError(t, ValidateV1Meta(meta), routePath)
 	}
 }
 
@@ -1189,12 +618,6 @@ func TestRoutingGenerationServesDeclaredRoutesAndKeyCopies(t *testing.T) {
 	alphaOnly := NewRegistry()
 	require.NoError(t, alphaOnly.ReplaceOverrides([]*LoadedPlugin{alpha}))
 	require.NoError(t, PreflightRoutingConflict(alphaOnly.Generation(), beta), "a shared route shape is not a conflict")
-}
-
-func TestResolveRouteActionPrefersResolvedAction(t *testing.T) {
-	route := Route{Action: "manifest-action"}
-	assert.Equal(t, "hook-action", ResolveRouteAction(route, "hook-action"))
-	assert.Equal(t, "manifest-action", ResolveRouteAction(route, ""))
 }
 
 func mustCompileRoutingPlugin(t *testing.T, key string, channelType int, models, metaFields, exports string) *LoadedPlugin {

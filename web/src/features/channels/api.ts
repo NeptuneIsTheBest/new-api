@@ -119,6 +119,8 @@ export type TaskPluginOption = {
   optional?: boolean
   /** The request processing stages the plugin runs at. */
   transform_hooks?: string[] | null
+  /** The models and channel types the plugin is made for, if it names them. */
+  scope?: { models?: string[] | null; channelTypes?: number[] | null } | null
   configSchema?: RequestPluginConfigSchema
   /** Requests the plugin offers for trying it out. */
   samples?: RequestPluginSample[] | null
@@ -132,8 +134,22 @@ export type TaskPluginOption = {
   balance?: boolean
   /** The client paths of the plugin's relay routes. */
   relayPaths?: string[] | null
+  /** The relay routes a channel of the plugin can switch on or off. */
+  relayRoutes?: PluginRelayRoute[] | null
   /** A channel of the plugin can serve the Responses WebSocket. */
   responsesWebsocket?: boolean
+}
+
+/** A relay route of a plugin, as a channel switches it. */
+export type PluginRelayRoute = {
+  /** Its name in the channel's plugin_routes. */
+  key: string
+  incoming_path: string
+  upstream_path: string
+  converter?: string
+  models?: string[] | null
+  /** Whether a channel that has not switched it serves it. */
+  default_enabled: boolean
 }
 
 /** The plugins a channel can be bound to: request processing alone is not one. */

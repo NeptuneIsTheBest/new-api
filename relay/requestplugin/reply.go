@@ -35,7 +35,7 @@ import (
 // StageReply is the stage name of reply checks in steps and records.
 const StageReply = jsplugin.ReplyHook
 
-// Parts of the reply check contract (docs/plugin-api/v1.md).
+// Parts of the reply check contract (pluginkit/v1.md).
 const (
 	// replyMask replaces every masked span; plugins cannot choose it.
 	replyMask = "***"
@@ -80,16 +80,20 @@ func Reply(c *gin.Context, format types.RelayFormat, info *relaycommon.RelayInfo
 	}
 	setting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
 	group := requestGroup(c)
+	channelType := 0
+	if info.ChannelMeta != nil {
+		channelType = info.ChannelType
+	}
 	// The attempt's channel and settled group may bring report instances.
 	// Their capture goes below this check, so a report gets what the client
 	// got. A Realtime session reports each response itself.
 	if format != types.RelayFormatOpenAIRealtime {
-		plan.capture(c, group, info.OriginModelName, setting.RequestPlugins)
+		plan.capture(c, group, info.OriginModelName, channelType, setting.RequestPlugins)
 	}
 	if !plan.replies || !replyEndpoint(format, info.RelayMode, c.Request.URL.Path) {
 		return func() {}
 	}
-	instances := plan.scope(StageReply, group, info.OriginModelName, setting.RequestPlugins)
+	instances := plan.scope(StageReply, group, info.OriginModelName, channelType, setting.RequestPlugins)
 	if len(instances) == 0 {
 		return func() {}
 	}

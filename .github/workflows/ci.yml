@@ -36,6 +36,7 @@ jobs:
             go.sum
             relaykit/go.sum
             tokenkit/go.sum
+            pluginkit/go.sum
 
       - name: Create frontend embed placeholder
         run: |
@@ -53,6 +54,10 @@ jobs:
         working-directory: tokenkit
         run: go vet ./...
 
+      - name: Vet pluginkit independently
+        working-directory: pluginkit
+        run: go vet ./...
+
       - name: Build root module
         run: go build ./...
 
@@ -64,7 +69,11 @@ jobs:
         working-directory: tokenkit
         run: go build ./...
 
-      - name: Test root, relaykit, and tokenkit modules
+      - name: Build pluginkit independently
+        working-directory: pluginkit
+        run: go build ./...
+
+      - name: Test root, relaykit, tokenkit, and pluginkit modules
         run: make test
 
   frontend:

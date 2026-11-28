@@ -186,7 +186,7 @@ func TestSSEOutput(t *testing.T) {
 				ClaudeChunkData(c, dto.ClaudeResponse{Type: "content_block_delta"}, `{"delta":"hello"}`)
 				return nil
 			},
-			want: "event: content_block_delta\ndata: {\"delta\":\"hello\"}\n\n\n",
+			want: "event: content_block_delta\ndata: {\"delta\":\"hello\"}\n\n",
 		},
 		{
 			name: "responses_chunk",

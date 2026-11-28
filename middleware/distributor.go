@@ -121,7 +121,7 @@ func Distribute() func(c *gin.Context) {
 				}
 				message := selectErr.Message
 				if selectErr.NoAvailableChannel {
-					message = noAvailableChannelMessage(c, usingGroup, modelRequest.Model)
+					message = noAvailableChannelMessage(c, usingGroup, modelRequest.Model, selectErr.MessageID)
 				} else if selectErr.MessageID != "" {
 					message = i18n.T(c, selectErr.MessageID, selectErr.Params)
 				}
@@ -138,10 +138,9 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-// noAvailableChannelMessage explains a 503 for a task-plugin-claimed model.
-// The response tells the caller the model is plugin-claimed without naming the
-// plugin; the candidate plugin keys go to the server log under the request id.
-func noAvailableChannelMessage(c *gin.Context, group, modelName string) string {
+// noAvailableChannelMessage logs candidate plugin keys under the request ID.
+// A 503 also tells the caller when a task plugin claims the model.
+func noAvailableChannelMessage(c *gin.Context, group, modelName, messageID string) string {
 	value, exists := c.Get(jsplugin.ContextKeyPinnedPlugin)
 	pinned, ok := value.(jsplugin.PinnedPlugin)
 	if exists && ok && pinned.Plugin != nil {
@@ -155,9 +154,11 @@ func noAvailableChannelMessage(c *gin.Context, group, modelName string) string {
 			}
 		}
 		logger.LogWarn(c, common.LogText("task_plugin subsystem=distribution event=no_available_channel group=%q model=%q plugins=%q reason=no_eligible_channel", group, modelName, strings.Join(keys, ",")))
-		return i18n.T(c, i18n.MsgDistributorNoAvailableChannelTaskPlugin, map[string]any{"Group": group, "Model": modelName})
+		if messageID == i18n.MsgDistributorNoAvailableChannel {
+			messageID = i18n.MsgDistributorNoAvailableChannelTaskPlugin
+		}
 	}
-	return i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": group, "Model": modelName})
+	return i18n.T(c, messageID, map[string]any{"Group": group, "Model": modelName})
 }
 
 func channelMatchesExpectedTaskPlugin(c *gin.Context, channel *model.Channel, expected string) bool {
@@ -184,8 +185,7 @@ func channelMatchesExpectedTaskPlugin(c *gin.Context, channel *model.Channel, ex
 	if !exists || !ok || pinned.Generation == nil || pinned.Plugin == nil || pinned.Plugin.Meta.Key != expected {
 		return false
 	}
-	plugin, ok := pinned.Generation.GetByChannelType(channel.Type)
-	return ok && plugin == pinned.Plugin
+	return slices.Contains(pinned.Plugin.Meta.ChannelTypes, channel.Type)
 }
 
 // pinnedCandidatePlugins returns the plugins a pinned shared host endpoint, or
@@ -239,18 +239,21 @@ func pinnedEndpointCandidateForChannel(c *gin.Context, channel *model.Channel, e
 		if candidate.Meta.Key == expected {
 			expectedOwned = true
 		}
+		// A New API channel may bind several candidates, and a built-in
+		// channel type may be declared by several. The first candidate in
+		// generation order that the channel serves executes, so the billing
+		// provider depends only on the channel and the request, never on
+		// which channels an earlier retry attempt happened to try.
+		if selected >= 0 {
+			continue
+		}
 		if channel.Type == constant.ChannelTypeTaskPlugin || channel.Type == constant.ChannelTypeNewAPI {
-			// A New API channel may bind several candidates. The first bound
-			// candidate in generation order executes, so the billing provider
-			// depends only on the channel and the request, never on which
-			// channels an earlier retry attempt happened to try.
-			if selected < 0 && setting.BindsTaskPlugin(candidate.Meta.Key) {
+			if setting.BindsTaskPlugin(candidate.Meta.Key) {
 				selected = index
 			}
 			continue
 		}
-		plugin, indexed := generation.GetByChannelType(channel.Type)
-		if indexed && plugin == candidate {
+		if slices.Contains(candidate.Meta.ChannelTypes, channel.Type) {
 			selected = index
 		}
 	}
@@ -579,7 +582,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		generation := jsplugin.DefaultRegistry.Generation()
 		if plugin, ok := generation.Get(channel.GetSetting().TaskPluginKey); ok && plugin.Meta.HasProviderPart() {
 			providerPlugin = jsplugin.PinnedPlugin{Generation: generation, Plugin: plugin}
-			otherSettings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(otherSettings.PluginConfig))
+			otherSettings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(otherSettings.PluginConfig), otherSettings.PluginRoutes)
 		}
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, otherSettings)

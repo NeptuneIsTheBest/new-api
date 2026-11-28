@@ -133,10 +133,8 @@ type TaskPrivateData struct {
 	PluginState json.RawMessage `json:"plugin_state,omitempty"`
 	// PollFailures counts consecutive unrecognized or transient poll outcomes.
 	PollFailures int `json:"poll_failures,omitempty"`
-	// ResultDiscarded marks an immediate terminal result whose submit route
-	// declared retainResult: false. The upstream snapshot was never written
-	// and every retrieval surface treats the task as not found. The zero
-	// value keeps historical rows retained and retrievable.
+	// ResultDiscarded marks an immediate result delivered inline by openai_image
+	// or a route with retainResult: false. Retrieval treats the task as missing.
 	ResultDiscarded bool `json:"result_discarded,omitempty"`
 	// CredentialAccount is the account of the plugin credential that
 	// submitted the task, which polls the task and fetches its content.
@@ -239,6 +237,11 @@ func (p *TaskPrivateData) Scan(val any) error {
 }
 
 func (p TaskPrivateData) Value() (driver.Value, error) {
+	if p.ResultDiscarded {
+		// A plugin can return the inline image itself as the result URL.
+		// The submit presenter and report still have the in-memory result.
+		p.ResultURL = ""
+	}
 	if p.Key == "" && p.UpstreamTaskID == "" && p.ResultURL == "" &&
 		p.Execution == nil && p.BillingSource == "" && p.SubscriptionId == 0 &&
 		p.TokenId == 0 && p.NodeName == "" && p.BillingContext == nil &&
@@ -398,6 +401,7 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 }
 
 // unfinishedSyncTasks keeps polling queries eligible for the status index.
+// Upstream progress can reach 100% before the task enters a terminal state.
 // UNKNOWN and empty statuses preserve legacy tasks; add new pending states here
 // so existence checks, polling batches, and timeout cleanup stay in sync.
 func unfinishedSyncTasks(db *gorm.DB) *gorm.DB {
@@ -408,7 +412,7 @@ func unfinishedSyncTasks(db *gorm.DB) *gorm.DB {
 		TaskStatusInProgress,
 		TaskStatusUnknown,
 		"",
-	}).Where("progress != ?", "100%")
+	})
 }
 
 func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {

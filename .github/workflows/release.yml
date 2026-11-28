@@ -103,6 +103,7 @@ jobs:
             go.sum
             relaykit/go.sum
             tokenkit/go.sum
+            pluginkit/go.sum
 
       - name: Build backend
         run: |

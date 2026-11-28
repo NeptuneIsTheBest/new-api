@@ -29,7 +29,7 @@ import (
 )
 
 // Limits of the report hooks, part of the published plugin contract
-// (docs/plugin-api/v1.md).
+// (pluginkit/v1.md).
 const (
 	// maxReportResponseBytes is how much of the response a record keeps.
 	maxReportResponseBytes = 1 << 20
@@ -105,8 +105,8 @@ func (w *responseCapture) Unwrap() http.ResponseWriter {
 // channel attempt, which adds the channel's instances and those of a group
 // the channel selection settled. A capture already started stays. On a
 // Responses WebSocket the capture keeps the events the session sends.
-func (p *Plan) capture(c *gin.Context, group, model string, bound []string) {
-	if !p.reports || p.response != nil || len(p.scope(jsplugin.ReportHook, group, model, bound)) == 0 {
+func (p *Plan) capture(c *gin.Context, group, model string, channelType int, bound []string) {
+	if !p.reports || p.response != nil || len(p.scope(jsplugin.ReportHook, group, model, channelType, bound)) == 0 {
 		return
 	}
 	if p.socket {
@@ -117,7 +117,7 @@ func (p *Plan) capture(c *gin.Context, group, model string, bound []string) {
 	c.Writer = p.response
 }
 
-// The record a report hook receives; docs/plugin-api/v1.md describes it.
+// The record a report hook receives; pluginkit/v1.md describes it.
 type reportRecord struct {
 	RequestID       string                            `json:"requestId"`
 	User            reportUser                        `json:"user"`
@@ -238,7 +238,7 @@ func Report(c *gin.Context, format types.RelayFormat, info *relaycommon.RelayInf
 		call, pluginRecord = attemptCall(c, info), info.RequestPluginRecord
 	}
 	var targets []reportTarget
-	for _, instance := range plan.scope(jsplugin.ReportHook, call.Group, call.Model, call.Bound) {
+	for _, instance := range plan.scope(jsplugin.ReportHook, call.Group, call.Model, call.channelType(), call.Bound) {
 		if plugin := plan.plugins[instance.Plugin]; plugin != nil && slices.Contains(plugin.TransformHooks(), jsplugin.ReportHook) {
 			targets = append(targets, reportTarget{plugin: plugin, instance: instance})
 		}

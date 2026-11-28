@@ -18,7 +18,7 @@ import (
 )
 
 // Limits of a task report, part of the published plugin contract
-// (docs/plugin-api/v1.md).
+// (pluginkit/v1.md).
 const (
 	// maxTaskRequestBytes is the largest request a task keeps for its report.
 	maxTaskRequestBytes = 64 << 10
@@ -63,7 +63,7 @@ func TaskReport(c *gin.Context, info *relaycommon.RelayInfo) *model.TaskRequestP
 	}
 	call := attemptCall(c, info)
 	var ids []string
-	for _, instance := range plan.scope(jsplugin.ReportHook, call.Group, call.Model, call.Bound) {
+	for _, instance := range plan.scope(jsplugin.ReportHook, call.Group, call.Model, call.channelType(), call.Bound) {
 		if plan.plugins[instance.Plugin] != nil {
 			ids = append(ids, instance.ID)
 		}
